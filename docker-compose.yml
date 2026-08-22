@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cumplenow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cumplenow_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-cumplenow}
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile.dev
+    environment:
+      DATABASE_URL: postgresql://cumplenow:cumplenow_dev@db:5432/cumplenow?schema=public
+      API_PORT: 4000
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-4000}:4000"
+    volumes:
+      - ./apps/api:/workspace/apps/api
+      - /workspace/apps/api/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile.dev
+    environment:
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:4000/api
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    volumes:
+      - .:/workspace
+      - /workspace/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+volumes:
+  postgres-data:
+    name: cumplenow-stable-postgres-data

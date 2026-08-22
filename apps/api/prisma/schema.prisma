@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  WORKER
+  BUSINESS
+  ADMIN
+}
+
+enum ShiftStatus {
+  PUBLISHED
+  ASSIGNED
+  CHECKED_IN
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id           String        @id @default(cuid())
+  email        String        @unique
+  passwordHash String
+  salt         String
+  role         UserRole
+  name         String
+  identifier   String        @unique
+  sessions     AuthSession[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model AuthSession {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Shift {
+  id        String      @id @default(cuid())
+  title     String
+  startsAt  DateTime
+  endsAt    DateTime
+  payCents  Int
+  status    ShiftStatus @default(PUBLISHED)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+}
