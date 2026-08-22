@@ -3,7 +3,9 @@ import 'marketplace_data.dart' as data;
 import '../discovery/discovery_models.dart';
 
 abstract interface class WorkerMarketplaceRepository {
+  bool get usesLiveFeed;
   Future<List<Shift>> availableShifts();
+  Stream<List<Shift>> watchAvailableShifts();
   Future<Shift> acceptShift(String shiftId);
   Future<List<PaymentRecord>> walletMovements();
   Future<Set<String>> savedShiftIds();
@@ -36,7 +38,15 @@ class DemoWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
   };
 
   @override
+  bool get usesLiveFeed => false;
+
+  @override
   Future<List<Shift>> availableShifts() async => List.unmodifiable(_shifts);
+
+  @override
+  Stream<List<Shift>> watchAvailableShifts() async* {
+    yield List.unmodifiable(_shifts);
+  }
 
   @override
   Future<Shift> acceptShift(String shiftId) async {

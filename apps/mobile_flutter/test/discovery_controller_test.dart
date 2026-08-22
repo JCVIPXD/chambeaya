@@ -86,6 +86,28 @@ void main() {
     expect(controller.state.selectedShiftId, 'shift-cafe-cielo');
   });
 
+  test('live marketplace updates add shifts and preserve the selection', () {
+    final controller = DiscoveryController(shifts: availableShifts);
+    controller.selectShift('shift-cafe-cielo');
+    final liveShift = Shift(
+      id: 'shift-live',
+      title: 'Anfitrión de evento',
+      company: 'Empresa en vivo',
+      schedule: 'Lun 24 ago · 18:00 – 00:00',
+      workerPayCents: 12000,
+      match: 90,
+      urgent: false,
+      industry: ShiftIndustry.events,
+      location: 'Barranco',
+      dateScope: ShiftDateScope.any,
+    );
+
+    controller.replaceShifts([liveShift, ...availableShifts]);
+
+    expect(controller.shifts, contains(liveShift));
+    expect(controller.state.selectedShiftId, 'shift-cafe-cielo');
+  });
+
   test(
     'unknown applications expose a concise error without changing applications',
     () {

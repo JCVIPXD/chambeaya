@@ -4,8 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { LocalAuthService } from '../src/modules/auth/auth.service.js';
 import type { BusinessOperations } from '../src/modules/business/business.service.js';
+import { MarketplaceShiftEvents } from '../src/modules/marketplace/marketplace.events.js';
 
-async function businessContext(overrides: Partial<BusinessOperations> = {}) {
+async function businessContext(
+  overrides: Partial<BusinessOperations> = {},
+  marketplaceEvents?: MarketplaceShiftEvents,
+) {
   const authService = new LocalAuthService();
   const session = await authService.register({
     role: 'BUSINESS',
@@ -16,7 +20,7 @@ async function businessContext(overrides: Partial<BusinessOperations> = {}) {
   });
   const businessService = overrides as BusinessOperations;
   return {
-    app: createApp({ authService, businessService }),
+    app: createApp({ authService, businessService, marketplaceEvents }),
     authorization: `Bearer ${session.token}`,
   };
 }
@@ -50,6 +54,29 @@ describe('business CRUD routes', () => {
     expect(createShift).toHaveBeenCalledOnce();
     expect(updateShift).toHaveBeenCalledOnce();
     expect(deleteShift).toHaveBeenCalledOnce();
+  });
+
+  it('notifies the worker marketplace after a company changes its shifts', async () => {
+    const createShift = vi.fn(async (_session, input) => ({ id: 'shift-live', ...input }));
+    const updateShift = vi.fn(async (_session, id, input) => ({ id, ...input }));
+    const deleteShift = vi.fn(async () => undefined);
+    const events = new MarketplaceShiftEvents();
+    const listener = vi.fn();
+    events.subscribe(listener);
+    const { app, authorization } = await businessContext(
+      { createShift, updateShift, deleteShift },
+      events,
+    );
+    const valid = {
+      title: 'Anfitrión de evento', location: 'Barranco', startsAt: '2026-08-24T18:00:00.000Z',
+      endsAt: '2026-08-25T00:00:00.000Z', payCents: 12000, requiredWorkers: 2,
+    };
+
+    await request(app).post('/api/business/shifts').set('Authorization', authorization).send(valid);
+    await request(app).patch('/api/business/shifts/shift-live').set('Authorization', authorization).send({ rescueActive: true });
+    await request(app).delete('/api/business/shifts/shift-live').set('Authorization', authorization);
+
+    expect(listener).toHaveBeenCalledTimes(3);
   });
 
   it('supports worker and company CRUD operations', async () => {

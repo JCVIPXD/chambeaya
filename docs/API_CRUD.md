@@ -40,6 +40,20 @@ Ejemplo de creación:
 
 Estados: `PUBLISHED`, `ASSIGNED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`.
 
+Cada creación, edición o eliminación de un turno notifica inmediatamente al feed del marketplace. Solo los turnos `PUBLISHED` que todavía no finalizaron aparecen para trabajadores.
+
+## Marketplace para trabajadores
+
+- `GET /api/shifts`: devuelve los turnos publicados desde PostgreSQL.
+- `GET /api/shifts/events`: stream público de Server-Sent Events (SSE).
+
+El stream envía eventos `shifts` con una fotografía completa de las oportunidades vigentes. Flutter mantiene la conexión abierta, actualiza la lista sin recargar y vuelve a conectarse automáticamente si se interrumpe la red.
+
+```text
+event: shifts
+data: [{"id":"...","role":"Mozo de salón",...}]
+```
+
 ## Trabajadores del directorio
 
 - `GET /api/business/workers`

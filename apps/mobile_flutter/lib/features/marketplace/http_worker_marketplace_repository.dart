@@ -18,6 +18,9 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
   final Map<String, ApplicationState> _localApplicationStates = {};
 
   @override
+  bool get usesLiveFeed => true;
+
+  @override
   Future<List<Shift>> availableShifts() async {
     final response = await _client.get(_baseUri.resolve('/api/shifts'));
     if (response.statusCode != 200) {
@@ -27,6 +30,68 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
     return values
         .map((value) => _shiftFromJson(value as Map<String, dynamic>))
         .toList();
+  }
+
+  @override
+  Stream<List<Shift>> watchAvailableShifts() async* {
+    String? lastSnapshot;
+    while (true) {
+      try {
+        final request = http.Request(
+          'GET',
+          _baseUri.resolve('/api/shifts/events'),
+        )..headers['Accept'] = 'text/event-stream';
+        final response = await _client.send(request);
+        if (response.statusCode != 200) {
+          throw StateError('No se pudo abrir el feed de turnos');
+        }
+
+        var buffer = '';
+        await for (final chunk in response.stream.transform(utf8.decoder)) {
+          buffer += chunk.replaceAll('\r\n', '\n');
+          var boundary = buffer.indexOf('\n\n');
+          while (boundary >= 0) {
+            final event = buffer.substring(0, boundary);
+            buffer = buffer.substring(boundary + 2);
+            final data = event
+                .split('\n')
+                .where((line) => line.startsWith('data:'))
+                .map((line) => line.substring(5).trimLeft())
+                .join('\n');
+            if (data.isNotEmpty) {
+              final values = jsonDecode(data);
+              if (values is List<dynamic>) {
+                final shifts = values
+                    .map(
+                      (value) => _shiftFromJson(
+                        Map<String, dynamic>.from(value as Map),
+                      ),
+                    )
+                    .toList();
+                final signature = _snapshotSignature(shifts);
+                if (signature != lastSnapshot) {
+                  lastSnapshot = signature;
+                  yield shifts;
+                }
+              }
+            }
+            boundary = buffer.indexOf('\n\n');
+          }
+        }
+      } catch (_) {
+        try {
+          final shifts = await availableShifts();
+          final signature = _snapshotSignature(shifts);
+          if (signature != lastSnapshot) {
+            lastSnapshot = signature;
+            yield shifts;
+          }
+        } catch (_) {
+          // La siguiente reconexión recuperará el feed cuando vuelva la API.
+        }
+      }
+      await Future<void>.delayed(const Duration(seconds: 2));
+    }
   }
 
   @override
@@ -87,7 +152,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       company: json['businessName'] as String,
       schedule: json['dateLabel'] as String,
       workerPayCents: (json['workerPayCents'] as num).toInt(),
-      match: 90,
+      match: (json['matchScore'] as num?)?.toInt() ?? 90,
       urgent: json['urgent'] == true,
       industry: _industryFromApi(json['industry'] as String?),
       location: json['location'] as String,
@@ -105,4 +170,20 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
     'RETAIL' => ShiftIndustry.retail,
     _ => ShiftIndustry.events,
   };
+
+  String _snapshotSignature(List<Shift> shifts) => shifts
+      .map(
+        (shift) => [
+          shift.id,
+          shift.title,
+          shift.company,
+          shift.schedule,
+          shift.workerPayCents,
+          shift.match,
+          shift.urgent,
+          shift.location,
+          shift.state,
+        ].join(':'),
+      )
+      .join('|');
 }

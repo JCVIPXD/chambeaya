@@ -80,3 +80,59 @@ class ClientDemoBanner extends StatelessWidget {
     ),
   );
 }
+
+class LiveMarketplaceBanner extends StatelessWidget {
+  const LiveMarketplaceBanner({super.key});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border.all(color: AppColors.teal.withValues(alpha: .28)),
+      borderRadius: BorderRadius.circular(14),
+    ),
+    child: const Row(
+      children: [
+        _LivePulse(),
+        SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Turnos en tiempo real',
+                style: TextStyle(
+                  color: AppColors.navy,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              SizedBox(height: 2),
+              Text(
+                'Las nuevas publicaciones aparecen automáticamente.',
+                style: TextStyle(color: AppColors.muted, fontSize: 9),
+              ),
+            ],
+          ),
+        ),
+        Icon(Icons.wifi_rounded, color: AppColors.tealDark, size: 19),
+      ],
+    ),
+  );
+}
+
+class _LivePulse extends StatelessWidget {
+  const _LivePulse();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 34,
+    height: 34,
+    decoration: BoxDecoration(
+      color: AppColors.tealSoft,
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: const Icon(Icons.bolt_rounded, color: AppColors.tealDark, size: 19),
+  );
+}

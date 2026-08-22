@@ -144,6 +144,7 @@ function sendError(response: Response, error: unknown) {
 export function createBusinessRouter(
   authService: AuthService = new DatabaseAuthService(),
   operations: BusinessOperations = new DatabaseBusinessService(),
+  onShiftsChanged: () => void = () => {},
 ) {
   const router = Router();
 
@@ -151,10 +152,22 @@ export function createBusinessRouter(
   router.patch('/company', route(authService, async (request, response, session) => { response.json(await operations.updateCompany(session, companySchema.parse(request.body))); }));
 
   router.get('/shifts', route(authService, async (_request, response, session) => { response.json(await operations.listShifts(session)); }));
-  router.post('/shifts', route(authService, async (request, response, session) => { response.status(201).json(await operations.createShift(session, shiftSchema.parse(request.body))); }));
+  router.post('/shifts', route(authService, async (request, response, session) => {
+    const shift = await operations.createShift(session, shiftSchema.parse(request.body));
+    onShiftsChanged();
+    response.status(201).json(shift);
+  }));
   router.get('/shifts/:id', route(authService, async (request, response, session) => { response.json(await operations.getShift(session, param(request, 'id'))); }));
-  router.patch('/shifts/:id', route(authService, async (request, response, session) => { response.json(await operations.updateShift(session, param(request, 'id'), shiftUpdateSchema.parse(request.body))); }));
-  router.delete('/shifts/:id', route(authService, async (request, response, session) => { await operations.deleteShift(session, param(request, 'id')); response.status(204).send(); }));
+  router.patch('/shifts/:id', route(authService, async (request, response, session) => {
+    const shift = await operations.updateShift(session, param(request, 'id'), shiftUpdateSchema.parse(request.body));
+    onShiftsChanged();
+    response.json(shift);
+  }));
+  router.delete('/shifts/:id', route(authService, async (request, response, session) => {
+    await operations.deleteShift(session, param(request, 'id'));
+    onShiftsChanged();
+    response.status(204).send();
+  }));
 
   router.get('/workers', route(authService, async (_request, response, session) => { response.json(await operations.listWorkers(session)); }));
   router.post('/workers', route(authService, async (request, response, session) => { response.status(201).json(await operations.createWorker(session, workerSchema.parse(request.body))); }));

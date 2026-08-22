@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:cumple_now_mobile/features/discovery/worker_discovery_page.dart';
+import 'package:cumple_now_mobile/features/marketplace/marketplace_data.dart';
 import 'package:cumple_now_mobile/features/marketplace/marketplace_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -141,4 +144,52 @@ void main() {
 
     expect(find.text('Filtros de búsqueda'), findsOneWidget);
   });
+
+  testWidgets('a published shift appears without reloading discovery', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final repository = _LiveRepository();
+    addTearDown(repository.close);
+
+    await tester.pumpWidget(
+      MaterialApp(home: WorkerDiscoveryPage(repository: repository)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Anfitrión de evento'), findsNothing);
+
+    repository.publish([
+      const Shift(
+        id: 'shift-live',
+        title: 'Anfitrión de evento',
+        company: 'Empresa en vivo',
+        schedule: 'Lun 24 ago · 18:00 – 00:00',
+        workerPayCents: 12000,
+        match: 99,
+        urgent: true,
+        industry: ShiftIndustry.events,
+        location: 'Barranco',
+        dateScope: ShiftDateScope.any,
+      ),
+      ...availableShifts,
+    ]);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Anfitrión de evento'), findsOneWidget);
+    expect(find.text('3 resultados'), findsNothing);
+    expect(find.text('4 resultados'), findsOneWidget);
+  });
+}
+
+class _LiveRepository extends DemoWorkerMarketplaceRepository {
+  final _updates = StreamController<List<Shift>>.broadcast();
+
+  @override
+  Stream<List<Shift>> watchAvailableShifts() => _updates.stream;
+
+  void publish(List<Shift> shifts) => _updates.add(shifts);
+  Future<void> close() => _updates.close();
 }

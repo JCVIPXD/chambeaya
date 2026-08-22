@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../core/responsive/app_breakpoints.dart';
@@ -30,6 +32,7 @@ class WorkerDiscoveryPage extends StatefulWidget {
 class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
   late Future<_DiscoveryBootstrap> _loading;
   DiscoveryController? _controller;
+  StreamSubscription<List<Shift>>? _shiftSubscription;
   ClientDemoScenario _scenario = ClientDemoScenario.normal;
 
   @override
@@ -51,6 +54,7 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
 
   @override
   void dispose() {
+    _shiftSubscription?.cancel();
     _controller?.dispose();
     super.dispose();
   }
@@ -70,17 +74,23 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
           );
         }
         final data = snapshot.data!;
-        _controller ??= DiscoveryController(
-          shifts: data.shifts,
-          repository: widget.repository,
-          savedShiftIds: data.savedShiftIds,
-          applicationStates: data.applicationStates,
-          onApplicationChanged: widget.onApplicationChanged,
-        );
+        if (_controller == null) {
+          _controller = DiscoveryController(
+            shifts: data.shifts,
+            repository: widget.repository,
+            savedShiftIds: data.savedShiftIds,
+            applicationStates: data.applicationStates,
+            onApplicationChanged: widget.onApplicationChanged,
+          );
+          _shiftSubscription = widget.repository.watchAvailableShifts().listen(
+            (shifts) => _controller?.replaceShifts(shifts),
+          );
+        }
         return AnimatedBuilder(
           animation: _controller!,
           builder: (context, _) => _DiscoveryContent(
             controller: _controller!,
+            usesLiveFeed: widget.repository.usesLiveFeed,
             scenario: _scenario,
             onScenarioChanged: (value) => setState(() => _scenario = value),
           ),
@@ -105,11 +115,13 @@ class _DiscoveryBootstrap {
 class _DiscoveryContent extends StatelessWidget {
   const _DiscoveryContent({
     required this.controller,
+    required this.usesLiveFeed,
     required this.scenario,
     required this.onScenarioChanged,
   });
 
   final DiscoveryController controller;
+  final bool usesLiveFeed;
   final ClientDemoScenario scenario;
   final ValueChanged<ClientDemoScenario> onScenarioChanged;
 
@@ -139,6 +151,7 @@ class _DiscoveryContent extends StatelessWidget {
                   width: 438,
                   child: _ResultsColumn(
                     controller: controller,
+                    usesLiveFeed: usesLiveFeed,
                     shifts: shifts,
                     scenario: scenario,
                     onScenarioChanged: onScenarioChanged,
@@ -155,6 +168,7 @@ class _DiscoveryContent extends StatelessWidget {
     }
     return _ResultsColumn(
       controller: controller,
+      usesLiveFeed: usesLiveFeed,
       shifts: shifts,
       scenario: scenario,
       onScenarioChanged: onScenarioChanged,
@@ -259,6 +273,7 @@ class _TopBar extends StatelessWidget {
 class _ResultsColumn extends StatelessWidget {
   const _ResultsColumn({
     required this.controller,
+    required this.usesLiveFeed,
     required this.shifts,
     required this.scenario,
     required this.onScenarioChanged,
@@ -266,6 +281,7 @@ class _ResultsColumn extends StatelessWidget {
     this.grid = false,
   });
   final DiscoveryController controller;
+  final bool usesLiveFeed;
   final List<Shift> shifts;
   final ClientDemoScenario scenario;
   final ValueChanged<ClientDemoScenario> onScenarioChanged;
@@ -313,10 +329,13 @@ class _ResultsColumn extends StatelessWidget {
         ),
         const SizedBox(height: 14),
       ],
-      ClientDemoBanner(
-        scenario: scenario,
-        onScenarioChanged: onScenarioChanged,
-      ),
+      if (usesLiveFeed)
+        const LiveMarketplaceBanner()
+      else
+        ClientDemoBanner(
+          scenario: scenario,
+          onScenarioChanged: onScenarioChanged,
+        ),
       const SizedBox(height: 14),
       JobFilterControls(controller: controller),
       if (controller.state.errorMessage case final message?) ...[

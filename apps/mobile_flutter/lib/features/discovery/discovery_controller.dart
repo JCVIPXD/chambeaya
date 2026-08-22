@@ -18,7 +18,7 @@ class DiscoveryController extends ChangeNotifier {
          applicationStates: applicationStates,
        );
 
-  final List<Shift> _shifts;
+  List<Shift> _shifts;
   final WorkerMarketplaceRepository? repository;
   final VoidCallback? onApplicationChanged;
   DiscoveryState _state;
@@ -47,6 +47,21 @@ class DiscoveryController extends ChangeNotifier {
   void setSortOrder(ShiftSortOrder value) =>
       _setFilter(_filter(sortOrder: value));
   void clearFilters() => _setFilter(const ShiftSearchFilter());
+
+  void replaceShifts(List<Shift> shifts) {
+    final next = List<Shift>.unmodifiable(shifts);
+    final selectedId = _state.selectedShiftId;
+    final nextSelectedId =
+        selectedId != null && next.any((shift) => shift.id == selectedId)
+        ? selectedId
+        : next.firstOrNull?.id;
+    _shifts = next;
+    _replace(
+      selectedShiftId: nextSelectedId,
+      replaceSelectedShiftId: true,
+      errorMessage: null,
+    );
+  }
 
   void selectShift(String id) {
     if (!_shifts.any((shift) => shift.id == id)) return;
@@ -118,13 +133,16 @@ class DiscoveryController extends ChangeNotifier {
   void _replace({
     ShiftSearchFilter? filter,
     String? selectedShiftId,
+    bool replaceSelectedShiftId = false,
     Set<String>? savedShiftIds,
     Map<String, ApplicationState>? applicationStates,
     String? errorMessage,
   }) {
     _state = DiscoveryState(
       filter: filter ?? _state.filter,
-      selectedShiftId: selectedShiftId ?? _state.selectedShiftId,
+      selectedShiftId: replaceSelectedShiftId
+          ? selectedShiftId
+          : selectedShiftId ?? _state.selectedShiftId,
       savedShiftIds: savedShiftIds ?? _state.savedShiftIds,
       applicationStates: applicationStates ?? _state.applicationStates,
       errorMessage: errorMessage,

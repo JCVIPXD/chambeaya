@@ -19,7 +19,7 @@ export interface ShiftSearchFilter {
   recommendedOnly?: boolean;
 }
 
-export function filterShifts(shifts: readonly SearchableShift[], filter: ShiftSearchFilter) {
+export function filterShifts<T extends SearchableShift>(shifts: readonly T[], filter: ShiftSearchFilter): T[] {
   const query = filter.query?.trim().toLocaleLowerCase();
   return [...shifts]
       .filter((shift) => !query || [shift.role, shift.businessName, shift.location, shift.industry].join(' ').toLocaleLowerCase().includes(query))
