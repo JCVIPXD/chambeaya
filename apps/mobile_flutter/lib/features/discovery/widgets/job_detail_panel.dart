@@ -24,223 +24,694 @@ class JobDetailPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final applied = applicationState != ApplicationState.notApplied;
-    return Container(
-      color: Colors.white,
+    return ColoredBox(
+      color: AppColors.surfaceMuted,
       child: Column(
         children: [
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(28, 28, 28, 12),
-              children: [
-                const Text(
-                  'Detalle del turno',
-                  style: TextStyle(
-                    color: AppColors.muted,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 12,
+            child: LayoutBuilder(
+              builder: (context, constraints) => ListView(
+                padding: EdgeInsets.fromLTRB(
+                  constraints.maxWidth > 900 ? 34 : 24,
+                  24,
+                  constraints.maxWidth > 900 ? 34 : 24,
+                  20,
+                ),
+                children: [
+                  _Hero(
+                    shift: shift,
+                    saved: saved,
+                    onToggleSaved: onToggleSaved,
                   ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            shift.title,
-                            style: const TextStyle(
-                              color: AppColors.navy,
-                              fontSize: 26,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            shift.company,
-                            style: const TextStyle(
-                              color: AppColors.navy,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          const Row(
-                            children: [
-                              Icon(
-                                Icons.verified_rounded,
-                                color: AppColors.teal,
-                                size: 17,
-                              ),
-                              SizedBox(width: 5),
-                              Text(
-                                'Empresa verificada',
-                                style: TextStyle(
-                                  color: AppColors.muted,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    Semantics(
-                      label: saved ? 'Empleo guardado' : 'Guardar empleo',
-                      button: true,
-                      child: IconButton.outlined(
-                        onPressed: onToggleSaved,
-                        tooltip: saved ? 'Empleo guardado' : 'Guardar empleo',
-                        icon: Icon(
-                          saved
-                              ? Icons.bookmark_rounded
-                              : Icons.bookmark_border_rounded,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 22),
-                Wrap(
-                  spacing: 10,
-                  runSpacing: 10,
-                  children: [
-                    _Fact(
-                      icon: Icons.payments_outlined,
-                      label: 'Pago',
-                      value: formatPenCents(shift.workerPayCents),
-                    ),
-                    _Fact(
-                      icon: Icons.schedule_outlined,
-                      label: 'Horario',
-                      value: shift.schedule,
-                    ),
-                    _Fact(
-                      icon: Icons.location_on_outlined,
-                      label: 'Ubicación',
-                      value: shift.location,
-                    ),
-                    _Fact(
-                      icon: Icons.auto_awesome_outlined,
-                      label: 'Compatibilidad',
-                      value: '${shift.match}%',
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 26),
-                Text(
-                  'Sobre este trabajo',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  'Buscamos una persona responsable y orientada al servicio para apoyar al equipo durante este turno. La empresa confirma el horario, las tareas y el pago antes de aceptar.',
-                  style: TextStyle(
-                    color: AppColors.muted,
-                    height: 1.55,
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 22),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: AppColors.tealSoft,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.shield_outlined, color: AppColors.teal),
-                      SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          'Tu información se comparte con esta empresa solo al confirmar la postulación.',
-                          style: TextStyle(
-                            color: AppColors.navy,
-                            fontSize: 12,
-                            height: 1.4,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-              ],
-            ),
-          ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(28, 10, 28, 18),
-              child: Semantics(
-                label: applied ? 'Postulación enviada' : 'Postular ahora',
-                button: !applied,
-                child: SizedBox(
-                  width: double.infinity,
-                  height: 52,
-                  child: FilledButton.icon(
-                    onPressed: applied ? null : onApply,
-                    icon: Icon(
-                      applied
-                          ? Icons.check_circle_outline_rounded
-                          : Icons.send_outlined,
-                    ),
-                    label: Text(
-                      applied ? 'Postulación enviada' : 'Postular ahora',
-                    ),
-                  ),
-                ),
+                  const SizedBox(height: 18),
+                  _FactsGrid(shift: shift),
+                  const SizedBox(height: 18),
+                  _DetailContent(shift: shift),
+                ],
               ),
             ),
           ),
+          _ApplyBar(applied: applied, onApply: onApply),
         ],
       ),
     );
   }
 }
 
-class _Fact extends StatelessWidget {
-  const _Fact({required this.icon, required this.label, required this.value});
-  final IconData icon;
-  final String label;
-  final String value;
+class _Hero extends StatelessWidget {
+  const _Hero({
+    required this.shift,
+    required this.saved,
+    required this.onToggleSaved,
+  });
+
+  final Shift shift;
+  final bool saved;
+  final VoidCallback onToggleSaved;
 
   @override
   Widget build(BuildContext context) => Container(
-    width: 170,
-    padding: const EdgeInsets.all(13),
+    padding: const EdgeInsets.all(22),
     decoration: BoxDecoration(
-      color: AppColors.background,
-      borderRadius: BorderRadius.circular(13),
+      gradient: const LinearGradient(
+        colors: [AppColors.navy, Color(0xFF29466F)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+      borderRadius: BorderRadius.circular(24),
+      boxShadow: const [
+        BoxShadow(
+          color: AppColors.shadow,
+          blurRadius: 22,
+          offset: Offset(0, 9),
+        ),
+      ],
     ),
-    child: Row(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(icon, color: AppColors.teal, size: 21),
-        const SizedBox(width: 9),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: const TextStyle(color: AppColors.muted, fontSize: 10),
+        Row(
+          children: [
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: .12),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Text(
+                    'Detalle del turno',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Color(0xFFD8E2F0),
+                      fontSize: 9,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: .7,
+                    ),
+                  ),
+                ),
               ),
-              Text(
-                value,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: AppColors.navy,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
+            ),
+            if (shift.urgent) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFE8EC),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Text(
+                  'URGENTE',
+                  style: TextStyle(
+                    color: Color(0xFFD9344B),
+                    fontSize: 9,
+                    fontWeight: FontWeight.w900,
+                  ),
                 ),
               ),
             ],
+            Semantics(
+              label: saved ? 'Empleo guardado' : 'Guardar empleo',
+              button: true,
+              child: IconButton(
+                onPressed: onToggleSaved,
+                tooltip: saved ? 'Empleo guardado' : 'Guardar empleo',
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.white.withValues(alpha: .12),
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(48, 48),
+                ),
+                icon: Icon(
+                  saved
+                      ? Icons.bookmark_rounded
+                      : Icons.bookmark_border_rounded,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 54,
+              height: 54,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: AppColors.teal,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                shift.company.characters.first.toUpperCase(),
+                style: const TextStyle(
+                  color: AppColors.navy,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            const SizedBox(width: 15),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    shift.title,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 25,
+                      fontWeight: FontWeight.w900,
+                      height: 1.12,
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 6,
+                    runSpacing: 5,
+                    children: [
+                      Text(
+                        shift.company,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const Icon(
+                        Icons.verified_rounded,
+                        color: AppColors.teal,
+                        size: 17,
+                      ),
+                      const Text(
+                        'Empresa verificada',
+                        style: TextStyle(
+                          color: Color(0xFFD8E2F0),
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        Row(
+          children: [
+            Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LinearProgressIndicator(
+                  value: shift.match / 100,
+                  minHeight: 7,
+                  backgroundColor: Colors.white.withValues(alpha: .16),
+                  color: AppColors.teal,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              '${shift.match}% compatible contigo',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+class _FactsGrid extends StatelessWidget {
+  const _FactsGrid({required this.shift});
+  final Shift shift;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final columns = constraints.maxWidth >= 760 ? 4 : 2;
+      final width = (constraints.maxWidth - ((columns - 1) * 10)) / columns;
+      return Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          _Fact(
+            width: width,
+            icon: Icons.payments_outlined,
+            label: 'PAGO POR TURNO',
+            value: formatPenCents(shift.workerPayCents),
+            hint: 'Monto confirmado',
+          ),
+          _Fact(
+            width: width,
+            icon: Icons.schedule_outlined,
+            label: 'HORARIO',
+            value: shift.schedule,
+            hint: 'Turno definido',
+          ),
+          _Fact(
+            width: width,
+            icon: Icons.location_on_outlined,
+            label: 'UBICACIÓN',
+            value: shift.location,
+            hint: 'Ver ruta al aceptar',
+          ),
+          _Fact(
+            width: width,
+            icon: Icons.work_outline_rounded,
+            label: 'MODALIDAD',
+            value: 'Presencial',
+            hint: _industryLabel(shift.industry),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+class _Fact extends StatelessWidget {
+  const _Fact({
+    required this.width,
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.hint,
+  });
+
+  final double width;
+  final IconData icon;
+  final String label;
+  final String value;
+  final String hint;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: width,
+    constraints: const BoxConstraints(minHeight: 112),
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border.all(color: AppColors.border),
+      borderRadius: BorderRadius.circular(17),
+      boxShadow: const [
+        BoxShadow(
+          color: AppColors.shadow,
+          blurRadius: 12,
+          offset: Offset(0, 5),
+        ),
+      ],
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: AppColors.tealSoft,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: AppColors.tealDark, size: 18),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 2,
+                style: const TextStyle(
+                  color: AppColors.muted,
+                  fontSize: 8,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: .4,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(
+          value,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: AppColors.navy,
+            fontSize: 12,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          hint,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: AppColors.muted, fontSize: 9),
+        ),
+      ],
+    ),
+  );
+}
+
+class _DetailContent extends StatelessWidget {
+  const _DetailContent({required this.shift});
+  final Shift shift;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final about = _AboutCard(shift: shift);
+      const confidence = _ConfidenceCard();
+      if (constraints.maxWidth >= 720) {
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(flex: 3, child: about),
+            const SizedBox(width: 14),
+            const Expanded(flex: 2, child: confidence),
+          ],
+        );
+      }
+      return Column(children: [about, const SizedBox(height: 14), confidence]);
+    },
+  );
+}
+
+class _AboutCard extends StatelessWidget {
+  const _AboutCard({required this.shift});
+  final Shift shift;
+
+  @override
+  Widget build(BuildContext context) => _SurfaceCard(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _SectionTitle(
+          icon: Icons.description_outlined,
+          title: 'Sobre este trabajo',
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Buscamos una persona responsable y orientada al servicio para apoyar al equipo durante este turno. El horario, las tareas y el pago ya están confirmados.',
+          style: TextStyle(color: AppColors.muted, height: 1.5, fontSize: 12),
+        ),
+        const SizedBox(height: 17),
+        const Text(
+          'Lo que harás',
+          style: TextStyle(
+            color: AppColors.navy,
+            fontSize: 12,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(height: 9),
+        ..._tasksFor(shift.industry).map((task) => _TaskRow(label: task)),
+      ],
+    ),
+  );
+
+  static List<String> _tasksFor(ShiftIndustry industry) {
+    if (industry == ShiftIndustry.foodService ||
+        industry == ShiftIndustry.hospitality) {
+      return const [
+        'Preparar el área antes de iniciar el servicio.',
+        'Atender y orientar a los clientes con agilidad.',
+        'Coordinar con el equipo durante todo el turno.',
+      ];
+    }
+    return const [
+      'Revisar las indicaciones antes de iniciar.',
+      'Apoyar al equipo durante todo el turno.',
+      'Confirmar la finalización de tus tareas.',
+    ];
+  }
+}
+
+String _industryLabel(ShiftIndustry industry) => switch (industry) {
+  ShiftIndustry.hospitality => 'Hospitalidad',
+  ShiftIndustry.foodService => 'Gastronomía',
+  ShiftIndustry.retail => 'Retail',
+  ShiftIndustry.events => 'Eventos',
+};
+
+class _ConfidenceCard extends StatelessWidget {
+  const _ConfidenceCard();
+
+  @override
+  Widget build(BuildContext context) => _SurfaceCard(
+    child: const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionTitle(
+          icon: Icons.shield_outlined,
+          title: 'Postula con confianza',
+        ),
+        SizedBox(height: 14),
+        _TrustRow(
+          icon: Icons.verified_user_outlined,
+          title: 'Empresa validada',
+          subtitle: 'Identidad y datos revisados.',
+        ),
+        SizedBox(height: 13),
+        _TrustRow(
+          icon: Icons.lock_outline_rounded,
+          title: 'Pago protegido',
+          subtitle: 'El monto se confirma antes de aceptar.',
+        ),
+        SizedBox(height: 13),
+        _TrustRow(
+          icon: Icons.support_agent_rounded,
+          title: 'Soporte CUMPLE',
+          subtitle: 'Te acompañamos durante el proceso.',
+        ),
+      ],
+    ),
+  );
+}
+
+class _SurfaceCard extends StatelessWidget {
+  const _SurfaceCard({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(18),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border.all(color: AppColors.border),
+      borderRadius: BorderRadius.circular(19),
+      boxShadow: const [
+        BoxShadow(
+          color: AppColors.shadow,
+          blurRadius: 12,
+          offset: Offset(0, 5),
+        ),
+      ],
+    ),
+    child: child,
+  );
+}
+
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle({required this.icon, required this.title});
+  final IconData icon;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Container(
+        width: 35,
+        height: 35,
+        decoration: BoxDecoration(
+          color: AppColors.tealSoft,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Icon(icon, color: AppColors.tealDark, size: 19),
+      ),
+      const SizedBox(width: 10),
+      Expanded(
+        child: Text(
+          title,
+          style: const TextStyle(
+            color: AppColors.navy,
+            fontSize: 15,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+      ),
+    ],
+  );
+}
+
+class _TaskRow extends StatelessWidget {
+  const _TaskRow({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 20,
+          height: 20,
+          decoration: const BoxDecoration(
+            color: AppColors.tealSoft,
+            shape: BoxShape.circle,
+          ),
+          child: const Icon(
+            Icons.check_rounded,
+            color: AppColors.tealDark,
+            size: 13,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: AppColors.navy,
+              fontSize: 11,
+              height: 1.4,
+            ),
           ),
         ),
       ],
     ),
+  );
+}
+
+class _TrustRow extends StatelessWidget {
+  const _TrustRow({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+  });
+  final IconData icon;
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Icon(icon, color: AppColors.tealDark, size: 20),
+      const SizedBox(width: 9),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(
+                color: AppColors.navy,
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              subtitle,
+              style: const TextStyle(
+                color: AppColors.muted,
+                fontSize: 9,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+}
+
+class _ApplyBar extends StatelessWidget {
+  const _ApplyBar({required this.applied, required this.onApply});
+  final bool applied;
+  final VoidCallback onApply;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final compact =
+          constraints.maxWidth < 520 ||
+          MediaQuery.textScalerOf(context).scale(1) > 1.3;
+      final message = const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Postulación segura',
+            style: TextStyle(
+              color: AppColors.navy,
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          SizedBox(height: 2),
+          Text(
+            'Tus datos se comparten solo al postular',
+            maxLines: 2,
+            style: TextStyle(color: AppColors.muted, fontSize: 9),
+          ),
+        ],
+      );
+      final button = Semantics(
+        label: applied ? 'Postulación enviada' : 'Postular ahora',
+        button: !applied,
+        child: FilledButton.icon(
+          onPressed: applied ? null : onApply,
+          icon: Icon(
+            applied ? Icons.check_circle_outline_rounded : Icons.send_outlined,
+          ),
+          label: Text(applied ? 'Postulación enviada' : 'Postular ahora'),
+        ),
+      );
+      return Container(
+        padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: AppColors.border)),
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.shadow,
+              blurRadius: 18,
+              offset: Offset(0, -5),
+            ),
+          ],
+        ),
+        child: SafeArea(
+          top: false,
+          child: compact
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [message, const SizedBox(height: 10), button],
+                )
+              : Row(
+                  children: [
+                    Expanded(child: message),
+                    const SizedBox(width: 16),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(minWidth: 190),
+                      child: button,
+                    ),
+                  ],
+                ),
+        ),
+      );
+    },
   );
 }

@@ -136,7 +136,7 @@ class _DiscoveryContent extends StatelessWidget {
             child: Row(
               children: [
                 SizedBox(
-                  width: 410,
+                  width: 438,
                   child: _ResultsColumn(
                     controller: controller,
                     shifts: shifts,
@@ -171,37 +171,84 @@ class _TopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    height: 72,
-    padding: const EdgeInsets.symmetric(horizontal: 24),
+    height: 86,
+    padding: const EdgeInsets.symmetric(horizontal: 28),
     color: Colors.white,
     child: Row(
       children: [
         const Expanded(
-          child: Text(
-            'Oportunidades para ti',
-            style: TextStyle(
-              color: AppColors.navy,
-              fontSize: 20,
-              fontWeight: FontWeight.w900,
-            ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Oportunidades para ti',
+                style: TextStyle(
+                  color: AppColors.navy,
+                  fontSize: 21,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              SizedBox(height: 3),
+              Text(
+                'Turnos seleccionados según tu perfil y disponibilidad',
+                style: TextStyle(color: AppColors.muted, fontSize: 11),
+              ),
+            ],
           ),
         ),
         SizedBox(
-          width: 380,
+          width: 390,
           child: JobSearchBar(
             onChanged: onQueryChanged,
             onOpenFilters: onOpenFilters,
           ),
         ),
-        const SizedBox(width: 18),
-        const CircleAvatar(
-          backgroundColor: Color(0xFFDCE6ED),
-          child: Text(
-            'AG',
-            style: TextStyle(
+        const SizedBox(width: 12),
+        IconButton(
+          tooltip: 'Notificaciones',
+          onPressed: () {},
+          icon: Badge(
+            smallSize: 7,
+            backgroundColor: AppColors.gold,
+            child: const Icon(
+              Icons.notifications_none_rounded,
               color: AppColors.navy,
-              fontWeight: FontWeight.w800,
             ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Container(
+          padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceMuted,
+            border: Border.all(color: AppColors.border),
+            borderRadius: BorderRadius.circular(24),
+          ),
+          child: const Row(
+            children: [
+              CircleAvatar(
+                radius: 17,
+                backgroundColor: AppColors.navySoft,
+                child: Text(
+                  'AG',
+                  style: TextStyle(
+                    color: AppColors.navy,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              SizedBox(width: 8),
+              Text(
+                'Ana',
+                style: TextStyle(
+                  color: AppColors.navy,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -227,7 +274,7 @@ class _ResultsColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
+    padding: const EdgeInsets.fromLTRB(20, 18, 20, 100),
     children: [
       if (showHeader) ...[
         const DiscoveryHeader(),
@@ -237,6 +284,34 @@ class _ResultsColumn extends StatelessWidget {
           onOpenFilters: () => _showFilterSheet(context, controller),
         ),
         const SizedBox(height: 12),
+      ],
+      if (!showHeader) ...[
+        const Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Explora turnos',
+                    style: TextStyle(
+                      color: AppColors.navy,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    'Actualizados para ti',
+                    style: TextStyle(color: AppColors.muted, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+            _LiveBadge(),
+          ],
+        ),
+        const SizedBox(height: 14),
       ],
       ClientDemoBanner(
         scenario: scenario,
@@ -251,17 +326,20 @@ class _ResultsColumn extends StatelessWidget {
       const SizedBox(height: 20),
       Row(
         children: [
-          if (showHeader)
-            Expanded(
-              child: Text(
-                'Oportunidades para ti',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-            )
-          else
-            const Spacer(),
+          Expanded(
+            child: Text(
+              showHeader ? 'Oportunidades para ti' : 'Mejores coincidencias',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: showHeader
+                  ? Theme.of(context).textTheme.titleLarge
+                  : const TextStyle(
+                      color: AppColors.navy,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+            ),
+          ),
           const SizedBox(width: 8),
           Text(
             '${shifts.length} resultados',
@@ -327,6 +405,35 @@ class _ResultsColumn extends StatelessWidget {
       }
     },
     onToggleSaved: () => controller.toggleSaved(shift.id),
+  );
+}
+
+class _LiveBadge extends StatelessWidget {
+  const _LiveBadge();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+    decoration: BoxDecoration(
+      color: AppColors.tealSoft,
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: const Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.circle, color: AppColors.teal, size: 7),
+        SizedBox(width: 5),
+        Text(
+          'EN VIVO',
+          style: TextStyle(
+            color: AppColors.tealDark,
+            fontSize: 8,
+            fontWeight: FontWeight.w900,
+            letterSpacing: .5,
+          ),
+        ),
+      ],
+    ),
   );
 }
 

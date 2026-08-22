@@ -2,13 +2,17 @@ import 'package:flutter/material.dart';
 
 abstract final class AppColors {
   static const navy = Color(0xFF1A2B4A);
+  static const navySoft = Color(0xFFE9EEF6);
   static const teal = Color(0xFF00C896);
+  static const tealDark = Color(0xFF009F7C);
   static const tealSoft = Color(0xFFE4FAF4);
-  static const background = Color(0xFFF0F3F8);
+  static const background = Color(0xFFF4F7FB);
+  static const surfaceMuted = Color(0xFFF8FAFD);
   static const surface = Colors.white;
   static const border = Color(0xFFD9E2EC);
   static const muted = Color(0xFF718096);
   static const gold = Color(0xFFF5AE28);
+  static const shadow = Color(0x141A2B4A);
 }
 
 ThemeData buildAppTheme() {
@@ -116,7 +120,8 @@ ThemeData buildAppTheme() {
     ),
     cardTheme: CardThemeData(
       color: Colors.white,
-      elevation: 0,
+      elevation: 1,
+      shadowColor: AppColors.shadow,
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
         side: const BorderSide(color: AppColors.border),

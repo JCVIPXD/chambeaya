@@ -16,23 +16,45 @@ class ClientDemoBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+    padding: const EdgeInsets.fromLTRB(12, 10, 6, 10),
     decoration: BoxDecoration(
-      color: AppColors.tealSoft,
-      borderRadius: BorderRadius.circular(12),
+      color: Colors.white,
+      border: Border.all(color: AppColors.teal.withValues(alpha: .22)),
+      borderRadius: BorderRadius.circular(14),
     ),
     child: Row(
       children: [
-        const Icon(Icons.science_outlined, color: AppColors.teal, size: 19),
-        const SizedBox(width: 8),
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: AppColors.tealSoft,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: const Icon(
+            Icons.science_outlined,
+            color: AppColors.tealDark,
+            size: 19,
+          ),
+        ),
+        const SizedBox(width: 10),
         const Expanded(
-          child: Text(
-            'Datos de demostración',
-            style: TextStyle(
-              color: AppColors.navy,
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Datos de demostración',
+                style: TextStyle(
+                  color: AppColors.navy,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              Text(
+                'Explora todos los estados',
+                style: TextStyle(color: AppColors.muted, fontSize: 9),
+              ),
+            ],
           ),
         ),
         PopupMenuButton<ClientDemoScenario>(
