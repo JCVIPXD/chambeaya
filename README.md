@@ -66,6 +66,8 @@ La experiencia del trabajador ya incluye diseño adaptable para móvil, tablet y
 
 El panel empresarial incluye las vistas de resumen, turnos, trabajadores, mensajes y pagos con diseño adaptable y flujos interactivos. Consulta el [estado de implementación al 22 de agosto de 2026](docs/AVANCE_2026-08-22.md) para conocer funcionalidades terminadas, validaciones y próximos pasos.
 
+Los módulos empresariales principales ya están conectados a PostgreSQL mediante endpoints CRUD autenticados. La referencia técnica se encuentra en [API CRUD empresarial](docs/API_CRUD.md).
+
 Las cuentas y sesiones de desarrollo se guardan en PostgreSQL. Flutter conserva la sesión localmente, la valida contra `GET /api/auth/session` al iniciar y permite cerrarla desde el perfil o panel de empresa. Los tokens opacos se almacenan en la base de datos sólo como hashes.
 
 Los pagos reales, retiros, cámara, ubicación, foto de DNI y reconocimiento facial están intencionalmente desactivados. El marketplace de la API continúa usando datos de demostración en memoria.

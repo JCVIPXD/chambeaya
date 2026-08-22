@@ -21,6 +21,29 @@ enum ShiftStatus {
   CANCELLED
 }
 
+enum WorkerStatus {
+  AVAILABLE
+  ON_SHIFT
+  UNAVAILABLE
+}
+
+enum ConversationStatus {
+  OPEN
+  ARCHIVED
+}
+
+enum MessageSender {
+  BUSINESS
+  WORKER
+}
+
+enum PaymentStatus {
+  PENDING
+  SCHEDULED
+  PROCESSED
+  CANCELLED
+}
+
 model User {
   id           String        @id @default(cuid())
   email        String        @unique
@@ -30,8 +53,28 @@ model User {
   name         String
   identifier   String        @unique
   sessions     AuthSession[]
+  company      Company?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
+}
+
+model Company {
+  id            String          @id @default(cuid())
+  ownerId       String          @unique
+  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name          String
+  legalName     String?
+  ruc           String          @unique
+  industry      String?
+  phone         String?
+  address       String?
+  district      String?
+  shifts        Shift[]
+  workers       WorkerProfile[]
+  conversations Conversation[]
+  payments      Payment[]
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
 }
 
 model AuthSession {
@@ -47,12 +90,94 @@ model AuthSession {
 }
 
 model Shift {
-  id        String      @id @default(cuid())
-  title     String
-  startsAt  DateTime
-  endsAt    DateTime
-  payCents  Int
-  status    ShiftStatus @default(PUBLISHED)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  id               String         @id @default(cuid())
+  companyId        String
+  company          Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title            String
+  location         String
+  startsAt         DateTime
+  endsAt           DateTime
+  payCents         Int
+  requiredWorkers  Int            @default(1)
+  confirmedWorkers Int            @default(0)
+  notes            String?
+  rescueActive     Boolean        @default(false)
+  status           ShiftStatus    @default(PUBLISHED)
+  conversations    Conversation[]
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([companyId, startsAt])
+  @@index([companyId, status])
+}
+
+model WorkerProfile {
+  id            String         @id @default(cuid())
+  companyId     String
+  company       Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name          String
+  email         String?
+  phone         String?
+  role          String
+  skills        String[]       @default([])
+  status        WorkerStatus   @default(AVAILABLE)
+  availability  String?
+  cumpleScore   Int            @default(80)
+  matchScore    Int            @default(80)
+  completedJobs Int            @default(0)
+  verified      Boolean        @default(false)
+  conversations Conversation[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@unique([companyId, email])
+  @@index([companyId, status])
+}
+
+model Conversation {
+  id        String             @id @default(cuid())
+  companyId String
+  company   Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  workerId  String
+  worker    WorkerProfile      @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  shiftId   String?
+  shift     Shift?             @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  subject   String
+  status    ConversationStatus @default(OPEN)
+  messages  Message[]
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  @@index([companyId, updatedAt])
+  @@index([workerId])
+}
+
+model Message {
+  id             String        @id @default(cuid())
+  conversationId String
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         MessageSender
+  body           String
+  readAt         DateTime?
+  createdAt      DateTime      @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  companyId   String
+  company     Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  reference   String
+  description String
+  amountCents Int
+  workerCount Int           @default(0)
+  status      PaymentStatus @default(PENDING)
+  dueAt       DateTime?
+  processedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@unique([companyId, reference])
+  @@index([companyId, status])
 }

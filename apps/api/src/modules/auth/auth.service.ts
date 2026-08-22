@@ -14,8 +14,11 @@ export interface RegisterInput {
 
 export interface AuthSession {
   token: string;
+  userId: string;
   role: AccountRole;
   name: string;
+  email: string;
+  identifier: string;
 }
 
 export interface AuthService {
@@ -84,8 +87,18 @@ function hashToken(token: string) {
   return createHash('sha256').update(token).digest('hex');
 }
 
-function publicSession(token: string, account: Pick<Account, 'role' | 'name'>): AuthSession {
-  return { token, role: account.role, name: account.name };
+function publicSession(
+  token: string,
+  account: Pick<Account, 'id' | 'role' | 'name' | 'email' | 'dniOrRuc'>,
+): AuthSession {
+  return {
+    token,
+    userId: account.id,
+    role: account.role,
+    name: account.name,
+    email: account.email,
+    identifier: account.dniOrRuc,
+  };
 }
 
 export class LocalAuthService implements AuthService {
