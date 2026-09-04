@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/responsive/app_breakpoints.dart';
 import '../../theme/app_theme.dart';
+import '../../widgets/animated_reveal.dart';
 import '../marketplace/marketplace_data.dart';
 import '../marketplace/marketplace_repository.dart';
 import 'discovery_controller.dart';
@@ -505,13 +506,18 @@ class _ResultsColumn extends StatelessWidget {
         ),
         const SizedBox(height: 14),
       ],
-      if (usesLiveFeed)
-        const LiveMarketplaceBanner()
-      else
-        ClientDemoBanner(
-          scenario: scenario,
-          onScenarioChanged: onScenarioChanged,
-        ),
+      AnimatedSwitcher(
+        duration: const Duration(milliseconds: 240),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        child: usesLiveFeed
+            ? const LiveMarketplaceBanner(key: ValueKey('live-feed'))
+            : ClientDemoBanner(
+                key: ValueKey(scenario),
+                scenario: scenario,
+                onScenarioChanged: onScenarioChanged,
+              ),
+      ),
       const SizedBox(height: 14),
       JobFilterControls(
         controller: controller,
@@ -541,9 +547,23 @@ class _ResultsColumn extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          Text(
-            '${shifts.length} resultados',
-            style: const TextStyle(color: AppColors.muted, fontSize: 12),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            transitionBuilder: (child, animation) => FadeTransition(
+              opacity: animation,
+              child: SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(0, .18),
+                  end: Offset.zero,
+                ).animate(animation),
+                child: child,
+              ),
+            ),
+            child: Text(
+              '${shifts.length} resultados',
+              key: ValueKey(shifts.length),
+              style: const TextStyle(color: AppColors.muted, fontSize: 12),
+            ),
           ),
         ],
       ),
@@ -577,12 +597,22 @@ class _ResultsColumn extends StatelessWidget {
             mainAxisExtent: 356,
           ),
           itemCount: shifts.length,
-          itemBuilder: (_, index) => _jobCard(context, shifts[index]),
+          itemBuilder: (_, index) =>
+              _animatedJobCard(context, shifts[index], index),
         )
       else
-        ...shifts.map((shift) => _jobCard(context, shift)),
+        ...shifts.indexed.map(
+          (entry) => _animatedJobCard(context, entry.$2, entry.$1),
+        ),
     ],
   );
+
+  Widget _animatedJobCard(BuildContext context, Shift shift, int index) =>
+      AnimatedReveal(
+        key: ValueKey('shift-card-${shift.id}'),
+        delay: Duration(milliseconds: (index * 45).clamp(0, 260).toInt()),
+        child: _jobCard(context, shift),
+      );
 
   Widget _jobCard(BuildContext context, Shift shift) => JobCard(
     shift: shift,

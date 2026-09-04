@@ -105,11 +105,19 @@ class JobCard extends StatelessWidget {
                     ),
                     onPressed: onToggleSaved,
                     tooltip: saved ? 'Empleo guardado' : 'Guardar empleo',
-                    icon: Icon(
-                      saved
-                          ? Icons.bookmark_rounded
-                          : Icons.bookmark_border_rounded,
-                      color: saved ? AppColors.teal : AppColors.muted,
+                    icon: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      transitionBuilder: (child, animation) => ScaleTransition(
+                        scale: animation,
+                        child: FadeTransition(opacity: animation, child: child),
+                      ),
+                      child: Icon(
+                        saved
+                            ? Icons.bookmark_rounded
+                            : Icons.bookmark_border_rounded,
+                        key: ValueKey(saved),
+                        color: saved ? AppColors.teal : AppColors.muted,
+                      ),
                     ),
                   ),
                 ),
