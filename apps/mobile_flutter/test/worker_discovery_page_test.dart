@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cumple_now_mobile/features/discovery/worker_discovery_page.dart';
 import 'package:cumple_now_mobile/features/marketplace/marketplace_data.dart';
 import 'package:cumple_now_mobile/features/marketplace/marketplace_repository.dart';
+import 'package:cumple_now_mobile/features/discovery/search_alert_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -79,6 +80,29 @@ void main() {
     expect(find.text('Postulación enviada'), findsOneWidget);
   });
 
+  testWidgets('screening questions are answered before applying', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(home: WorkerDiscoveryPage(repository: _QuestionRepository())),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.bySemanticsLabel(RegExp('Postular ahora')).first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Completa tu postulación'), findsOneWidget);
+    await tester.enterText(find.byType(TextField).last, 'Sí, todo el turno.');
+    await tester.tap(find.text('Enviar postulación'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Postulación enviada'), findsOneWidget);
+  });
+
   testWidgets('tablet job selection opens the detail experience', (
     tester,
   ) async {
@@ -145,6 +169,35 @@ void main() {
     expect(find.text('Filtros de búsqueda'), findsOneWidget);
   });
 
+  testWidgets('worker can save a search alert from the filter sheet', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final alertStore = InMemorySearchAlertStore();
+    await alertStore.clear();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WorkerDiscoveryPage(
+          repository: DemoWorkerMarketplaceRepository(),
+          alertStore: alertStore,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Filtros'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Urgentes').last);
+    await tester.pump();
+    await tester.tap(find.text('Crear alerta'));
+    await tester.pumpAndSettle();
+
+    expect((await alertStore.read())?.urgentOnly, isTrue);
+  });
+
   testWidgets('a published shift appears without reloading discovery', (
     tester,
   ) async {
@@ -192,4 +245,38 @@ class _LiveRepository extends DemoWorkerMarketplaceRepository {
 
   void publish(List<Shift> shifts) => _updates.add(shifts);
   Future<void> close() => _updates.close();
+}
+
+class _QuestionRepository extends DemoWorkerMarketplaceRepository {
+  static const shift = Shift(
+    id: 'shift-question',
+    title: 'Ayudante de Cocina',
+    company: 'Eventos Perú',
+    schedule: 'Sábado · 10:00 – 18:00',
+    workerPayCents: 12000,
+    match: 88,
+    urgent: false,
+    industry: ShiftIndustry.events,
+    location: 'San Isidro',
+    dateScope: ShiftDateScope.weekend,
+    screeningQuestions: [
+      '¿Tienes disponibilidad durante todo el horario indicado?',
+    ],
+  );
+
+  @override
+  Future<List<Shift>> availableShifts() async => const [shift];
+
+  @override
+  Stream<List<Shift>> watchAvailableShifts() async* {
+    yield const [shift];
+  }
+
+  @override
+  Future<void> applyToShift(
+    String shiftId, {
+    Map<String, String> answers = const {},
+  }) async {
+    expect(answers[shift.screeningQuestions.single], 'Sí, todo el turno.');
+  }
 }

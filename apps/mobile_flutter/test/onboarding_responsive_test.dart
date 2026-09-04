@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('desktop onboarding stays focused and keeps company contrast', (
+  testWidgets('desktop onboarding stays focused and explains business access', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1440, 900);
@@ -19,10 +19,13 @@ void main() {
     expect(content, findsOneWidget);
     expect(tester.getSize(content).width, lessThanOrEqualTo(600));
 
-    final companyButton = tester.widget<FilledButton>(
-      find.widgetWithText(FilledButton, 'Soy empresa'),
+    expect(find.text('Soy empresa'), findsNothing);
+    expect(
+      find.text(
+        '¿Representas a una empresa? Contáctanos para habilitar un acceso empresarial.',
+      ),
+      findsOneWidget,
     );
-    expect(companyButton.style?.foregroundColor?.resolve({}), Colors.white);
     expect(tester.takeException(), isNull);
   });
 }

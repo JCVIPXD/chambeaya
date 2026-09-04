@@ -1,8 +1,13 @@
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  randomBytes,
+  scryptSync,
+  timingSafeEqual,
+} from "node:crypto";
 
-import { PrismaClient, type User } from '@prisma/client';
+import { PrismaClient, type User } from "@prisma/client";
 
-export type AccountRole = 'WORKER' | 'BUSINESS';
+export type AccountRole = "WORKER" | "BUSINESS" | "ADMIN";
 
 export interface RegisterInput {
   role: AccountRole;
@@ -28,7 +33,7 @@ export interface AuthService {
   logout(token: string): Promise<void> | void;
 }
 
-interface Account extends Omit<RegisterInput, 'password'> {
+interface Account extends Omit<RegisterInput, "password"> {
   id: string;
   salt: string;
   passwordHash: string;
@@ -37,10 +42,10 @@ interface Account extends Omit<RegisterInput, 'password'> {
 export class AuthError extends Error {
   constructor(
     public readonly code:
-      | 'INVALID_CREDENTIALS'
-      | 'DUPLICATE_ACCOUNT'
-      | 'INVALID_REGISTRATION'
-      | 'INVALID_SESSION',
+      | "INVALID_CREDENTIALS"
+      | "DUPLICATE_ACCOUNT"
+      | "INVALID_REGISTRATION"
+      | "INVALID_SESSION",
   ) {
     super(code);
   }
@@ -58,38 +63,42 @@ function normalizeRegistration(input: RegisterInput) {
     !/\d/.test(input.password) ||
     !/[A-Z]/.test(input.password)
   ) {
-    throw new AuthError('INVALID_REGISTRATION');
+    throw new AuthError("INVALID_REGISTRATION");
   }
   if (
-    (input.role === 'WORKER' && !/^\d{8}$/.test(identifier)) ||
-    (input.role === 'BUSINESS' && !/^\d{11}$/.test(identifier))
+    (input.role === "WORKER" && !/^\d{8}$/.test(identifier)) ||
+    (input.role === "BUSINESS" && !/^\d{11}$/.test(identifier)) ||
+    input.role === "ADMIN"
   ) {
-    throw new AuthError('INVALID_REGISTRATION');
+    throw new AuthError("INVALID_REGISTRATION");
   }
   return { email, identifier, name: input.name.trim() };
 }
 
-function hashPassword(password: string, salt: string) {
-  return scryptSync(password, salt, 64).toString('hex');
+export function hashPassword(password: string, salt: string) {
+  return scryptSync(password, salt, 64).toString("hex");
 }
 
-function passwordMatches(password: string, account: Pick<Account, 'salt' | 'passwordHash'>) {
-  const actual = Buffer.from(hashPassword(password, account.salt), 'hex');
-  const expected = Buffer.from(account.passwordHash, 'hex');
+function passwordMatches(
+  password: string,
+  account: Pick<Account, "salt" | "passwordHash">,
+) {
+  const actual = Buffer.from(hashPassword(password, account.salt), "hex");
+  const expected = Buffer.from(account.passwordHash, "hex");
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 function createOpaqueToken() {
-  return randomBytes(32).toString('base64url');
+  return randomBytes(32).toString("base64url");
 }
 
 function hashToken(token: string) {
-  return createHash('sha256').update(token).digest('hex');
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function publicSession(
   token: string,
-  account: Pick<Account, 'id' | 'role' | 'name' | 'email' | 'dniOrRuc'>,
+  account: Pick<Account, "id" | "role" | "name" | "email" | "dniOrRuc">,
 ): AuthSession {
   return {
     token,
@@ -107,11 +116,12 @@ export class LocalAuthService implements AuthService {
 
   register(input: RegisterInput): AuthSession {
     const normalized = normalizeRegistration(input);
-    if (this.accounts.has(normalized.email)) throw new AuthError('DUPLICATE_ACCOUNT');
+    if (this.accounts.has(normalized.email))
+      throw new AuthError("DUPLICATE_ACCOUNT");
 
-    const salt = randomBytes(16).toString('hex');
+    const salt = randomBytes(16).toString("hex");
     const account: Account = {
-      id: randomBytes(12).toString('hex'),
+      id: randomBytes(12).toString("hex"),
       role: input.role,
       name: normalized.name,
       email: normalized.email,
@@ -126,14 +136,14 @@ export class LocalAuthService implements AuthService {
   login(emailInput: string, password: string): AuthSession {
     const account = this.accounts.get(emailInput.trim().toLowerCase());
     if (!account || !passwordMatches(password, account)) {
-      throw new AuthError('INVALID_CREDENTIALS');
+      throw new AuthError("INVALID_CREDENTIALS");
     }
     return this.sessionFor(account);
   }
 
   restore(token: string): AuthSession {
     const account = this.sessions.get(hashToken(token));
-    if (!account) throw new AuthError('INVALID_SESSION');
+    if (!account) throw new AuthError("INVALID_SESSION");
     return publicSession(token, account);
   }
 
@@ -153,7 +163,7 @@ export class DatabaseAuthService implements AuthService {
 
   async register(input: RegisterInput): Promise<AuthSession> {
     const normalized = normalizeRegistration(input);
-    const salt = randomBytes(16).toString('hex');
+    const salt = randomBytes(16).toString("hex");
     try {
       const account = await this.prisma.user.create({
         data: {
@@ -168,12 +178,12 @@ export class DatabaseAuthService implements AuthService {
       return this.sessionFor(account);
     } catch (error) {
       if (
-        typeof error === 'object' &&
+        typeof error === "object" &&
         error !== null &&
-        'code' in error &&
-        error.code === 'P2002'
+        "code" in error &&
+        error.code === "P2002"
       ) {
-        throw new AuthError('DUPLICATE_ACCOUNT');
+        throw new AuthError("DUPLICATE_ACCOUNT");
       }
       throw error;
     }
@@ -184,27 +194,30 @@ export class DatabaseAuthService implements AuthService {
       where: { email: emailInput.trim().toLowerCase() },
     });
     if (!account || !passwordMatches(password, this.toAccount(account))) {
-      throw new AuthError('INVALID_CREDENTIALS');
+      throw new AuthError("INVALID_CREDENTIALS");
     }
     return this.sessionFor(account);
   }
 
   async restore(token: string): Promise<AuthSession> {
-    if (!token) throw new AuthError('INVALID_SESSION');
+    if (!token) throw new AuthError("INVALID_SESSION");
     const session = await this.prisma.authSession.findUnique({
       where: { tokenHash: hashToken(token) },
       include: { user: true },
     });
     if (!session || session.expiresAt <= new Date()) {
-      if (session) await this.prisma.authSession.delete({ where: { id: session.id } });
-      throw new AuthError('INVALID_SESSION');
+      if (session)
+        await this.prisma.authSession.delete({ where: { id: session.id } });
+      throw new AuthError("INVALID_SESSION");
     }
     return publicSession(token, this.toAccount(session.user));
   }
 
   async logout(token: string): Promise<void> {
     if (!token) return;
-    await this.prisma.authSession.deleteMany({ where: { tokenHash: hashToken(token) } });
+    await this.prisma.authSession.deleteMany({
+      where: { tokenHash: hashToken(token) },
+    });
   }
 
   private async sessionFor(account: User): Promise<AuthSession> {

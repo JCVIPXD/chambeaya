@@ -8,12 +8,14 @@ class DiscoveryController extends ChangeNotifier {
   DiscoveryController({
     required List<Shift> shifts,
     this.repository,
+    ShiftSearchFilter initialFilter = const ShiftSearchFilter(),
     Set<String> savedShiftIds = const {},
     Map<String, ApplicationState> applicationStates = const {},
     this.onApplicationChanged,
   }) : _shifts = List.unmodifiable(shifts),
        _state = DiscoveryState(
          selectedShiftId: shifts.isEmpty ? null : shifts.first.id,
+         filter: initialFilter,
          savedShiftIds: savedShiftIds,
          applicationStates: applicationStates,
        );
@@ -42,6 +44,8 @@ class DiscoveryController extends ChangeNotifier {
       _setFilter(_filter(minimumPayCents: value));
   void setLocation(String? value) =>
       _setFilter(_filter(location: value, replaceLocation: true));
+  void setModality(String? value) =>
+      _setFilter(_filter(modality: value, replaceModality: true));
   void setDateScope(ShiftDateScope value) =>
       _setFilter(_filter(dateScope: value));
   void setSortOrder(ShiftSortOrder value) =>
@@ -61,6 +65,10 @@ class DiscoveryController extends ChangeNotifier {
       replaceSelectedShiftId: true,
       errorMessage: null,
     );
+  }
+
+  void replaceApplicationStates(Map<String, ApplicationState> states) {
+    _replace(applicationStates: states);
   }
 
   void selectShift(String id) {
@@ -84,7 +92,10 @@ class DiscoveryController extends ChangeNotifier {
     }
   }
 
-  Future<void> applyToShift(String id) async {
+  Future<void> applyToShift(
+    String id, {
+    Map<String, String> answers = const {},
+  }) async {
     if (!_shifts.any((shift) => shift.id == id)) {
       _replace(errorMessage: 'El turno ya no está disponible.');
       return;
@@ -96,7 +107,7 @@ class DiscoveryController extends ChangeNotifier {
       ..[id] = ApplicationState.submitted;
     _replace(selectedShiftId: id, applicationStates: updated);
     try {
-      await repository?.applyToShift(id);
+      await repository?.applyToShift(id, answers: answers);
       onApplicationChanged?.call();
     } catch (_) {
       _replace(
@@ -115,6 +126,8 @@ class DiscoveryController extends ChangeNotifier {
     bool? recommendedOnly,
     String? location,
     bool replaceLocation = false,
+    String? modality,
+    bool replaceModality = false,
     ShiftDateScope? dateScope,
     ShiftSortOrder? sortOrder,
   }) => ShiftSearchFilter(
@@ -124,6 +137,7 @@ class DiscoveryController extends ChangeNotifier {
     urgentOnly: urgentOnly ?? _state.filter.urgentOnly,
     recommendedOnly: recommendedOnly ?? _state.filter.recommendedOnly,
     location: replaceLocation ? location : _state.filter.location,
+    modality: replaceModality ? modality : _state.filter.modality,
     dateScope: dateScope ?? _state.filter.dateScope,
     sortOrder: sortOrder ?? _state.filter.sortOrder,
   );

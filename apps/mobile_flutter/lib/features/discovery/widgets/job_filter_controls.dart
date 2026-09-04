@@ -8,10 +8,16 @@ class JobFilterControls extends StatelessWidget {
     super.key,
     required this.controller,
     this.expanded = false,
+    this.onSaveAlert,
+    this.hasSavedAlert = false,
+    this.onClearAlert,
   });
 
   final DiscoveryController controller;
   final bool expanded;
+  final VoidCallback? onSaveAlert;
+  final bool hasSavedAlert;
+  final VoidCallback? onClearAlert;
 
   @override
   Widget build(BuildContext context) {
@@ -66,6 +72,17 @@ class JobFilterControls extends StatelessWidget {
             },
             onChanged: controller.setLocation,
           ),
+          _FilterDropdown<String?>(
+            label: 'Modalidad',
+            value: filter.modality,
+            items: const {
+              null: 'Todas las modalidades',
+              'PRESENCIAL': 'Presencial',
+              'HIBRIDO': 'Híbrido',
+              'REMOTO': 'Remoto',
+            },
+            onChanged: controller.setModality,
+          ),
           _FilterDropdown<ShiftDateScope>(
             label: 'Fecha',
             value: filter.dateScope,
@@ -86,6 +103,22 @@ class JobFilterControls extends StatelessWidget {
             },
             onChanged: controller.setSortOrder,
           ),
+          if (onSaveAlert != null)
+            OutlinedButton.icon(
+              onPressed: onSaveAlert,
+              icon: Icon(
+                hasSavedAlert
+                    ? Icons.notifications_active
+                    : Icons.notifications_none,
+              ),
+              label: Text(hasSavedAlert ? 'Actualizar alerta' : 'Crear alerta'),
+            ),
+          if (expanded && hasSavedAlert && onClearAlert != null)
+            TextButton.icon(
+              onPressed: onClearAlert,
+              icon: const Icon(Icons.notifications_off_outlined),
+              label: const Text('Quitar alerta'),
+            ),
         ],
         if (filter.hasActiveFilters)
           TextButton.icon(

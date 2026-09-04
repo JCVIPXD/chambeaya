@@ -66,6 +66,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(store.session, isNull);
-    expect(find.text('Soy trabajador'), findsOneWidget);
+    expect(
+      find.text(
+        '¿Representas a una empresa? Contáctanos para habilitar un acceso empresarial.',
+      ),
+      findsOneWidget,
+    );
   });
 }

@@ -15,6 +15,10 @@ export function createAuthRouter(service: AuthService = new DatabaseAuthService(
   const router = Router();
 
   router.post('/register', async (request, response) => {
+    if (request.body?.role !== 'WORKER') {
+      response.status(403).json({ error: 'BUSINESS_REGISTRATION_DISABLED' });
+      return;
+    }
     try {
       response.status(201).json(await service.register(request.body as RegisterInput));
     } catch (error) {

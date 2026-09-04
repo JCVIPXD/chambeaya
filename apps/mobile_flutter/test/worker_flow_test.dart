@@ -29,7 +29,7 @@ void main() {
   });
 
   testWidgets(
-    'accepting a shift does not return asynchronous work from setState',
+    'applying to a shift does not return asynchronous work from setState',
     (tester) async {
       await tester.pumpWidget(
         MaterialApp(
@@ -41,7 +41,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Aceptar').first);
+      await tester.tap(find.text('Postular').first);
       await tester.pump();
 
       expect(tester.takeException(), isNull);

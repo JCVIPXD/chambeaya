@@ -205,14 +205,20 @@ class _Hero extends StatelessWidget {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const Icon(
-                        Icons.verified_rounded,
-                        color: AppColors.teal,
+                      Icon(
+                        shift.companyVerified
+                            ? Icons.verified_rounded
+                            : Icons.info_outline_rounded,
+                        color: shift.companyVerified
+                            ? AppColors.teal
+                            : AppColors.gold,
                         size: 17,
                       ),
-                      const Text(
-                        'Empresa verificada',
-                        style: TextStyle(
+                      Text(
+                        shift.companyVerified
+                            ? 'Empresa verificada'
+                            : 'Datos declarados por la empresa',
+                        style: const TextStyle(
                           color: Color(0xFFD8E2F0),
                           fontSize: 10,
                         ),
@@ -292,7 +298,7 @@ class _FactsGrid extends StatelessWidget {
             width: width,
             icon: Icons.work_outline_rounded,
             label: 'MODALIDAD',
-            value: 'Presencial',
+            value: _modalityLabel(shift.modality),
             hint: _industryLabel(shift.industry),
           ),
         ],
@@ -423,9 +429,15 @@ class _AboutCard extends StatelessWidget {
           title: 'Sobre este trabajo',
         ),
         const SizedBox(height: 12),
-        const Text(
-          'Buscamos una persona responsable y orientada al servicio para apoyar al equipo durante este turno. El horario, las tareas y el pago ya están confirmados.',
-          style: TextStyle(color: AppColors.muted, height: 1.5, fontSize: 12),
+        Text(
+          shift.description?.trim().isNotEmpty == true
+              ? shift.description!.trim()
+              : 'Buscamos una persona responsable y orientada al servicio para apoyar al equipo durante este turno. El horario, las tareas y el pago ya están confirmados.',
+          style: const TextStyle(
+            color: AppColors.muted,
+            height: 1.5,
+            fontSize: 12,
+          ),
         ),
         const SizedBox(height: 17),
         const Text(
@@ -437,7 +449,41 @@ class _AboutCard extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 9),
-        ..._tasksFor(shift.industry).map((task) => _TaskRow(label: task)),
+        ..._linesOrFallback(
+          shift.responsibilities,
+          _tasksFor(shift.industry),
+        ).map((task) => _TaskRow(label: task)),
+        if (shift.requirements?.trim().isNotEmpty == true) ...[
+          const SizedBox(height: 17),
+          const Text(
+            'Requisitos',
+            style: TextStyle(
+              color: AppColors.navy,
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 9),
+          ..._linesOrFallback(
+            shift.requirements,
+            const <String>[],
+          ).map((requirement) => _TaskRow(label: requirement)),
+        ],
+        if (shift.screeningQuestions.isNotEmpty) ...[
+          const SizedBox(height: 17),
+          const Text(
+            'Preguntas antes de postular',
+            style: TextStyle(
+              color: AppColors.navy,
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 9),
+          ...shift.screeningQuestions.map(
+            (question) => _TaskRow(label: question),
+          ),
+        ],
       ],
     ),
   );
@@ -457,7 +503,22 @@ class _AboutCard extends StatelessWidget {
       'Confirmar la finalización de tus tareas.',
     ];
   }
+
+  static List<String> _linesOrFallback(String? value, List<String> fallback) {
+    final lines = value
+        ?.split(RegExp(r'\r?\n|•|;'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
+    return lines?.isNotEmpty == true ? lines! : fallback;
+  }
 }
+
+String _modalityLabel(String modality) => switch (modality) {
+  'REMOTO' => 'Remoto',
+  'HIBRIDO' => 'Híbrido',
+  _ => 'Presencial',
+};
 
 String _industryLabel(ShiftIndustry industry) => switch (industry) {
   ShiftIndustry.hospitality => 'Hospitalidad',
@@ -481,20 +542,20 @@ class _ConfidenceCard extends StatelessWidget {
         SizedBox(height: 14),
         _TrustRow(
           icon: Icons.verified_user_outlined,
-          title: 'Empresa validada',
-          subtitle: 'Identidad y datos revisados.',
+          title: 'Datos de la empresa',
+          subtitle: 'La verificación oficial se habilitará próximamente.',
         ),
         SizedBox(height: 13),
         _TrustRow(
           icon: Icons.lock_outline_rounded,
-          title: 'Pago protegido',
-          subtitle: 'El monto se confirma antes de aceptar.',
+          title: 'Pago informado',
+          subtitle: 'El monto indicado se confirma antes de postular.',
         ),
         SizedBox(height: 13),
         _TrustRow(
           icon: Icons.support_agent_rounded,
-          title: 'Soporte CUMPLE',
-          subtitle: 'Te acompañamos durante el proceso.',
+          title: 'Canal de ayuda',
+          subtitle: 'Las consultas del turno se coordinan en la conversación.',
         ),
       ],
     ),

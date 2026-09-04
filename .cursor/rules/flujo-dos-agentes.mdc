@@ -1,0 +1,17 @@
+---
+description: Flujo obligatorio de Cumple Now con un implementador Terra, un auditor Sol y un único registro de progreso
+alwaysApply: true
+---
+
+# Flujo de trabajo de dos agentes
+
+- Usa solamente los agentes `implementador-terra` y `auditor-sol`.
+- Ejecuta `implementador-terra` con `gpt-5.6-terra` para análisis de alcance, código, pruebas y correcciones.
+- Ejecuta `auditor-sol` con `gpt-5.6-sol` después de cada implementación terminada.
+- Trabaja en secuencia: Terra implementa y registra; Sol audita y registra; Terra corrige si es necesario; Sol reaudita.
+- `docs/PROGRESO.md` es el único registro operativo vigente. No crees diarios, bitácoras ni archivos de avance adicionales.
+- Registra únicamente hitos terminados: una implementación validada o una auditoría concluida. No registres actividad parcial.
+- Cada entrada es inmutable y debe incluir ID, fecha, agente, tipo, estado, alcance, archivos, decisiones, validaciones, riesgos y siguiente paso.
+- Las entradas nuevas se agregan al inicio de la sección `Registro`, sin reescribir el historial.
+- Un cambio solo queda cerrado cuando la auditoría más reciente tiene estado `APROBADO` y referencia su implementación o corrección.
+- Si una validación no pudo ejecutarse, declárala como riesgo; nunca la presentes como aprobada.

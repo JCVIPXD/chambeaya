@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/config/app_config.dart';
 import 'marketplace_data.dart';
@@ -8,28 +9,137 @@ import 'marketplace_repository.dart';
 import '../discovery/discovery_models.dart';
 
 class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
-  HttpWorkerMarketplaceRepository({http.Client? client, Uri? baseUri})
-    : _client = client ?? http.Client(),
-      _baseUri = baseUri ?? Uri.parse(AppConfig.apiBaseUrl);
+  HttpWorkerMarketplaceRepository({
+    http.Client? client,
+    Uri? baseUri,
+    this.token,
+  }) : _client = client ?? http.Client(),
+       _baseUri = baseUri ?? Uri.parse(AppConfig.apiBaseUrl);
 
   final http.Client _client;
   final Uri _baseUri;
+  final String? token;
   final Set<String> _localSavedShiftIds = {};
   final Map<String, ApplicationState> _localApplicationStates = {};
+  final Map<String, Shift> _applicationShiftCache = {};
+
+  static const _savedJobsKey = 'cumple_now.worker.saved_jobs';
+  static const _availabilityKey = 'cumple_now.worker.availability';
 
   @override
   bool get usesLiveFeed => true;
 
   @override
   Future<List<Shift>> availableShifts() async {
-    final response = await _client.get(_baseUri.resolve('/api/shifts'));
+    final response = await _client.get(
+      _baseUri.resolve('/api/shifts'),
+      headers: _headers(),
+    );
     if (response.statusCode != 200) {
       throw StateError('No se pudieron cargar turnos');
     }
     final values = jsonDecode(response.body) as List<dynamic>;
-    return values
+    final shifts = values
         .map((value) => _shiftFromJson(value as Map<String, dynamic>))
         .toList();
+    // An accepted assignment can remain visible in the public feed while the
+    // shift is still looking for additional workers. Replace that public
+    // copy with the cached application copy so assignment-only fields (such
+    // as the check-in credential and confirmation state) are not lost.
+    for (final cached in _applicationShiftCache.values) {
+      final index = shifts.indexWhere((shift) => shift.id == cached.id);
+      if (index >= 0) {
+        shifts[index] = cached;
+      } else {
+        shifts.add(cached);
+      }
+    }
+    return shifts;
+  }
+
+  @override
+  Future<bool> workerAvailability() async {
+    try {
+      final response = await _client.get(
+        _baseUri.resolve('/api/workers/availability'),
+        headers: _headers(),
+      );
+      if (response.statusCode == 200) {
+        final value =
+            (jsonDecode(response.body) as Map<String, dynamic>)['isAvailable'];
+        if (value is bool) return value;
+      }
+    } catch (_) {
+      // Fall back to the last local value while the API is unavailable.
+    }
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_availabilityKey) ?? true;
+  }
+
+  @override
+  Future<void> updateAvailability(bool isAvailable) async {
+    final response = await _client.put(
+      _baseUri.resolve('/api/workers/availability'),
+      headers: {..._headers(), 'Content-Type': 'application/json'},
+      body: jsonEncode({'isAvailable': isAvailable}),
+    );
+    if (response.statusCode != 200)
+      throw StateError('No se pudo actualizar tu disponibilidad');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_availabilityKey, isAvailable);
+  }
+
+  @override
+  Future<Shift?> activeShift() async {
+    final response = await _client.get(
+      _baseUri.resolve('/api/shifts/active'),
+      headers: _headers(),
+    );
+    if (response.statusCode != 200)
+      throw StateError('No se pudo cargar tu turno activo');
+    final value = jsonDecode(response.body);
+    return value is Map<String, dynamic> ? _shiftFromJson(value) : null;
+  }
+
+  @override
+  Future<List<Shift>> completedShifts() async {
+    final response = await _client.get(
+      _baseUri.resolve('/api/workers/applications'),
+      headers: _headers(),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No se pudo cargar tu historial');
+    }
+    final values = jsonDecode(response.body) as List<dynamic>;
+    final completed = <Shift>[];
+    for (final value in values) {
+      final item = Map<String, dynamic>.from(value as Map);
+      if (item['status'] != 'ACCEPTED') continue;
+      final rawShift = item['shift'];
+      if (rawShift is! Map) continue;
+      final shift = Map<String, dynamic>.from(rawShift);
+      final rawAssignment = item['assignment'];
+      final assignment = rawAssignment is Map
+          ? Map<String, dynamic>.from(rawAssignment)
+          : null;
+      final assignmentStatus = assignment?['status'] as String?;
+      final isCompleted =
+          shift['status'] == 'COMPLETED' ||
+          assignmentStatus == 'COMPLETED' ||
+          assignment?['checkedOutAt'] != null;
+      if (!isCompleted) continue;
+
+      var parsed = _shiftFromJson(shift);
+      parsed = parsed.copyWith(
+        state: ShiftState.completed,
+        assignmentConfirmed: assignment?['workerConfirmedAt'] != null,
+        checkedIn: assignment?['checkedInAt'] != null,
+        checkedOut: true,
+        checkInCredential: assignment?['checkInCredential'] as String?,
+      );
+      completed.add(parsed);
+    }
+    return List.unmodifiable(completed);
   }
 
   @override
@@ -41,6 +151,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
           'GET',
           _baseUri.resolve('/api/shifts/events'),
         )..headers['Accept'] = 'text/event-stream';
+        request.headers.addAll(_headers());
         final response = await _client.send(request);
         if (response.statusCode != 200) {
           throw StateError('No se pudo abrir el feed de turnos');
@@ -96,18 +207,24 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
 
   @override
   Future<Shift> acceptShift(String shiftId) async {
-    final response = await _client.put(
-      _baseUri.resolve('/api/shifts/$shiftId/accept'),
+    final response = await _client.post(
+      _baseUri.resolve('/api/shifts/$shiftId/applications'),
+      headers: _headers(),
     );
-    if (response.statusCode != 200) {
+    if (response.statusCode != 201 && response.statusCode != 200) {
       throw StateError('El turno ya no está disponible');
     }
-    return _shiftFromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    _localApplicationStates[shiftId] = ApplicationState.submitted;
+    return _shiftFromJson(Map<String, dynamic>.from(body['shift'] as Map));
   }
 
   @override
   Future<List<PaymentRecord>> walletMovements() async {
-    final response = await _client.get(_baseUri.resolve('/api/workers/wallet'));
+    final response = await _client.get(
+      _baseUri.resolve('/api/workers/wallet'),
+      headers: _headers(),
+    );
     if (response.statusCode != 200) {
       throw StateError('No se pudo cargar la billetera');
     }
@@ -117,33 +234,292 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       final movement = value as Map<String, dynamic>;
       final amount = (movement['amountCents'] as num).toInt() / 100;
       return PaymentRecord(
+        id: movement['id'] as String?,
         company: movement['description'] as String,
         role: 'Pago de turno',
         amount: 'S/ ${amount.toStringAsFixed(2)}',
-        status: movement['status'] == 'RELEASED' ? 'Liberado' : 'Pendiente',
+        status: movement['status'] == 'RELEASED'
+            ? 'Liberado'
+            : movement['status'] == 'REVERSED'
+            ? 'Reversed'
+            : 'Pendiente',
+        reference: movement['reference'] as String?,
+        receiptConfirmed: movement['receiptConfirmed'] == true,
       );
     }).toList();
   }
 
   @override
-  Future<Set<String>> savedShiftIds() async =>
-      Set.unmodifiable(_localSavedShiftIds);
+  Future<void> confirmPayment(String paymentId) async {
+    final response = await _client.post(
+      _baseUri.resolve('/api/workers/payments/$paymentId/confirm'),
+      headers: _headers(),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No pudimos confirmar la recepción del pago');
+    }
+  }
+
+  @override
+  Future<Set<String>> savedShiftIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    _localSavedShiftIds
+      ..clear()
+      ..addAll(prefs.getStringList(_savedJobsKey) ?? const []);
+    return Set.unmodifiable(_localSavedShiftIds);
+  }
 
   @override
   Future<void> toggleSavedShift(String shiftId) async {
     _localSavedShiftIds.contains(shiftId)
         ? _localSavedShiftIds.remove(shiftId)
         : _localSavedShiftIds.add(shiftId);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_savedJobsKey, _localSavedShiftIds.toList());
   }
 
   @override
-  Future<Map<String, ApplicationState>> applicationStates() async =>
-      Map.unmodifiable(_localApplicationStates);
+  Future<Map<String, ApplicationState>> applicationStates() async {
+    try {
+      final response = await _client.get(
+        _baseUri.resolve('/api/workers/applications'),
+        headers: _headers(),
+      );
+      if (response.statusCode == 200) {
+        final values = jsonDecode(response.body) as List<dynamic>;
+        final remote = <String, ApplicationState>{};
+        for (final value in values) {
+          final item = value as Map<String, dynamic>;
+          final status = item['status'];
+          final shiftId = item['shiftId'] as String;
+          final shift = item['shift'];
+          final shiftStatus = shift is Map ? shift['status'] as String? : null;
+          final assignment = item['assignment'];
+          final assignmentStatus = assignment is Map
+              ? assignment['status'] as String?
+              : null;
+          final closed =
+              const {'COMPLETED', 'CANCELLED'}.contains(shiftStatus) ||
+              const {'COMPLETED', 'CANCELLED'}.contains(assignmentStatus);
+          remote[shiftId] = switch (status) {
+            'ACCEPTED' =>
+              closed ? ApplicationState.closed : ApplicationState.accepted,
+            'REJECTED' || 'CANCELLED' => ApplicationState.closed,
+            _ => ApplicationState.submitted,
+          };
+          if (shift is Map) {
+            var parsed = _shiftFromJson(Map<String, dynamic>.from(shift));
+            if (assignment is Map &&
+                assignment['checkInCredential'] is String) {
+              parsed = parsed.copyWith(
+                checkInCredential: assignment['checkInCredential'] as String,
+                assignmentConfirmed: assignment['workerConfirmedAt'] != null,
+                checkedIn: assignment['checkedInAt'] != null,
+                checkedOut:
+                    assignment['checkedOutAt'] != null ||
+                    assignmentStatus == 'COMPLETED',
+              );
+            }
+            if (closed) {
+              // Closed assignments belong to history, never to the active
+              // marketplace feed or actionable application cards.
+              _applicationShiftCache.remove(shiftId);
+            } else {
+              _applicationShiftCache[shiftId] =
+                  remote[shiftId] == ApplicationState.accepted
+                  ? parsed.copyWith(state: ShiftState.assigned)
+                  : parsed;
+            }
+          }
+        }
+        _localApplicationStates
+          ..clear()
+          ..addAll(remote);
+        _applicationShiftCache.removeWhere(
+          (shiftId, _) => !remote.containsKey(shiftId),
+        );
+      }
+    } catch (_) {
+      // Keep the last known local state while the API reconnects.
+    }
+    return Map.unmodifiable(_localApplicationStates);
+  }
 
   @override
-  Future<void> applyToShift(String shiftId) async {
+  Future<void> applyToShift(
+    String shiftId, {
+    Map<String, String> answers = const {},
+  }) async {
+    final response = await _client.post(
+      _baseUri.resolve('/api/shifts/$shiftId/applications'),
+      headers: {..._headers(), 'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'answers': answers.entries
+            .map(
+              (entry) => {'question': entry.key, 'answer': entry.value.trim()},
+            )
+            .toList(),
+      }),
+    );
+    if (response.statusCode != 201 && response.statusCode != 200) {
+      throw StateError('No pudimos enviar la postulación');
+    }
     _localApplicationStates[shiftId] = ApplicationState.submitted;
   }
+
+  @override
+  Future<void> confirmAssignment(String shiftId) async {
+    final response = await _client.post(
+      _baseUri.resolve('/api/shifts/$shiftId/confirm'),
+      headers: _headers(),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No pudimos confirmar la asignación');
+    }
+  }
+
+  @override
+  Future<void> checkIn(String shiftId, String credential) async {
+    final response = await _client.post(
+      _baseUri.resolve('/api/shifts/$shiftId/check-in'),
+      headers: {..._headers(), 'Content-Type': 'application/json'},
+      body: jsonEncode({'credential': credential}),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No pudimos validar el check-in');
+    }
+  }
+
+  @override
+  Future<void> checkOut(String shiftId) async {
+    final response = await _client.post(
+      _baseUri.resolve('/api/shifts/$shiftId/check-out'),
+      headers: _headers(),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No pudimos cerrar el turno');
+    }
+  }
+
+  @override
+  Future<void> cancelApplication(String shiftId, String reason) async {
+    final response = await _client.post(
+      _baseUri.resolve('/api/shifts/$shiftId/cancel'),
+      headers: {..._headers(), 'Content-Type': 'application/json'},
+      body: jsonEncode({'reason': reason}),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No pudimos cancelar la postulación');
+    }
+    _localApplicationStates[shiftId] = ApplicationState.closed;
+  }
+
+  @override
+  Future<List<WorkerConversationRecord>> workerConversations() async {
+    final response = await _client.get(
+      _baseUri.resolve('/api/workers/conversations'),
+      headers: _headers(),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No se pudieron cargar los mensajes');
+    }
+    final values = jsonDecode(response.body) as List<dynamic>;
+    return values
+        .map(
+          (value) => _conversationFromJson(
+            Map<String, dynamic>.from(value as Map),
+            summary: true,
+          ),
+        )
+        .toList();
+  }
+
+  @override
+  Future<WorkerConversationRecord> workerConversation(
+    String conversationId,
+  ) async {
+    final response = await _client.get(
+      _baseUri.resolve('/api/workers/conversations/$conversationId'),
+      headers: _headers(),
+    );
+    if (response.statusCode != 200) {
+      throw StateError('No se pudo abrir la conversación');
+    }
+    return _conversationFromJson(
+      Map<String, dynamic>.from(jsonDecode(response.body) as Map),
+    );
+  }
+
+  @override
+  Future<WorkerMessageRecord> sendWorkerMessage(
+    String conversationId,
+    String body,
+  ) async {
+    final response = await _client.post(
+      _baseUri.resolve('/api/workers/conversations/$conversationId/messages'),
+      headers: {..._headers(), 'Content-Type': 'application/json'},
+      body: jsonEncode({'body': body.trim()}),
+    );
+    if (response.statusCode != 201) {
+      throw StateError('No se pudo enviar el mensaje');
+    }
+    return _messageFromJson(
+      Map<String, dynamic>.from(jsonDecode(response.body) as Map),
+    );
+  }
+
+  Map<String, String> _headers() => {
+    if (token case final value? when value.isNotEmpty)
+      'Authorization': 'Bearer $value',
+  };
+
+  WorkerConversationRecord _conversationFromJson(
+    Map<String, dynamic> json, {
+    bool summary = false,
+  }) {
+    final company = Map<String, dynamic>.from(
+      (json['company'] as Map?) ?? const {},
+    );
+    final shift = json['shift'] is Map
+        ? Map<String, dynamic>.from(json['shift'] as Map)
+        : null;
+    final rawMessages = (json['messages'] as List<dynamic>? ?? const []);
+    return WorkerConversationRecord(
+      id: json['id'] as String,
+      company: (company['name'] as String?) ?? 'Empresa',
+      subject: json['subject'] as String? ?? 'Conversación',
+      updatedAt:
+          DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+          DateTime.now(),
+      shiftId: shift?['id'] as String?,
+      shiftTitle: shift?['title'] as String?,
+      messages: summary
+          ? rawMessages
+                .take(1)
+                .map(
+                  (value) =>
+                      _messageFromJson(Map<String, dynamic>.from(value as Map)),
+                )
+                .toList()
+          : rawMessages
+                .map(
+                  (value) =>
+                      _messageFromJson(Map<String, dynamic>.from(value as Map)),
+                )
+                .toList(),
+    );
+  }
+
+  WorkerMessageRecord _messageFromJson(Map<String, dynamic> json) =>
+      WorkerMessageRecord(
+        id: json['id'] as String,
+        sender: json['sender'] as String? ?? 'BUSINESS',
+        body: json['body'] as String? ?? '',
+        createdAt:
+            DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+            DateTime.now(),
+        readAt: DateTime.tryParse(json['readAt'] as String? ?? ''),
+      );
 
   Shift _shiftFromJson(Map<String, dynamic> json) {
     return Shift(
@@ -157,10 +533,24 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       industry: _industryFromApi(json['industry'] as String?),
       location: json['location'] as String,
       dateScope: ShiftDateScope.any,
-      state: json['status'] == 'ASSIGNED'
-          ? ShiftState.assigned
-          : ShiftState.published,
+      state: switch (json['status']) {
+        'ASSIGNED' => ShiftState.assigned,
+        'CHECKED_IN' => ShiftState.checkedIn,
+        'COMPLETED' || 'CANCELLED' => ShiftState.completed,
+        _ => ShiftState.published,
+      },
       checkInCredential: json['checkInCredential'] as String?,
+      description: json['description'] as String?,
+      responsibilities: json['responsibilities'] as String?,
+      requirements: json['requirements'] as String?,
+      screeningQuestions:
+          (json['screeningQuestions'] as List<dynamic>?)
+              ?.whereType<String>()
+              .toList() ??
+          const [],
+      modality: json['modality'] as String? ?? 'PRESENCIAL',
+      companyVerified: json['companyVerified'] == true,
+      paymentProtected: json['paymentProtected'] == true,
     );
   }
 
@@ -182,6 +572,8 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
           shift.match,
           shift.urgent,
           shift.location,
+          shift.modality,
+          shift.screeningQuestions.join('~'),
           shift.state,
         ].join(':'),
       )

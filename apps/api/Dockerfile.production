@@ -1,0 +1,26 @@
+FROM node:22-alpine AS build
+
+WORKDIR /workspace
+COPY package*.json ./
+COPY apps/api/package.json ./apps/api/package.json
+COPY apps/web/package.json ./apps/web/package.json
+COPY packages/shared/package.json ./packages/shared/package.json
+RUN npm ci
+
+COPY apps/api ./apps/api
+RUN npx prisma generate --schema apps/api/prisma/schema.prisma \
+  && npx tsc -p apps/api/tsconfig.json --outDir apps/api/dist
+
+FROM node:22-alpine AS runtime
+
+ENV NODE_ENV=production
+WORKDIR /workspace
+COPY --from=build /workspace/node_modules ./node_modules
+COPY --from=build /workspace/package*.json ./
+COPY --from=build /workspace/apps/api/package.json ./apps/api/package.json
+COPY --from=build /workspace/apps/api/dist ./apps/api/dist
+COPY --from=build /workspace/apps/api/prisma ./apps/api/prisma
+
+WORKDIR /workspace/apps/api
+EXPOSE 4000
+CMD ["sh", "-c", "npx prisma migrate deploy --schema prisma/schema.prisma && node dist/src/server.js"]

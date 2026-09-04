@@ -28,12 +28,15 @@ const shiftFields = {
   endsAt: z.coerce.date(),
   payCents: z.number().int().positive().max(100_000_00),
   requiredWorkers: z.number().int().min(1).max(200),
-  confirmedWorkers: z.number().int().min(0).max(200).optional(),
+  description: z.string().trim().min(20).max(4000).nullable().optional(),
+  responsibilities: z.string().trim().min(10).max(3000).nullable().optional(),
+  requirements: z.string().trim().min(5).max(3000).nullable().optional(),
+  screeningQuestions: z.array(z.string().trim().min(10).max(240)).max(3).optional(),
+  modality: z.enum(['PRESENCIAL', 'REMOTO', 'HIBRIDO']).optional(),
   notes: z.string().trim().max(2000).nullable().optional(),
   rescueActive: z.boolean().optional(),
-  status: z.enum(['PUBLISHED', 'ASSIGNED', 'CHECKED_IN', 'COMPLETED', 'CANCELLED']).optional(),
 };
-const shiftSchema = z.object(shiftFields).refine((value) => value.endsAt > value.startsAt, { message: 'INVALID_DATE_RANGE', path: ['endsAt'] }).refine((value) => (value.confirmedWorkers ?? 0) <= value.requiredWorkers, { message: 'INVALID_COVERAGE', path: ['confirmedWorkers'] });
+const shiftSchema = z.object(shiftFields).strict().refine((value) => value.endsAt > value.startsAt, { message: 'INVALID_DATE_RANGE', path: ['endsAt'] });
 const shiftUpdateSchema = z.object(shiftFields).partial().refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE').refine((value) => !value.startsAt || !value.endsAt || value.endsAt > value.startsAt, { message: 'INVALID_DATE_RANGE', path: ['endsAt'] });
 
 const workerFields = {
@@ -44,10 +47,6 @@ const workerFields = {
   skills: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
   status: z.enum(['AVAILABLE', 'ON_SHIFT', 'UNAVAILABLE']).optional(),
   availability: z.string().trim().max(160).nullable().optional(),
-  cumpleScore: z.number().int().min(0).max(100).optional(),
-  matchScore: z.number().int().min(0).max(100).optional(),
-  completedJobs: z.number().int().min(0).max(100_000).optional(),
-  verified: z.boolean().optional(),
 };
 const workerSchema = z.object(workerFields);
 const workerUpdateSchema = workerSchema.partial().refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
@@ -79,6 +78,15 @@ const paymentFields = {
 };
 const paymentSchema = z.object(paymentFields);
 const paymentUpdateSchema = paymentSchema.partial().refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
+const applicationDecisionSchema = z.object({
+  decision: z.enum(['ACCEPTED', 'REJECTED']),
+  reason: z.string().trim().min(3).max(500).optional(),
+}).superRefine((value, context) => {
+  if (value.decision === 'REJECTED' && !value.reason) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['reason'], message: 'REJECTION_REASON_REQUIRED' });
+  }
+});
+const cancellationSchema = z.object({ reason: z.string().trim().min(3).max(500) });
 
 type BusinessHandler = (request: Request, response: Response, session: AuthSession) => Promise<void>;
 
@@ -149,6 +157,7 @@ export function createBusinessRouter(
   const router = Router();
 
   router.get('/company', route(authService, async (_request, response, session) => { response.json(await operations.getCompany(session)); }));
+  router.get('/subscription', route(authService, async (_request, response, session) => { response.json(await operations.getSubscription(session)); }));
   router.patch('/company', route(authService, async (request, response, session) => { response.json(await operations.updateCompany(session, companySchema.parse(request.body))); }));
 
   router.get('/shifts', route(authService, async (_request, response, session) => { response.json(await operations.listShifts(session)); }));
@@ -167,6 +176,26 @@ export function createBusinessRouter(
     await operations.deleteShift(session, param(request, 'id'));
     onShiftsChanged();
     response.status(204).send();
+  }));
+  router.post('/shifts/:id/cancel', route(authService, async (request, response, session) => {
+    const result = await operations.cancelShift(session, param(request, 'id'), cancellationSchema.parse(request.body).reason);
+    onShiftsChanged();
+    response.json(result);
+  }));
+  router.get('/shifts/:id/applications', route(authService, async (request, response, session) => {
+    response.json(await operations.listShiftApplications(session, param(request, 'id')));
+  }));
+  router.get('/applications/pending', route(authService, async (_request, response, session) => {
+    response.json(await operations.pendingApplications(session));
+  }));
+  router.get('/shifts/:id/events', route(authService, async (request, response, session) => {
+    response.json(await operations.listShiftEvents(session, param(request, 'id')));
+  }));
+  router.patch('/shifts/:id/applications/:applicationId', route(authService, async (request, response, session) => {
+    const input = applicationDecisionSchema.parse(request.body);
+    const result = await operations.decideShiftApplication(session, param(request, 'id'), param(request, 'applicationId'), input.decision, input.reason);
+    onShiftsChanged();
+    response.json(result);
   }));
 
   router.get('/workers', route(authService, async (_request, response, session) => { response.json(await operations.listWorkers(session)); }));

@@ -23,14 +23,8 @@ class CompanyDashboardPage extends StatelessWidget {
         ),
       ],
     ),
-    floatingActionButton: FloatingActionButton.extended(
-      onPressed: () {},
-      backgroundColor: AppColors.teal,
-      icon: const Icon(Icons.add),
-      label: const Text('Publicar turno'),
-    ),
     body: ListView(
-      padding: const EdgeInsets.fromLTRB(20, 10, 20, 94),
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
       children: [
         const Text(
           'Restaurante La Mar',
@@ -59,28 +53,24 @@ class CompanyDashboardPage extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 24),
-        _Section(
-          title: 'Acciones rápidas',
-          child: Row(
+        const _FlowGuide(),
+        const SizedBox(height: 24),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border.all(color: AppColors.border),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: const Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Icon(Icons.open_in_new_rounded, color: AppColors.teal),
+              SizedBox(width: 12),
               Expanded(
-                child: _Action(
-                  icon: Icons.add_business_outlined,
-                  label: 'Publicar\nturno',
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _Action(
-                  icon: Icons.people_outline,
-                  label: 'Ver\ntrabajadores',
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _Action(
-                  icon: Icons.payments_outlined,
-                  label: 'Gestionar\npagos',
+                child: Text(
+                  'Este resumen te orienta. Publica turnos, acepta postulantes y reporta pagos desde el panel web para mantener todos los registros en un solo lugar.',
+                  style: TextStyle(color: AppColors.navy, fontSize: 12, height: 1.35),
                 ),
               ),
             ],
@@ -108,7 +98,7 @@ class CompanyDashboardPage extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'CUMPLE Rescate',
+                      'Reemplazo manual',
                       style: TextStyle(
                         color: AppColors.navy,
                         fontWeight: FontWeight.w800,
@@ -116,16 +106,8 @@ class CompanyDashboardPage extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     const Text(
-                      'Faltó 1 trabajador para el turno de esta noche.',
+                      'Si alguien cancela, podrás buscar un reemplazo desde el mismo turno.',
                       style: TextStyle(color: AppColors.muted, fontSize: 12),
-                    ),
-                    const SizedBox(height: 10),
-                    FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFFF59E0B),
-                      ),
-                      onPressed: () {},
-                      child: const Text('Activar rescate IA'),
                     ),
                   ],
                 ),
@@ -178,6 +160,89 @@ class CompanyDashboardPage extends StatelessWidget {
   );
 }
 
+class _FlowGuide extends StatelessWidget {
+  const _FlowGuide();
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: AppColors.tealSoft,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: const Color(0xFFBFEFE4)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Cómo funciona CumpleNow',
+          style: TextStyle(color: AppColors.navy, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: const [
+            _FlowStep(number: '1', label: 'Publica\nun turno'),
+            _FlowConnector(),
+            _FlowStep(number: '2', label: 'Acepta\npostulantes'),
+            _FlowConnector(),
+            _FlowStep(
+              number: '3',
+              label: 'Valida asistencia\ny reporta el pago',
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+class _FlowStep extends StatelessWidget {
+  const _FlowStep({required this.number, required this.label});
+
+  final String number;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+    child: Column(
+      children: [
+        CircleAvatar(
+          radius: 15,
+          backgroundColor: AppColors.teal,
+          child: Text(
+            number,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+        const SizedBox(height: 7),
+        Text(
+          label,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+            color: AppColors.navy,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            height: 1.15,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _FlowConnector extends StatelessWidget {
+  const _FlowConnector();
+
+  @override
+  Widget build(BuildContext context) => const Padding(
+    padding: EdgeInsets.only(bottom: 27),
+    child: Icon(Icons.arrow_forward_rounded, color: AppColors.teal, size: 16),
+  );
+}
+
 class _Metric extends StatelessWidget {
   const _Metric({required this.value, required this.label, required this.icon});
   final String value;
@@ -216,37 +281,6 @@ class _Metric extends StatelessWidget {
           ),
         ],
       ),
-    ),
-  );
-}
-
-class _Action extends StatelessWidget {
-  const _Action({required this.icon, required this.label});
-  final IconData icon;
-  final String label;
-  @override
-  Widget build(BuildContext context) => Container(
-    height: 94,
-    decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
-      borderRadius: BorderRadius.circular(13),
-    ),
-    child: Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(icon, color: AppColors.teal),
-        const SizedBox(height: 8),
-        Text(
-          label,
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-            color: AppColors.navy,
-            fontSize: 10,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ],
     ),
   );
 }

@@ -22,6 +22,25 @@ export type CompanyRecord = {
   district: string | null;
 };
 
+export type SubscriptionRecord = {
+  id: string;
+  plan: 'PILOT' | 'PRO' | 'CUSTOM';
+  status: 'TRIAL' | 'ACTIVE' | 'PAUSED' | 'EXPIRED' | 'CANCELLED';
+  startsAt: string;
+  endsAt: string | null;
+  trialEndsAt: string | null;
+};
+
+export type ShiftEventRecord = {
+  id: string;
+  shiftId: string;
+  actorId: string | null;
+  actorRole: 'WORKER' | 'BUSINESS' | 'SYSTEM';
+  type: string;
+  detail: string | null;
+  createdAt: string;
+};
+
 export type ShiftRecord = {
   id: string;
   title: string;
@@ -31,9 +50,43 @@ export type ShiftRecord = {
   payCents: number;
   requiredWorkers: number;
   confirmedWorkers: number;
+  description: string | null;
+  responsibilities: string | null;
+  requirements: string | null;
+  screeningQuestions: string[] | null;
+  modality: 'PRESENCIAL' | 'REMOTO' | 'HIBRIDO';
   notes: string | null;
   rescueActive: boolean;
   status: 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
+};
+
+export type ShiftApplicationRecord = {
+  id: string;
+  shiftId: string;
+  workerId: string;
+  status: 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'WITHDRAWN' | 'CANCELLED';
+  createdAt: string;
+  updatedAt: string;
+  screeningAnswers: { question: string; answer: string }[] | null;
+  worker: { id: string; name: string; email: string | null; identifier: string };
+  assignment?: {
+    id: string;
+    status: 'ASSIGNED' | 'CANCELLED' | 'COMPLETED';
+    checkInCredential: string | null;
+    workerConfirmedAt: string | null;
+    checkedInAt: string | null;
+    checkedOutAt: string | null;
+  } | null;
+  nextAction: {
+    actor: 'BUSINESS' | 'WORKER' | 'NONE';
+    code: 'REVIEW_APPLICATION' | 'CONFIRM_ASSIGNMENT' | 'CHECK_IN' | 'CHECK_OUT' | 'NONE';
+    label: string;
+  };
+};
+
+export type PendingApplicationsSummary = {
+  count: number;
+  shiftIds: string[];
 };
 
 export type WorkerRecord = {
@@ -81,6 +134,9 @@ export type PaymentRecord = {
   dueAt: string | null;
   processedAt: string | null;
   createdAt: string;
+  shift?: { id: string; title: string; startsAt: string; endsAt: string } | null;
+  assignment?: { id: string; status: 'ASSIGNED' | 'CANCELLED' | 'COMPLETED'; worker: { id: string; name: string; email: string | null } } | null;
+  workerConfirmedAt: string | null;
 };
 
 export class ApiError extends Error {
@@ -108,7 +164,6 @@ async function request<T>(path: string, options: RequestInit & { token?: string 
 
 export const authApi = {
   login: (email: string, password: string) => request<BusinessSession>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
-  register: (input: { name: string; email: string; password: string; dniOrRuc: string }) => request<BusinessSession>('/auth/register', { method: 'POST', body: JSON.stringify({ ...input, role: 'BUSINESS' }) }),
   restore: (token: string) => request<BusinessSession>('/auth/session', { token }),
   logout: (token: string) => request<void>('/auth/session', { method: 'DELETE', token }),
 };
@@ -128,7 +183,19 @@ export const businessApi = {
     get: (token: string) => request<CompanyRecord>('/business/company', { token }),
     update: (token: string, input: unknown) => request<CompanyRecord>('/business/company', { method: 'PATCH', token, body: JSON.stringify(input) }),
   },
-  shifts: resource<ShiftRecord>('/business/shifts'),
+  subscription: {
+    get: (token: string) => request<SubscriptionRecord>('/business/subscription', { token }),
+  },
+  shifts: {
+    ...resource<ShiftRecord>('/business/shifts'),
+    cancel: (token: string, id: string, reason: string) => request<ShiftRecord>(`/business/shifts/${id}/cancel`, { method: 'POST', token, body: JSON.stringify({ reason }) }),
+    events: (token: string, id: string) => request<ShiftEventRecord[]>(`/business/shifts/${id}/events`, { token }),
+  },
+  applications: {
+    list: (token: string, shiftId: string) => request<ShiftApplicationRecord[]>(`/business/shifts/${shiftId}/applications`, { token }),
+    pending: (token: string) => request<PendingApplicationsSummary>('/business/applications/pending', { token }),
+    decide: (token: string, shiftId: string, applicationId: string, decision: 'ACCEPTED' | 'REJECTED', reason?: string) => request<ShiftApplicationRecord>(`/business/shifts/${shiftId}/applications/${applicationId}`, { method: 'PATCH', token, body: JSON.stringify({ decision, ...(reason ? { reason } : {}) }) }),
+  },
   workers: resource<WorkerRecord>('/business/workers'),
   conversations: {
     ...resource<ConversationRecord>('/business/conversations'),

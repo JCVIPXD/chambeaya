@@ -1,19 +1,40 @@
 import { Router } from 'express';
+import { z } from 'zod';
 
+import { DatabaseAuthService, type AuthService } from '../auth/auth.service.js';
 import { marketplaceShiftEvents, type MarketplaceShiftEvents } from './marketplace.events.js';
-import { DatabaseMarketplaceService, MarketplaceError, type MarketplaceOperations } from './marketplace.service.js';
+import { DatabaseMarketplaceService, DemoMarketplaceService, MarketplaceError, type MarketplaceOperations } from './marketplace.service.js';
 import type { ShiftIndustry, ShiftSearchFilter } from './shift_search.js';
+
+const screeningAnswersSchema = z.object({
+  answers: z.array(z.object({
+    question: z.string().trim().min(10).max(240),
+    answer: z.string().trim().min(1).max(1000),
+  })).max(3).default([]),
+});
 
 export function createMarketplaceRouter(
   service: MarketplaceOperations = new DatabaseMarketplaceService(),
   events: MarketplaceShiftEvents = marketplaceShiftEvents,
+  authService: AuthService = new DatabaseAuthService(),
 ) {
   const router = Router();
   const workerId = (value: unknown) => typeof value === 'string' && value.trim() ? value : 'worker-demo';
+  const authenticatedWorkerId = async (request: import('express').Request) => {
+    const authorization = request.header('authorization') ?? '';
+    if (authorization.startsWith('Bearer ')) {
+      const session = await authService.restore(authorization.slice(7).trim());
+      if (session.role !== 'WORKER') throw new MarketplaceError('SHIFT_UNAVAILABLE', 403);
+      return session.userId;
+    }
+    if (service instanceof DemoMarketplaceService) return workerId(request.header('x-demo-worker-id'));
+    throw new MarketplaceError('SHIFT_UNAVAILABLE', 401);
+  };
 
   router.get('/shifts', async (request, response) => {
     const industry = request.query.industry;
     const minimumPay = request.query.minPayCents;
+    const modality = request.query.modality;
     const allowedIndustries: ShiftIndustry[] = ['HOSPITALITY', 'FOOD_SERVICE', 'RETAIL', 'EVENTS'];
     if (industry && (typeof industry !== 'string' || !allowedIndustries.includes(industry as ShiftIndustry))) {
       response.status(400).json({ error: 'Invalid industry filter' });
@@ -23,12 +44,18 @@ export function createMarketplaceRouter(
       response.status(400).json({ error: 'minPayCents must be a positive integer' });
       return;
     }
+    const allowedModalities = ['PRESENCIAL', 'REMOTO', 'HIBRIDO'];
+    if (modality && (typeof modality !== 'string' || !allowedModalities.includes(modality))) {
+      response.status(400).json({ error: 'Invalid modality filter' });
+      return;
+    }
     const filter: ShiftSearchFilter = {
       query: typeof request.query.q === 'string' ? request.query.q : undefined,
       industry: industry as ShiftIndustry | undefined,
       minPayCents: minimumPay ? Number(minimumPay) : undefined,
       urgentOnly: request.query.urgentOnly === 'true',
       recommendedOnly: request.query.recommendedOnly === 'true',
+      modality: modality as string | undefined,
     };
     response.json(await service.listAvailableShifts(filter));
   });
@@ -63,10 +90,143 @@ export function createMarketplaceRouter(
     });
     sendSnapshot();
   });
-  router.get('/shifts/active', async (request, response) => response.json(await service.activeShift(workerId(request.header('x-demo-worker-id')))));
+  router.get('/shifts/active', async (request, response) => {
+    try {
+      response.json(await service.activeShift(await authenticatedWorkerId(request)));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.get('/workers/applications', async (request, response) => {
+    try {
+      response.json(await service.listApplications(await authenticatedWorkerId(request)));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.get('/workers/conversations', async (request, response) => {
+    try {
+      response.json(await service.listWorkerConversations(await authenticatedWorkerId(request)));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.post('/workers/payments/:id/confirm', async (request, response) => {
+    try {
+      response.json(await service.confirmPayment(await authenticatedWorkerId(request), request.params.id));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.get('/workers/conversations/:id', async (request, response) => {
+    try {
+      response.json(await service.getWorkerConversation(await authenticatedWorkerId(request), request.params.id));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.post('/workers/conversations/:id/messages', async (request, response) => {
+    try {
+      const body = typeof request.body?.body === 'string' ? request.body.body.trim() : '';
+      if (body.length < 1 || body.length > 4000) {
+        response.status(400).json({ error: 'INVALID_MESSAGE' });
+        return;
+      }
+      response.status(201).json(await service.createWorkerMessage(await authenticatedWorkerId(request), request.params.id, body));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.post('/shifts/:id/applications', async (request, response) => {
+    try {
+      const input = screeningAnswersSchema.parse(request.body ?? {});
+      const application = await service.applyToShift(await authenticatedWorkerId(request), request.params.id, input.answers);
+      response.status(201).json(application);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        response.status(400).json({ error: 'INVALID_SCREENING_ANSWERS', issues: error.issues });
+        return;
+      }
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.post('/shifts/:id/confirm', async (request, response) => {
+    try {
+      response.json(await service.confirmAssignment(await authenticatedWorkerId(request), request.params.id));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.post('/shifts/:id/check-in', async (request, response) => {
+    try {
+      const credential = typeof request.body?.credential === 'string' ? request.body.credential : '';
+      response.json(await service.checkIn(await authenticatedWorkerId(request), request.params.id, credential));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.post('/shifts/:id/check-out', async (request, response) => {
+    try {
+      response.json(await service.checkOut(await authenticatedWorkerId(request), request.params.id));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.post('/shifts/:id/cancel', async (request, response) => {
+    try {
+      const reason = typeof request.body?.reason === 'string' ? request.body.reason : '';
+      response.json(await service.cancelAssignment(await authenticatedWorkerId(request), request.params.id, reason));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
   router.put('/shifts/:id/accept', async (request, response) => {
     try {
-      response.json(await service.acceptShift(workerId(request.header('x-demo-worker-id')), request.params.id));
+      response.json(await service.acceptShift(await authenticatedWorkerId(request), request.params.id));
     } catch (error) {
       if (error instanceof MarketplaceError) {
         response.status(error.statusCode).json({ error: error.code });
@@ -76,13 +236,44 @@ export function createMarketplaceRouter(
     }
   });
   router.put('/workers/availability', async (request, response) => {
-    if (typeof request.body?.isAvailable !== 'boolean') {
-      response.status(400).json({ error: 'isAvailable must be a boolean' });
-      return;
+    try {
+      const authenticatedId = await authenticatedWorkerId(request);
+      if (typeof request.body?.isAvailable !== 'boolean') {
+        response.status(400).json({ error: 'isAvailable must be a boolean' });
+        return;
+      }
+      response.json(await service.updateAvailability(authenticatedId, request.body.isAvailable));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
     }
-    response.json(await service.updateAvailability(request.body.isAvailable));
   });
-  router.get('/workers/wallet', async (_request, response) => response.json(await service.wallet()));
+  router.get('/workers/availability', async (request, response) => {
+    try {
+      response.json(await service.workerAvailability(await authenticatedWorkerId(request)));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
+  router.get('/workers/wallet', async (request, response) => {
+    try {
+      const authenticatedId = await authenticatedWorkerId(request);
+      response.json(await service.wallet(authenticatedId));
+    } catch (error) {
+      if (error instanceof MarketplaceError) {
+        response.status(error.statusCode).json({ error: error.code });
+        return;
+      }
+      response.status(401).json({ error: 'INVALID_SESSION' });
+    }
+  });
 
   return router;
 }

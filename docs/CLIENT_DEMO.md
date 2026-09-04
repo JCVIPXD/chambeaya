@@ -7,10 +7,10 @@ Esta versión presenta el flujo profesional para trabajadores en Android, iOS y 
 Desde la raíz del proyecto:
 
 ```powershell
-.\.tools\flutter\bin\flutter.bat run -d chrome --web-port 7357
+npm run dev:mobile
 ```
 
-Abre `http://localhost:7357`. En este modo el registro y el acceso se validan localmente; no se crea una cuenta real y no se necesita Docker.
+Abre `http://localhost:7357`. El lanzador usa `web-server` para evitar pantallas en blanco por el arranque de Chrome; si necesitas una ventana Chrome administrada por Flutter, añade `-- -Device chrome`.
 
 ## Datos sugeridos para la presentación
 
@@ -48,7 +48,7 @@ Cuando Docker Desktop esté listo:
 
 ```powershell
 docker compose up --build
-.\.tools\flutter\bin\flutter.bat run -d chrome --web-port 7357 --dart-define=USE_LOCAL_API=true
+npm run dev:mobile -- -UseLocalApi
 ```
 
 Este modo envía registro e inicio de sesión a `http://127.0.0.1:4000/api` y consulta la API local de empleos.

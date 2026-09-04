@@ -6,6 +6,7 @@ export interface SearchableShift {
   businessName: string;
   industry: ShiftIndustry;
   location: string;
+  modality?: string;
   workerPayCents: number;
   urgent: boolean;
   matchScore: number;
@@ -17,6 +18,7 @@ export interface ShiftSearchFilter {
   minPayCents?: number;
   urgentOnly?: boolean;
   recommendedOnly?: boolean;
+  modality?: string;
 }
 
 export function filterShifts<T extends SearchableShift>(shifts: readonly T[], filter: ShiftSearchFilter): T[] {
@@ -27,5 +29,6 @@ export function filterShifts<T extends SearchableShift>(shifts: readonly T[], fi
       .filter((shift) => !filter.minPayCents || shift.workerPayCents >= filter.minPayCents)
       .filter((shift) => !filter.urgentOnly || shift.urgent)
       .filter((shift) => !filter.recommendedOnly || shift.matchScore >= 80)
+      .filter((shift) => !filter.modality || shift.modality === filter.modality)
       .sort((left, right) => Number(right.urgent) - Number(left.urgent) || right.matchScore - left.matchScore || left.role.localeCompare(right.role));
 }

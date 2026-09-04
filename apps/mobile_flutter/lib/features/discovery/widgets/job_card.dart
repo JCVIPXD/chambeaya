@@ -157,7 +157,7 @@ class JobCard extends StatelessWidget {
               children: [
                 _BenefitChip(
                   icon: Icons.lock_outline_rounded,
-                  label: 'Pago protegido',
+                  label: 'Pago informado',
                 ),
                 _BenefitChip(
                   icon: Icons.flash_on_rounded,

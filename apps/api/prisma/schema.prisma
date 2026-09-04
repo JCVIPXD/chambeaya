@@ -44,27 +44,94 @@ enum PaymentStatus {
   CANCELLED
 }
 
+enum WalletMovementStatus {
+  PENDING
+  RELEASED
+  REVERSED
+}
+
+enum ApplicationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+  CANCELLED
+}
+
+enum AssignmentStatus {
+  ASSIGNED
+  CANCELLED
+  COMPLETED
+}
+
+enum CancellationActorRole {
+  WORKER
+  BUSINESS
+}
+
+enum SubscriptionPlan {
+  PILOT
+  PRO
+  CUSTOM
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAUSED
+  EXPIRED
+  CANCELLED
+}
+
+enum ShiftEventType {
+  PUBLISHED
+  UPDATED
+  APPLICATION_SUBMITTED
+  APPLICATION_ACCEPTED
+  APPLICATION_REJECTED
+  ASSIGNMENT_CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+  COMPLETED
+  PAYMENT_REPORTED
+  PAYMENT_CONFIRMED
+}
+
+enum ShiftEventActorRole {
+  WORKER
+  BUSINESS
+  SYSTEM
+}
+
 model User {
-  id           String        @id @default(cuid())
-  email        String        @unique
-  passwordHash String
-  salt         String
-  role         UserRole
-  name         String
-  identifier   String        @unique
-  sessions     AuthSession[]
-  company      Company?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id            String              @id @default(cuid())
+  email         String              @unique
+  passwordHash  String
+  salt          String
+  role          UserRole
+  name          String
+  identifier    String              @unique
+  sessions      AuthSession[]
+  applications  ShiftApplication[]
+  assignments   ShiftAssignment[]
+  cancellations ShiftCancellation[]
+  events        ShiftEvent[]
+  walletMovements WalletMovement[]
+  conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
+  workerProfiles WorkerProfile[] @relation("WorkerProfileUser")
+  company       Company?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
 }
 
 model Company {
-  id            String          @id @default(cuid())
-  ownerId       String          @unique
-  owner         User            @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id            String               @id @default(cuid())
+  ownerId       String               @unique
+  owner         User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   name          String
   legalName     String?
-  ruc           String          @unique
+  ruc           String               @unique
   industry      String?
   phone         String?
   address       String?
@@ -73,8 +140,9 @@ model Company {
   workers       WorkerProfile[]
   conversations Conversation[]
   payments      Payment[]
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
+  subscription  CompanySubscription?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
 }
 
 model AuthSession {
@@ -90,31 +158,129 @@ model AuthSession {
 }
 
 model Shift {
-  id               String         @id @default(cuid())
+  id               String              @id @default(cuid())
   companyId        String
-  company          Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  company          Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
   title            String
   location         String
   startsAt         DateTime
   endsAt           DateTime
   payCents         Int
-  requiredWorkers  Int            @default(1)
-  confirmedWorkers Int            @default(0)
+  requiredWorkers  Int                 @default(1)
+  confirmedWorkers Int                 @default(0)
+  description      String?
+  responsibilities String?
+  requirements     String?
+  screeningQuestions Json?
+  modality         String              @default("PRESENCIAL")
   notes            String?
-  rescueActive     Boolean        @default(false)
-  status           ShiftStatus    @default(PUBLISHED)
+  rescueActive     Boolean             @default(false)
+  status           ShiftStatus         @default(PUBLISHED)
   conversations    Conversation[]
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  applications     ShiftApplication[]
+  assignments      ShiftAssignment[]
+  cancellations    ShiftCancellation[]
+  events           ShiftEvent[]
+  payments         Payment[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
 
   @@index([companyId, startsAt])
   @@index([companyId, status])
+}
+
+model ShiftApplication {
+  id         String            @id @default(cuid())
+  shiftId    String
+  shift      Shift             @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  workerId   String
+  worker     User              @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  status     ApplicationStatus @default(PENDING)
+  screeningAnswers Json?
+  assignment ShiftAssignment?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  @@unique([shiftId, workerId])
+  @@index([workerId, status])
+  @@index([shiftId, status])
+}
+
+model ShiftAssignment {
+  id                String              @id @default(cuid())
+  shiftId           String
+  shift             Shift               @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  workerId          String
+  worker            User                @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  applicationId     String              @unique
+  application       ShiftApplication    @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  status            AssignmentStatus    @default(ASSIGNED)
+  checkInCredential String?
+  workerConfirmedAt DateTime?
+  checkedInAt       DateTime?
+  checkedOutAt      DateTime?
+  cancellations     ShiftCancellation[]
+  assignedAt        DateTime            @default(now())
+  completedAt       DateTime?
+  payment           Payment?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@unique([shiftId, workerId])
+  @@index([workerId, status])
+  @@index([shiftId, status])
+}
+
+model ShiftCancellation {
+  id           String                @id @default(cuid())
+  shiftId      String
+  shift        Shift                 @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  assignmentId String?
+  assignment   ShiftAssignment?      @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  actorId      String
+  actor        User                  @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  actorRole    CancellationActorRole
+  reason       String
+  createdAt    DateTime              @default(now())
+
+  @@index([shiftId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model ShiftEvent {
+  id        String              @id @default(cuid())
+  shiftId   String
+  shift     Shift               @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  actorId   String?
+  actor     User?               @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole ShiftEventActorRole
+  type      ShiftEventType
+  detail    String?
+  createdAt DateTime            @default(now())
+
+  @@index([shiftId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model CompanySubscription {
+  id          String             @id @default(cuid())
+  companyId   String             @unique
+  company     Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  plan        SubscriptionPlan   @default(PILOT)
+  status      SubscriptionStatus @default(TRIAL)
+  startsAt    DateTime           @default(now())
+  endsAt      DateTime?
+  trialEndsAt DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
 }
 
 model WorkerProfile {
   id            String         @id @default(cuid())
   companyId     String
   company       Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  workerUserId  String?
+  workerUser    User?          @relation("WorkerProfileUser", fields: [workerUserId], references: [id], onDelete: SetNull)
   name          String
   email         String?
   phone         String?
@@ -131,6 +297,7 @@ model WorkerProfile {
   updatedAt     DateTime       @updatedAt
 
   @@unique([companyId, email])
+  @@index([workerUserId, status])
   @@index([companyId, status])
 }
 
@@ -140,6 +307,8 @@ model Conversation {
   company   Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
   workerId  String
   worker    WorkerProfile      @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  workerUserId String?
+  workerUser User?             @relation("WorkerUserConversations", fields: [workerUserId], references: [id], onDelete: Cascade)
   shiftId   String?
   shift     Shift?             @relation(fields: [shiftId], references: [id], onDelete: SetNull)
   subject   String
@@ -150,6 +319,7 @@ model Conversation {
 
   @@index([companyId, updatedAt])
   @@index([workerId])
+  @@index([workerUserId, updatedAt])
 }
 
 model Message {
@@ -168,6 +338,10 @@ model Payment {
   id          String        @id @default(cuid())
   companyId   String
   company     Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  shiftId     String?
+  shift       Shift?        @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  assignmentId String?      @unique
+  assignment  ShiftAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   reference   String
   description String
   amountCents Int
@@ -175,9 +349,26 @@ model Payment {
   status      PaymentStatus @default(PENDING)
   dueAt       DateTime?
   processedAt DateTime?
+  workerConfirmedAt DateTime?
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
   @@unique([companyId, reference])
   @@index([companyId, status])
+  @@index([shiftId])
+}
+
+model WalletMovement {
+  id          String               @id @default(cuid())
+  workerId    String
+  worker      User                 @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  amountCents Int
+  description String
+  status      WalletMovementStatus @default(PENDING)
+  reference   String?
+  createdAt   DateTime             @default(now())
+
+  @@index([workerId, createdAt])
+  @@index([workerId, status])
+  @@unique([workerId, reference])
 }

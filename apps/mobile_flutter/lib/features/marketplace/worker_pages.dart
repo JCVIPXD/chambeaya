@@ -31,12 +31,62 @@ class _ShiftsPageState extends State<ShiftsPage> {
   }
 
   Future<void> _accept(Shift shift) async {
-    final accepted = await widget.repository.acceptShift(shift.id);
-    widget.onAccepted(accepted);
-    final refreshedShifts = widget.repository.availableShifts();
-    setState(() {
-      _shifts = refreshedShifts;
-    });
+    final answers = <String, String>{};
+    if (shift.screeningQuestions.isNotEmpty) {
+      final controllers = {
+        for (final question in shift.screeningQuestions)
+          question: TextEditingController(),
+      };
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Antes de postular'),
+          content: SingleChildScrollView(
+            child: Column(
+              children: controllers.entries
+                  .map(
+                    (entry) => TextField(
+                      controller: entry.value,
+                      decoration: InputDecoration(labelText: entry.key),
+                      maxLines: 2,
+                    ),
+                  )
+                  .toList(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Continuar'),
+            ),
+          ],
+        ),
+      );
+      for (final entry in controllers.entries) {
+        answers[entry.key] = entry.value.text;
+        entry.value.dispose();
+      }
+      if (confirmed != true) return;
+    }
+    try {
+      await widget.repository.applyToShift(shift.id, answers: answers);
+      widget.onAccepted(shift);
+      if (mounted)
+        setState(() => _shifts = widget.repository.availableShifts());
+    } catch (_) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'No pudimos enviar la postulación. Revisa tus respuestas.',
+            ),
+          ),
+        );
+    }
   }
 
   void _updateFilter({
@@ -72,6 +122,15 @@ class _ShiftsPageState extends State<ShiftsPage> {
               padding: EdgeInsets.all(32),
               child: CircularProgressIndicator(),
             ),
+          );
+        }
+        if (snapshot.hasError) {
+          return _WalletState(
+            icon: Icons.cloud_off_outlined,
+            title: 'No pudimos cargar los turnos',
+            message: 'Verifica tu conexión e inténtalo nuevamente.',
+            action: () =>
+                setState(() => _shifts = widget.repository.availableShifts()),
           );
         }
         final filtered = filterDemoShifts(shifts, _filter);
@@ -145,29 +204,143 @@ class _ShiftsPageState extends State<ShiftsPage> {
   );
 }
 
-class HistoryPage extends StatelessWidget {
+class HistoryPage extends StatefulWidget {
   const HistoryPage({super.key, required this.repository});
 
   final WorkerMarketplaceRepository repository;
 
   @override
+  State<HistoryPage> createState() => _HistoryPageState();
+}
+
+class _HistoryPageState extends State<HistoryPage> {
+  late Future<List<PaymentRecord>> _movements;
+
+  @override
+  void initState() {
+    super.initState();
+    _movements = widget.repository.walletMovements();
+  }
+
+  void _retry() {
+    setState(() => _movements = widget.repository.walletMovements());
+  }
+
+  @override
   Widget build(BuildContext context) => _WorkerPage(
     title: 'Mis pagos',
-    subtitle: 'Tus pagos protegidos y comprobantes',
+    subtitle: 'Consulta el monto y la referencia que reportó la empresa',
     child: FutureBuilder<List<PaymentRecord>>(
-      future: repository.walletMovements(),
-      builder: (context, snapshot) => Column(
-        children: [
-          ...(snapshot.data ?? paymentHistory).map(
-            (payment) => _PaymentTile(payment: payment),
-          ),
-          const SizedBox(height: 8),
-          const _DisabledIntegrationNotice(
-            message:
-                'Retiros desactivados hasta integrar un proveedor de pagos seguro.',
+      future: _movements,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(32),
+              child: CircularProgressIndicator(),
+            ),
+          );
+        }
+        if (snapshot.hasError) {
+          return _WalletState(
+            icon: Icons.cloud_off_outlined,
+            title: 'No pudimos cargar tus movimientos',
+            message: 'Verifica tu conexión e inténtalo nuevamente.',
+            action: _retry,
+          );
+        }
+        final movements = snapshot.data ?? const <PaymentRecord>[];
+        return Column(
+          children: [
+            if (movements.isEmpty)
+              const _WalletState(
+                icon: Icons.receipt_long_outlined,
+                title: 'Aún no tienes pagos registrados',
+                message:
+                    'Cuando completes un turno, la empresa podrá reportar aquí el pago y su comprobante.',
+              )
+            else
+              ...movements.map(
+                (payment) => _PaymentTile(
+                  payment: payment,
+                  onConfirm:
+                      payment.id != null &&
+                          payment.status == 'Liberado' &&
+                          !payment.receiptConfirmed
+                      ? () async {
+                          try {
+                            await widget.repository.confirmPayment(payment.id!);
+                            if (!mounted) return;
+                            _retry();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Recepción del pago confirmada.'),
+                              ),
+                            );
+                          } catch (_) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'No pudimos confirmar el pago.',
+                                  ),
+                                ),
+                              );
+                            }
+                          }
+                        }
+                      : null,
+                ),
+              ),
+            const SizedBox(height: 8),
+            const _DisabledIntegrationNotice(
+              message:
+                  'CumpleNow no administra tu dinero: la empresa te paga directamente y aquí conservamos el registro.',
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+class _WalletState extends StatelessWidget {
+  const _WalletState({
+    required this.icon,
+    required this.title,
+    required this.message,
+    this.action,
+  });
+  final IconData icon;
+  final String title;
+  final String message;
+  final VoidCallback? action;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(28),
+    decoration: _cardDecoration(),
+    child: Column(
+      children: [
+        Icon(icon, size: 42, color: AppColors.muted),
+        const SizedBox(height: 10),
+        Text(title, style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 6),
+        Text(
+          message,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: AppColors.muted, fontSize: 13),
+        ),
+        if (action != null) ...[
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: action,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Reintentar'),
           ),
         ],
-      ),
+      ],
     ),
   );
 }
@@ -177,15 +350,17 @@ class CheckInPage extends StatelessWidget {
     super.key,
     this.activeShift,
     this.capabilities = AppCapabilities.defaults,
+    this.repository,
   });
 
   final Shift? activeShift;
   final AppCapabilities capabilities;
+  final WorkerMarketplaceRepository? repository;
 
   @override
   Widget build(BuildContext context) => _WorkerPage(
-    title: 'Check-in de turno',
-    subtitle: 'Valida tu asistencia al llegar al lugar',
+    title: 'Asistencia del turno',
+    subtitle: 'Registra tu llegada y salida desde tu postulación',
     child: Container(
       width: double.infinity,
       padding: const EdgeInsets.all(24),
@@ -195,29 +370,75 @@ class CheckInPage extends StatelessWidget {
           Icon(
             activeShift == null
                 ? Icons.assignment_outlined
-                : Icons.qr_code_2_rounded,
+                : Icons.event_available_outlined,
             color: AppColors.navy,
             size: 136,
           ),
           const SizedBox(height: 18),
           Text(
             activeShift == null
-                ? 'Acepta un turno para obtener tu código'
-                : 'Tu código de check-in',
+                ? 'Acepta un turno para registrar tu asistencia'
+                : 'Tu turno está listo',
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 8),
           Text(
-            activeShift?.checkInCredential ??
-                'Aún no tienes un turno asignado.',
+            activeShift == null
+                ? 'Aún no tienes un turno asignado.'
+                : '${activeShift!.title} · ${activeShift!.schedule}',
             textAlign: TextAlign.center,
             style: const TextStyle(color: AppColors.muted, fontSize: 13),
           ),
           const SizedBox(height: 20),
-          if (!capabilities.cameraCheckInEnabled)
+          if (activeShift != null && repository != null)
+            FilledButton.icon(
+              onPressed: () async {
+                try {
+                  if (activeShift!.checkedIn) {
+                    await repository!.checkOut(activeShift!.id);
+                  } else {
+                    final credential = activeShift!.checkInCredential;
+                    if (credential == null || credential.isEmpty) {
+                      throw StateError('CREDENCIAL_NO_DISPONIBLE');
+                    }
+                    await repository!.checkIn(activeShift!.id, credential);
+                  }
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          activeShift!.checkedIn
+                              ? 'Salida registrada correctamente.'
+                              : 'Llegada registrada correctamente.',
+                        ),
+                      ),
+                    );
+                  }
+                } catch (_) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('No pudimos registrar la asistencia.'),
+                      ),
+                    );
+                  }
+                }
+              },
+              icon: Icon(
+                activeShift!.checkedIn
+                    ? Icons.logout_rounded
+                    : Icons.login_rounded,
+              ),
+              label: Text(
+                activeShift!.checkedIn
+                    ? 'Registrar salida'
+                    : 'Confirmar llegada',
+              ),
+            )
+          else if (!capabilities.cameraCheckInEnabled)
             const _DisabledIntegrationNotice(
               message:
-                  'Cámara desactivada: esta demostración no solicita permisos ni escanea códigos.',
+                  'Cámara desactivada: la asistencia se registra desde “Mis postulaciones”. Confirma tu llegada al iniciar el turno y tu salida al terminar.',
             )
           else
             FilledButton.icon(
@@ -378,7 +599,7 @@ class _ShiftCard extends StatelessWidget {
             FilledButton(
               onPressed: shift.state == ShiftState.published ? onAccept : null,
               child: Text(
-                shift.state == ShiftState.published ? 'Aceptar' : 'Asignado',
+                shift.state == ShiftState.published ? 'Postular' : 'Asignado',
               ),
             ),
           ],
@@ -409,8 +630,9 @@ class _DisabledIntegrationNotice extends StatelessWidget {
 }
 
 class _PaymentTile extends StatelessWidget {
-  const _PaymentTile({required this.payment});
+  const _PaymentTile({required this.payment, this.onConfirm});
   final PaymentRecord payment;
+  final VoidCallback? onConfirm;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -439,6 +661,11 @@ class _PaymentTile extends StatelessWidget {
                 payment.role,
                 style: const TextStyle(color: AppColors.muted, fontSize: 11),
               ),
+              if (payment.reference != null && payment.reference!.isNotEmpty)
+                Text(
+                  'Referencia: ${payment.reference}',
+                  style: const TextStyle(color: AppColors.muted, fontSize: 10),
+                ),
             ],
           ),
         ),
@@ -453,17 +680,40 @@ class _PaymentTile extends StatelessWidget {
               ),
             ),
             _Pill(
-              label: payment.status,
+              label: _paymentStatusLabel(payment.status),
               color: payment.status == 'Liberado'
                   ? AppColors.teal
+                  : payment.status == 'Reversed'
+                  ? Colors.redAccent
                   : AppColors.gold,
             ),
+            if (onConfirm != null)
+              TextButton(
+                onPressed: onConfirm,
+                style: TextButton.styleFrom(
+                  minimumSize: Size.zero,
+                  padding: const EdgeInsets.only(top: 5),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text('Confirmar recepción'),
+              )
+            else if (payment.receiptConfirmed)
+              const Text(
+                'Recepción confirmada',
+                style: TextStyle(color: AppColors.teal, fontSize: 10),
+              ),
           ],
         ),
       ],
     ),
   );
 }
+
+String _paymentStatusLabel(String status) => switch (status) {
+  'Liberado' => 'Pago reportado',
+  'Reversed' => 'Incidencia de pago',
+  _ => 'Pendiente de pago',
+};
 
 class _RewardTile extends StatelessWidget {
   const _RewardTile({

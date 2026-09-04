@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { LocalAuthService } from '../src/modules/auth/auth.service.js';
 import type { BusinessOperations } from '../src/modules/business/business.service.js';
+import { withSerializableRetry } from '../src/modules/business/business.service.js';
 import { MarketplaceShiftEvents } from '../src/modules/marketplace/marketplace.events.js';
 
 async function businessContext(
@@ -26,6 +27,18 @@ async function businessContext(
 }
 
 describe('business CRUD routes', () => {
+  it('retries a serializable transaction conflict and preserves non-conflict errors', async () => {
+    let attempts = 0;
+    await expect(withSerializableRetry(async () => {
+      attempts += 1;
+      if (attempts === 1) throw { code: 'P2034' };
+      return 'ok';
+    })).resolves.toBe('ok');
+    expect(attempts).toBe(2);
+
+    await expect(withSerializableRetry(async () => { throw { code: 'P2003' }; })).rejects.toMatchObject({ code: 'P2003' });
+  });
+
   it('requires a valid BUSINESS session', async () => {
     const authService = new LocalAuthService();
     const worker = await authService.register({
@@ -45,15 +58,48 @@ describe('business CRUD routes', () => {
     const valid = {
       title: 'Mozo de salón', location: 'Miraflores', startsAt: '2026-08-23T18:00:00.000Z',
       endsAt: '2026-08-24T00:00:00.000Z', payCents: 10000, requiredWorkers: 2,
+      description: 'Apoya al equipo de salón durante el servicio.',
+      responsibilities: 'Preparar el salón y atender mesas.',
+      requirements: 'Experiencia en atención al cliente.',
+      screeningQuestions: ['¿Tienes disponibilidad durante todo el horario indicado?'],
+      modality: 'PRESENCIAL',
     };
 
     expect((await request(app).post('/api/business/shifts').set('Authorization', authorization).send(valid)).status).toBe(201);
     expect((await request(app).post('/api/business/shifts').set('Authorization', authorization).send({ ...valid, endsAt: valid.startsAt })).status).toBe(400);
-    expect((await request(app).patch('/api/business/shifts/shift-1').set('Authorization', authorization).send({ status: 'COMPLETED' })).status).toBe(200);
+    expect((await request(app).patch('/api/business/shifts/shift-1').set('Authorization', authorization).send({ rescueActive: true })).status).toBe(200);
+    expect((await request(app).patch('/api/business/shifts/shift-1').set('Authorization', authorization).send({ status: 'COMPLETED' })).status).toBe(400);
     expect((await request(app).delete('/api/business/shifts/shift-1').set('Authorization', authorization)).status).toBe(204);
     expect(createShift).toHaveBeenCalledOnce();
+    expect(createShift.mock.calls[0]?.[1].screeningQuestions).toEqual(valid.screeningQuestions);
     expect(updateShift).toHaveBeenCalledOnce();
     expect(deleteShift).toHaveBeenCalledOnce();
+  });
+
+  it('limits screening questions to three safe, meaningful prompts', async () => {
+    const createShift = vi.fn(async (_session, input) => ({ id: 'shift-screening', ...input }));
+    const { app, authorization } = await businessContext({ createShift });
+    const base = {
+      title: 'Anfitrión de evento', location: 'Barranco', startsAt: '2026-08-24T18:00:00.000Z',
+      endsAt: '2026-08-25T00:00:00.000Z', payCents: 12000, requiredWorkers: 2,
+    };
+    const response = await request(app).post('/api/business/shifts').set('Authorization', authorization).send({
+      ...base,
+      screeningQuestions: ['Pregunta válida número uno', 'Pregunta válida número dos', 'Pregunta válida número tres', 'Pregunta adicional no permitida'],
+    });
+    expect(response.status).toBe(400);
+    expect(createShift).not.toHaveBeenCalled();
+  });
+
+  it('rejects low-quality job details when a company sends them', async () => {
+    const createShift = vi.fn(async (_session, input) => ({ id: 'shift-quality', ...input }));
+    const { app, authorization } = await businessContext({ createShift });
+    const response = await request(app).post('/api/business/shifts').set('Authorization', authorization).send({
+      title: 'Mozo', location: 'Lima', startsAt: '2026-08-23T18:00:00.000Z', endsAt: '2026-08-24T00:00:00.000Z',
+      payCents: 10000, requiredWorkers: 1, description: 'corto', responsibilities: 'ok', requirements: 'ok', modality: 'PRESENCIAL',
+    });
+    expect(response.status).toBe(400);
+    expect(createShift).not.toHaveBeenCalled();
   });
 
   it('notifies the worker marketplace after a company changes its shifts', async () => {

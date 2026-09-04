@@ -14,16 +14,21 @@ import 'widgets/job_card.dart';
 import 'widgets/job_detail_panel.dart';
 import 'widgets/job_filter_controls.dart';
 import 'widgets/job_search_bar.dart';
+import 'search_alert_store.dart';
 
 class WorkerDiscoveryPage extends StatefulWidget {
-  const WorkerDiscoveryPage({
+  WorkerDiscoveryPage({
     super.key,
     required this.repository,
     this.onApplicationChanged,
-  });
+    this.workerName,
+    SearchAlertStore? alertStore,
+  }) : alertStore = alertStore ?? InMemorySearchAlertStore();
 
   final WorkerMarketplaceRepository repository;
   final VoidCallback? onApplicationChanged;
+  final String? workerName;
+  final SearchAlertStore alertStore;
 
   @override
   State<WorkerDiscoveryPage> createState() => _WorkerDiscoveryPageState();
@@ -34,6 +39,10 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
   DiscoveryController? _controller;
   StreamSubscription<List<Shift>>? _shiftSubscription;
   ClientDemoScenario _scenario = ClientDemoScenario.normal;
+  ShiftSearchFilter? _alertFilter;
+  bool _isAvailable = true;
+  bool _availabilitySaving = false;
+  bool _availabilityHydrated = false;
 
   @override
   void initState() {
@@ -45,11 +54,70 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
     final shiftsFuture = widget.repository.availableShifts();
     final savedFuture = widget.repository.savedShiftIds();
     final applicationsFuture = widget.repository.applicationStates();
+    final availabilityFuture = widget.repository.workerAvailability();
     return _DiscoveryBootstrap(
       shifts: await shiftsFuture,
       savedShiftIds: await savedFuture,
       applicationStates: await applicationsFuture,
+      alertFilter: await widget.alertStore.read(),
+      isAvailable: await availabilityFuture,
     );
+  }
+
+  Future<void> _setAvailability(bool value) async {
+    if (_availabilitySaving) return;
+    final previous = _isAvailable;
+    setState(() {
+      _isAvailable = value;
+      _availabilitySaving = true;
+    });
+    try {
+      await widget.repository.updateAvailability(value);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isAvailable = previous);
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(
+          content: Text('No pudimos actualizar tu disponibilidad.'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _availabilitySaving = false);
+    }
+  }
+
+  Future<void> _saveAlert() async {
+    final filter = _controller?.state.filter;
+    if (filter == null || !filter.hasActiveFilters) {
+      if (mounted) {
+        if (Scaffold.maybeOf(context) != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Activa al menos un filtro para crear una alerta.'),
+            ),
+          );
+        }
+      }
+      return;
+    }
+    await widget.alertStore.save(filter);
+    if (!mounted) return;
+    setState(() => _alertFilter = filter);
+    if (Scaffold.maybeOf(context) != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Alerta guardada. Te avisaremos cuando aparezcan coincidencias.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _clearAlert() async {
+    await widget.alertStore.clear();
+    if (!mounted) return;
+    setState(() => _alertFilter = null);
   }
 
   @override
@@ -74,17 +142,28 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
           );
         }
         final data = snapshot.data!;
+        if (!_availabilityHydrated) {
+          _isAvailable = data.isAvailable;
+          _availabilityHydrated = true;
+        }
+        _alertFilter ??= data.alertFilter;
         if (_controller == null) {
           _controller = DiscoveryController(
             shifts: data.shifts,
             repository: widget.repository,
+            initialFilter: data.alertFilter ?? const ShiftSearchFilter(),
             savedShiftIds: data.savedShiftIds,
             applicationStates: data.applicationStates,
             onApplicationChanged: widget.onApplicationChanged,
           );
-          _shiftSubscription = widget.repository.watchAvailableShifts().listen(
-            (shifts) => _controller?.replaceShifts(shifts),
-          );
+          _shiftSubscription = widget.repository.watchAvailableShifts().listen((
+            shifts,
+          ) {
+            _controller?.replaceShifts(shifts);
+            widget.repository.applicationStates().then(
+              (states) => _controller?.replaceApplicationStates(states),
+            );
+          });
         }
         return AnimatedBuilder(
           animation: _controller!,
@@ -93,6 +172,13 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
             usesLiveFeed: widget.repository.usesLiveFeed,
             scenario: _scenario,
             onScenarioChanged: (value) => setState(() => _scenario = value),
+            hasSavedAlert: _alertFilter != null,
+            onSaveAlert: _saveAlert,
+            onClearAlert: _clearAlert,
+            isAvailable: _isAvailable,
+            availabilitySaving: _availabilitySaving,
+            onAvailabilityChanged: _setAvailability,
+            workerName: widget.workerName,
           ),
         );
       },
@@ -105,11 +191,15 @@ class _DiscoveryBootstrap {
     required this.shifts,
     required this.savedShiftIds,
     required this.applicationStates,
+    required this.alertFilter,
+    required this.isAvailable,
   });
 
   final List<Shift> shifts;
   final Set<String> savedShiftIds;
   final Map<String, ApplicationState> applicationStates;
+  final ShiftSearchFilter? alertFilter;
+  final bool isAvailable;
 }
 
 class _DiscoveryContent extends StatelessWidget {
@@ -118,12 +208,26 @@ class _DiscoveryContent extends StatelessWidget {
     required this.usesLiveFeed,
     required this.scenario,
     required this.onScenarioChanged,
+    required this.hasSavedAlert,
+    required this.onSaveAlert,
+    required this.onClearAlert,
+    required this.isAvailable,
+    required this.availabilitySaving,
+    required this.onAvailabilityChanged,
+    this.workerName,
   });
 
   final DiscoveryController controller;
   final bool usesLiveFeed;
   final ClientDemoScenario scenario;
   final ValueChanged<ClientDemoScenario> onScenarioChanged;
+  final bool hasSavedAlert;
+  final VoidCallback onSaveAlert;
+  final VoidCallback onClearAlert;
+  final bool isAvailable;
+  final bool availabilitySaving;
+  final ValueChanged<bool> onAvailabilityChanged;
+  final String? workerName;
 
   @override
   Widget build(BuildContext context) {
@@ -142,7 +246,17 @@ class _DiscoveryContent extends StatelessWidget {
         children: [
           _TopBar(
             onQueryChanged: controller.setQuery,
-            onOpenFilters: () => _showFilterSheet(context, controller),
+            onOpenFilters: () => _showFilterSheet(
+              context,
+              controller,
+              onSaveAlert: onSaveAlert,
+              hasSavedAlert: hasSavedAlert,
+              onClearAlert: onClearAlert,
+            ),
+            isAvailable: isAvailable,
+            availabilitySaving: availabilitySaving,
+            onAvailabilityChanged: onAvailabilityChanged,
+            workerName: workerName,
           ),
           Expanded(
             child: Row(
@@ -156,6 +270,12 @@ class _DiscoveryContent extends StatelessWidget {
                     scenario: scenario,
                     onScenarioChanged: onScenarioChanged,
                     showHeader: false,
+                    onSaveAlert: onSaveAlert,
+                    hasSavedAlert: hasSavedAlert,
+                    onClearAlert: onClearAlert,
+                    isAvailable: isAvailable,
+                    onAvailabilityChanged: onAvailabilityChanged,
+                    workerName: workerName,
                   ),
                 ),
                 const VerticalDivider(width: 1, color: AppColors.border),
@@ -174,14 +294,39 @@ class _DiscoveryContent extends StatelessWidget {
       onScenarioChanged: onScenarioChanged,
       showHeader: true,
       grid: useTabletGrid,
+      onSaveAlert: onSaveAlert,
+      hasSavedAlert: hasSavedAlert,
+      onClearAlert: onClearAlert,
+      isAvailable: isAvailable,
+      onAvailabilityChanged: onAvailabilityChanged,
+      workerName: workerName,
     );
   }
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({required this.onQueryChanged, required this.onOpenFilters});
+  const _TopBar({
+    required this.onQueryChanged,
+    required this.onOpenFilters,
+    required this.isAvailable,
+    required this.availabilitySaving,
+    required this.onAvailabilityChanged,
+    this.workerName,
+  });
   final ValueChanged<String> onQueryChanged;
   final VoidCallback onOpenFilters;
+  final bool isAvailable;
+  final bool availabilitySaving;
+  final ValueChanged<bool> onAvailabilityChanged;
+  final String? workerName;
+
+  String get _displayName => (workerName == null || workerName!.trim().isEmpty)
+      ? 'Ana'
+      : workerName!.trim().split(RegExp(r'\s+')).first;
+  String get _initials {
+    final parts = (workerName ?? 'Ana García').trim().split(RegExp(r'\s+'));
+    return parts.take(2).map((part) => part[0].toUpperCase()).join();
+  }
 
   @override
   Widget build(BuildContext context) => Container(
@@ -219,6 +364,15 @@ class _TopBar extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 12),
+        Tooltip(
+          message: isAvailable
+              ? 'Disponible para nuevos turnos'
+              : 'No disponible para nuevos turnos',
+          child: Switch.adaptive(
+            value: isAvailable,
+            onChanged: availabilitySaving ? null : onAvailabilityChanged,
+          ),
+        ),
         IconButton(
           tooltip: 'Notificaciones',
           onPressed: () {},
@@ -239,13 +393,13 @@ class _TopBar extends StatelessWidget {
             border: Border.all(color: AppColors.border),
             borderRadius: BorderRadius.circular(24),
           ),
-          child: const Row(
+          child: Row(
             children: [
               CircleAvatar(
                 radius: 17,
                 backgroundColor: AppColors.navySoft,
                 child: Text(
-                  'AG',
+                  _initials,
                   style: TextStyle(
                     color: AppColors.navy,
                     fontSize: 11,
@@ -255,7 +409,7 @@ class _TopBar extends StatelessWidget {
               ),
               SizedBox(width: 8),
               Text(
-                'Ana',
+                _displayName,
                 style: TextStyle(
                   color: AppColors.navy,
                   fontSize: 11,
@@ -278,6 +432,12 @@ class _ResultsColumn extends StatelessWidget {
     required this.scenario,
     required this.onScenarioChanged,
     required this.showHeader,
+    required this.onSaveAlert,
+    required this.hasSavedAlert,
+    required this.onClearAlert,
+    required this.isAvailable,
+    required this.onAvailabilityChanged,
+    this.workerName,
     this.grid = false,
   });
   final DiscoveryController controller;
@@ -286,18 +446,34 @@ class _ResultsColumn extends StatelessWidget {
   final ClientDemoScenario scenario;
   final ValueChanged<ClientDemoScenario> onScenarioChanged;
   final bool showHeader;
+  final VoidCallback onSaveAlert;
+  final bool hasSavedAlert;
+  final VoidCallback onClearAlert;
   final bool grid;
+  final bool isAvailable;
+  final ValueChanged<bool> onAvailabilityChanged;
+  final String? workerName;
 
   @override
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.fromLTRB(20, 18, 20, 100),
     children: [
       if (showHeader) ...[
-        const DiscoveryHeader(),
+        DiscoveryHeader(
+          isAvailable: isAvailable,
+          onAvailabilityChanged: onAvailabilityChanged,
+          workerName: workerName,
+        ),
         const SizedBox(height: 20),
         JobSearchBar(
           onChanged: controller.setQuery,
-          onOpenFilters: () => _showFilterSheet(context, controller),
+          onOpenFilters: () => _showFilterSheet(
+            context,
+            controller,
+            onSaveAlert: onSaveAlert,
+            hasSavedAlert: hasSavedAlert,
+            onClearAlert: onClearAlert,
+          ),
         ),
         const SizedBox(height: 12),
       ],
@@ -337,7 +513,12 @@ class _ResultsColumn extends StatelessWidget {
           onScenarioChanged: onScenarioChanged,
         ),
       const SizedBox(height: 14),
-      JobFilterControls(controller: controller),
+      JobFilterControls(
+        controller: controller,
+        onSaveAlert: onSaveAlert,
+        hasSavedAlert: hasSavedAlert,
+        onClearAlert: onClearAlert,
+      ),
       if (controller.state.errorMessage case final message?) ...[
         const SizedBox(height: 12),
         _ErrorNotice(message: message),
@@ -389,7 +570,11 @@ class _ResultsColumn extends StatelessWidget {
             crossAxisCount: 2,
             crossAxisSpacing: 12,
             mainAxisSpacing: 12,
-            childAspectRatio: 1.35,
+            // JobCard has variable content (including the employer-provided
+            // title and status chips). A fixed aspect ratio made the card
+            // shorter than its contents on tablet widths and caused the
+            // visible "BOTTOM OVERFLOWED" debug banner.
+            mainAxisExtent: 356,
           ),
           itemCount: shifts.length,
           itemBuilder: (_, index) => _jobCard(context, shifts[index]),
@@ -483,32 +668,43 @@ class _ErrorNotice extends StatelessWidget {
   );
 }
 
-void _showFilterSheet(BuildContext context, DiscoveryController controller) =>
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (_) => AnimatedBuilder(
-        animation: controller,
-        builder: (context, _) => SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Filtros de búsqueda',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 16),
-                JobFilterControls(controller: controller, expanded: true),
-              ],
+void _showFilterSheet(
+  BuildContext context,
+  DiscoveryController controller, {
+  VoidCallback? onSaveAlert,
+  bool hasSavedAlert = false,
+  VoidCallback? onClearAlert,
+}) => showModalBottomSheet<void>(
+  context: context,
+  showDragHandle: true,
+  isScrollControlled: true,
+  builder: (_) => AnimatedBuilder(
+    animation: controller,
+    builder: (context, _) => SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Filtros de búsqueda',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
-          ),
+            const SizedBox(height: 16),
+            JobFilterControls(
+              controller: controller,
+              expanded: true,
+              onSaveAlert: onSaveAlert,
+              hasSavedAlert: hasSavedAlert,
+              onClearAlert: onClearAlert,
+            ),
+          ],
         ),
       ),
-    );
+    ),
+  ),
+);
 
 class _Detail extends StatelessWidget {
   const _Detail({required this.controller});
@@ -529,8 +725,67 @@ class _Detail extends StatelessWidget {
           controller.state.applicationStates[shift.id] ??
           ApplicationState.notApplied,
       onToggleSaved: () => controller.toggleSaved(shift.id),
-      onApply: () => controller.applyToShift(shift.id),
+      onApply: () => _apply(context, shift),
     );
+  }
+
+  Future<void> _apply(BuildContext context, Shift shift) async {
+    if (shift.screeningQuestions.isEmpty) {
+      await controller.applyToShift(shift.id);
+      return;
+    }
+    final draftAnswers = <String, String>{};
+    final answers = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Completa tu postulación'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'La empresa revisará estas respuestas junto con tu perfil.',
+              ),
+              const SizedBox(height: 16),
+              for (final question in shift.screeningQuestions) ...[
+                TextField(
+                  onChanged: (value) => draftAnswers[question] = value,
+                  maxLength: 1000,
+                  minLines: 2,
+                  maxLines: 4,
+                  decoration: InputDecoration(
+                    labelText: question,
+                    alignLabelWithHint: true,
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Volver'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final values = {
+                for (final question in shift.screeningQuestions)
+                  question: draftAnswers[question]?.trim() ?? '',
+              };
+              if (values.values.any((answer) => answer.isEmpty)) return;
+              Navigator.pop(dialogContext, values);
+            },
+            child: const Text('Enviar postulación'),
+          ),
+        ],
+      ),
+    );
+    if (answers != null && context.mounted) {
+      await controller.applyToShift(shift.id, answers: answers);
+    }
   }
 }
 

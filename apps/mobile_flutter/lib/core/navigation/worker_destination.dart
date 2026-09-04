@@ -19,11 +19,6 @@ const workerDestinations = <WorkerDestination>[
     selectedIcon: Icons.home_rounded,
   ),
   WorkerDestination(
-    label: 'Buscar',
-    icon: Icons.search_outlined,
-    selectedIcon: Icons.search_rounded,
-  ),
-  WorkerDestination(
     label: 'Postulaciones',
     icon: Icons.work_history_outlined,
     selectedIcon: Icons.work_history_rounded,

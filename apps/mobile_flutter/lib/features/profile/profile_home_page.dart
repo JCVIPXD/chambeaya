@@ -1,12 +1,24 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../theme/app_theme.dart';
 import 'profile_data.dart';
+import '../marketplace/marketplace_data.dart';
+import '../marketplace/marketplace_repository.dart';
+import '../marketplace/worker_pages.dart';
 
 class ProfileHomePage extends StatelessWidget {
-  const ProfileHomePage({this.showNavigation = true, this.onLogout, super.key});
+  const ProfileHomePage({
+    this.showNavigation = true,
+    this.onLogout,
+    this.repository,
+    this.workerName,
+    super.key,
+  });
   final bool showNavigation;
   final VoidCallback? onLogout;
+  final WorkerMarketplaceRepository? repository;
+  final String? workerName;
 
   @override
   Widget build(BuildContext context) {
@@ -15,12 +27,14 @@ class ProfileHomePage extends StatelessWidget {
         child: CustomScrollView(
           slivers: [
             SliverToBoxAdapter(child: _TopBar(onLogout: onLogout)),
-            SliverToBoxAdapter(child: _ProfileHeader()),
+            SliverToBoxAdapter(child: _ProfileHeader(workerName: workerName)),
             SliverToBoxAdapter(child: _Strengths()),
+            SliverToBoxAdapter(child: _QuickAccess(repository: repository)),
             SliverToBoxAdapter(
               child: _SectionHeader(
                 title: 'Estudios y Certificados',
                 action: 'Ver todos',
+                onTap: () => _showCertificates(context),
               ),
             ),
             SliverToBoxAdapter(child: _Certificates()),
@@ -28,6 +42,7 @@ class ProfileHomePage extends StatelessWidget {
               child: _SectionHeader(
                 title: 'Historial de Experiencia',
                 action: 'Ver historial',
+                onTap: () => _showHistory(context),
               ),
             ),
             SliverToBoxAdapter(child: _ExperienceTimeline()),
@@ -38,6 +53,16 @@ class ProfileHomePage extends StatelessWidget {
       bottomNavigationBar: showNavigation ? const _NavigationBar() : null,
     );
   }
+
+  void _showCertificates(BuildContext context) => showModalBottomSheet<void>(
+    context: context,
+    builder: (_) => const _CertificatesSheet(),
+  );
+  void _showHistory(BuildContext context) => showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    builder: (_) => _HistorySheet(repository: repository),
+  );
 }
 
 class _TopBar extends StatelessWidget {
@@ -60,7 +85,16 @@ class _TopBar extends StatelessWidget {
           ),
         ),
         IconButton(
-          onPressed: () {},
+          tooltip: 'Copiar enlace del perfil',
+          onPressed: () async {
+            await Clipboard.setData(
+              const ClipboardData(text: 'https://cumple.now/perfil/demo'),
+            );
+            if (context.mounted)
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Enlace del perfil copiado.')),
+              );
+          },
           icon: const Icon(Icons.ios_share_rounded, color: AppColors.navy),
         ),
       ],
@@ -69,6 +103,8 @@ class _TopBar extends StatelessWidget {
 }
 
 class _ProfileHeader extends StatelessWidget {
+  const _ProfileHeader({this.workerName});
+  final String? workerName;
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
@@ -110,7 +146,9 @@ class _ProfileHeader extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                workerProfile.name,
+                workerName?.trim().isNotEmpty == true
+                    ? workerName!
+                    : workerProfile.name,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.titleLarge,
@@ -251,6 +289,234 @@ class _Strengths extends StatelessWidget {
   );
 }
 
+class _QuickAccess extends StatelessWidget {
+  const _QuickAccess({this.repository});
+  final WorkerMarketplaceRepository? repository;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
+    child: Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        _QuickAccessButton(
+          label: 'Mis pagos',
+          icon: Icons.account_balance_wallet_outlined,
+          onTap: repository == null
+              ? null
+              : () => showModalBottomSheet<void>(
+                  context: context,
+                  isScrollControlled: true,
+                  builder: (_) => HistoryPage(repository: repository!),
+                ),
+        ),
+        _QuickAccessButton(
+          label: 'Check-in',
+          icon: Icons.qr_code_2_rounded,
+          onTap: repository == null
+              ? null
+              : () async {
+                  try {
+                    final shift = await repository!.activeShift();
+                    if (context.mounted)
+                      showModalBottomSheet<void>(
+                        context: context,
+                        isScrollControlled: true,
+                        builder: (_) => CheckInPage(
+                          activeShift: shift,
+                          repository: repository,
+                        ),
+                      );
+                  } catch (_) {
+                    if (context.mounted)
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('No pudimos cargar tu turno activo.'),
+                        ),
+                      );
+                  }
+                },
+        ),
+        _QuickAccessButton(
+          label: 'Logros',
+          icon: Icons.workspace_premium_outlined,
+          onTap: () => showModalBottomSheet<void>(
+            context: context,
+            builder: (_) => const RewardsPage(),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _QuickAccessButton extends StatelessWidget {
+  const _QuickAccessButton({
+    required this.label,
+    required this.icon,
+    this.onTap,
+  });
+  final String label;
+  final IconData icon;
+  final VoidCallback? onTap;
+  @override
+  Widget build(BuildContext context) => OutlinedButton.icon(
+    onPressed: onTap,
+    icon: Icon(icon, size: 17),
+    label: Text(label),
+  );
+}
+
+class _CertificatesSheet extends StatelessWidget {
+  const _CertificatesSheet();
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: ListView(
+      padding: const EdgeInsets.all(20),
+      shrinkWrap: true,
+      children: [
+        Text(
+          'Todos tus certificados',
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+        const SizedBox(height: 12),
+        ...certificates.map(
+          (item) => ListTile(
+            leading: const Icon(Icons.workspace_premium_outlined),
+            title: Text(item.title),
+            subtitle: Text('Emitido en ${item.year}'),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _HistorySheet extends StatelessWidget {
+  const _HistorySheet({this.repository});
+  final WorkerMarketplaceRepository? repository;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+      child: repository == null
+          ? const _HistoryEmpty(
+              message: 'Inicia sesión para consultar tus turnos completados.',
+            )
+          : FutureBuilder<List<Shift>>(
+              future: repository!.completedShifts(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState != ConnectionState.done) {
+                  return const SizedBox(
+                    height: 180,
+                    child: Center(child: CircularProgressIndicator()),
+                  );
+                }
+                if (snapshot.hasError) {
+                  return const _HistoryEmpty(
+                    message:
+                        'No pudimos cargar tu historial. Inténtalo nuevamente.',
+                  );
+                }
+                final shifts = snapshot.data ?? const <Shift>[];
+                if (shifts.isEmpty) {
+                  return const _HistoryEmpty(
+                    message: 'Cuando completes tu primer turno aparecerá aquí.',
+                  );
+                }
+                final total = shifts.fold<int>(
+                  0,
+                  (sum, shift) => sum + shift.workerPayCents,
+                );
+                return ListView(
+                  shrinkWrap: true,
+                  children: [
+                    Text(
+                      'Historial de trabajos',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '${shifts.length} turno${shifts.length == 1 ? '' : 's'} completado${shifts.length == 1 ? '' : 's'} · S/ ${(total / 100).toStringAsFixed(2)} generados',
+                      style: const TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ...shifts.map(
+                      (shift) => Card(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          side: const BorderSide(color: AppColors.border),
+                        ),
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 5,
+                          ),
+                          leading: const CircleAvatar(
+                            backgroundColor: AppColors.tealSoft,
+                            child: Icon(
+                              Icons.check_rounded,
+                              color: AppColors.teal,
+                            ),
+                          ),
+                          title: Text(shift.title),
+                          subtitle: Text(
+                            '${shift.company}\n${shift.schedule} · ${shift.location}',
+                          ),
+                          isThreeLine: true,
+                          trailing: Text(
+                            'S/ ${(shift.workerPayCents / 100).toStringAsFixed(2)}',
+                            style: const TextStyle(
+                              color: AppColors.navy,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+    ),
+  );
+}
+
+class _HistoryEmpty extends StatelessWidget {
+  const _HistoryEmpty({required this.message});
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: 180,
+    child: Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.work_history_outlined,
+            color: AppColors.teal,
+            size: 38,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppColors.muted, fontSize: 13),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class _StrengthCard extends StatelessWidget {
   const _StrengthCard({required this.strength});
   final ProfileStrength strength;
@@ -303,9 +569,10 @@ class _StrengthCard extends StatelessWidget {
 }
 
 class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({required this.title, required this.action});
+  const _SectionHeader({required this.title, required this.action, this.onTap});
   final String title;
   final String action;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -322,13 +589,16 @@ class _SectionHeader extends StatelessWidget {
         ),
         const SizedBox(width: 12),
         Flexible(
-          child: Text(
-            action,
-            textAlign: TextAlign.end,
-            style: const TextStyle(
-              color: AppColors.teal,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
+          child: TextButton(
+            onPressed: onTap,
+            child: Text(
+              action,
+              textAlign: TextAlign.end,
+              style: const TextStyle(
+                color: AppColors.teal,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ),

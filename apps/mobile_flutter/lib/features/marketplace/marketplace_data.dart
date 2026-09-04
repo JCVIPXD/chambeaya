@@ -14,6 +14,7 @@ class ShiftSearchFilter {
     this.urgentOnly = false,
     this.recommendedOnly = false,
     this.location,
+    this.modality,
     this.dateScope = ShiftDateScope.any,
     this.sortOrder = ShiftSortOrder.recommended,
   });
@@ -24,6 +25,7 @@ class ShiftSearchFilter {
   final bool urgentOnly;
   final bool recommendedOnly;
   final String? location;
+  final String? modality;
   final ShiftDateScope dateScope;
   final ShiftSortOrder sortOrder;
 
@@ -34,6 +36,7 @@ class ShiftSearchFilter {
       urgentOnly ||
       recommendedOnly ||
       location != null ||
+      modality != null ||
       dateScope != ShiftDateScope.any ||
       sortOrder != ShiftSortOrder.recommended;
 
@@ -44,6 +47,7 @@ class ShiftSearchFilter {
     urgentOnly,
     recommendedOnly,
     location != null,
+    modality != null,
     dateScope != ShiftDateScope.any,
     sortOrder != ShiftSortOrder.recommended,
   ].where((active) => active).length;
@@ -63,6 +67,16 @@ class Shift {
     required this.dateScope,
     this.state = ShiftState.published,
     this.checkInCredential,
+    this.assignmentConfirmed = false,
+    this.checkedIn = false,
+    this.checkedOut = false,
+    this.description,
+    this.responsibilities,
+    this.requirements,
+    this.screeningQuestions = const [],
+    this.modality = 'PRESENCIAL',
+    this.companyVerified = false,
+    this.paymentProtected = false,
   });
   final String id;
   final String title;
@@ -76,8 +90,24 @@ class Shift {
   final ShiftDateScope dateScope;
   final ShiftState state;
   final String? checkInCredential;
+  final bool assignmentConfirmed;
+  final bool checkedIn;
+  final bool checkedOut;
+  final String? description;
+  final String? responsibilities;
+  final String? requirements;
+  final List<String> screeningQuestions;
+  final String modality;
+  final bool companyVerified;
+  final bool paymentProtected;
 
-  Shift copyWith({ShiftState? state, String? checkInCredential}) => Shift(
+  Shift copyWith({
+    ShiftState? state,
+    String? checkInCredential,
+    bool? assignmentConfirmed,
+    bool? checkedIn,
+    bool? checkedOut,
+  }) => Shift(
     id: id,
     title: title,
     company: company,
@@ -90,6 +120,16 @@ class Shift {
     dateScope: dateScope,
     state: state ?? this.state,
     checkInCredential: checkInCredential ?? this.checkInCredential,
+    assignmentConfirmed: assignmentConfirmed ?? this.assignmentConfirmed,
+    checkedIn: checkedIn ?? this.checkedIn,
+    checkedOut: checkedOut ?? this.checkedOut,
+    description: description,
+    responsibilities: responsibilities,
+    requirements: requirements,
+    screeningQuestions: screeningQuestions,
+    modality: modality,
+    companyVerified: companyVerified,
+    paymentProtected: paymentProtected,
   );
 }
 
@@ -99,11 +139,17 @@ class PaymentRecord {
     required this.role,
     required this.amount,
     required this.status,
+    this.id,
+    this.reference,
+    this.receiptConfirmed = false,
   });
+  final String? id;
   final String company;
   final String role;
   final String amount;
   final String status;
+  final String? reference;
+  final bool receiptConfirmed;
 }
 
 class CompanyMetrics {
@@ -153,6 +199,9 @@ const availableShifts = [
     industry: ShiftIndustry.events,
     location: 'San Isidro',
     dateScope: ShiftDateScope.weekend,
+    screeningQuestions: [
+      '¿Tienes disponibilidad durante todo el horario indicado?',
+    ],
   ),
 ];
 
@@ -176,6 +225,7 @@ List<Shift> filterDemoShifts(List<Shift> shifts, ShiftSearchFilter filter) {
         (!filter.urgentOnly || shift.urgent) &&
         (!filter.recommendedOnly || shift.match >= 80) &&
         (filter.location == null || shift.location == filter.location) &&
+        (filter.modality == null || shift.modality == filter.modality) &&
         (filter.dateScope == ShiftDateScope.any ||
             shift.dateScope == filter.dateScope);
   }).toList();
@@ -200,18 +250,21 @@ const paymentHistory = [
     role: 'Atención al Cliente',
     amount: 'S/ 90.00',
     status: 'Liberado',
+    reference: 'LA-MAR-001',
   ),
   PaymentRecord(
     company: 'Café del Cielo',
     role: 'Barista',
     amount: 'S/ 110.00',
     status: 'Liberado',
+    reference: 'CC-2026-014',
   ),
   PaymentRecord(
     company: 'Eventos Perú',
     role: 'Azafata de Eventos',
     amount: 'S/ 130.00',
     status: 'Pendiente',
+    reference: 'EP-2026-022',
   ),
 ];
 

@@ -3,7 +3,24 @@ import 'package:flutter/material.dart';
 import '../../../theme/app_theme.dart';
 
 class DiscoveryHeader extends StatelessWidget {
-  const DiscoveryHeader({super.key});
+  const DiscoveryHeader({
+    super.key,
+    required this.isAvailable,
+    required this.onAvailabilityChanged,
+    this.workerName,
+  });
+
+  final bool isAvailable;
+  final ValueChanged<bool> onAvailabilityChanged;
+  final String? workerName;
+
+  String get _name => (workerName == null || workerName!.trim().isEmpty)
+      ? 'Ana'
+      : workerName!.trim().split(RegExp(r'\s+')).first;
+  String get _initials {
+    final parts = (workerName ?? 'Ana García').trim().split(RegExp(r'\s+'));
+    return parts.take(2).map((part) => part[0].toUpperCase()).join();
+  }
 
   @override
   Widget build(BuildContext context) => Container(
@@ -30,7 +47,7 @@ class DiscoveryHeader extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Hola, Ana',
+                'Hola, $_name',
                 style: Theme.of(
                   context,
                 ).textTheme.headlineSmall?.copyWith(color: Colors.white),
@@ -47,24 +64,40 @@ class DiscoveryHeader extends StatelessWidget {
                 children: [
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
+                      horizontal: 8,
+                      vertical: 2,
                     ),
                     decoration: BoxDecoration(
                       color: AppColors.teal,
                       borderRadius: BorderRadius.circular(20),
                     ),
-                    child: const Row(
+                    child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(Icons.circle, color: Colors.white, size: 8),
                         SizedBox(width: 6),
                         Text(
-                          'Disponible hoy',
+                          isAvailable ? 'Disponible' : 'No disponible',
                           style: TextStyle(
                             color: AppColors.navy,
                             fontWeight: FontWeight.w900,
                             fontSize: 10,
+                          ),
+                        ),
+                        SizedBox(width: 4),
+                        SizedBox(
+                          width: 40,
+                          height: 24,
+                          child: Transform.scale(
+                            scale: .72,
+                            child: Switch.adaptive(
+                              value: isAvailable,
+                              onChanged: onAvailabilityChanged,
+                              activeThumbColor: Colors.white,
+                              activeTrackColor: AppColors.navy,
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                            ),
                           ),
                         ),
                       ],
@@ -86,8 +119,8 @@ class DiscoveryHeader extends StatelessWidget {
             shape: BoxShape.circle,
             border: Border.all(color: AppColors.teal, width: 3),
           ),
-          child: const Text(
-            'AG',
+          child: Text(
+            _initials,
             style: TextStyle(
               color: AppColors.navy,
               fontWeight: FontWeight.w900,

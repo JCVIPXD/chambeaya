@@ -17,7 +17,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
   static const steps = [
     (
       Icons.verified_user_outlined,
-      'Trabajadores verificados',
+      'Perfiles y datos claros',
       'Solo perfiles validados acceden a oportunidades confiables.',
     ),
     (
@@ -27,12 +27,12 @@ class _OnboardingPageState extends State<OnboardingPage> {
     ),
     (
       Icons.account_balance_wallet_outlined,
-      'Pagos protegidos',
+      'Pagos informados',
       'El pago se libera al terminar y validar el turno.',
     ),
     (
       Icons.bolt_rounded,
-      'IA para cubrir turnos',
+      'Continuidad operativa en evolución',
       'Cuando hay una urgencia, encontramos el mejor reemplazo en minutos.',
     ),
   ];
@@ -146,28 +146,14 @@ class _OnboardingPageState extends State<OnboardingPage> {
                       ),
                     ),
                     const SizedBox(height: 18),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: () =>
-                                widget.onComplete(AppAudience.worker),
-                            child: const Text('Soy trabajador'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: FilledButton(
-                            style: FilledButton.styleFrom(
-                              backgroundColor: AppColors.navy,
-                              foregroundColor: Colors.white,
-                            ),
-                            onPressed: () =>
-                                widget.onComplete(AppAudience.company),
-                            child: const Text('Soy empresa'),
-                          ),
-                        ),
-                      ],
+                    const Text(
+                      '¿Representas a una empresa? Contáctanos para habilitar un acceso empresarial.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
                     ),
                   ],
                 ),

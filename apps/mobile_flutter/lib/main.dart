@@ -9,6 +9,7 @@ import 'features/marketplace/http_worker_marketplace_repository.dart';
 import 'features/marketplace/marketplace_repository.dart';
 import 'features/marketplace/worker_shell.dart';
 import 'features/onboarding/onboarding_page.dart';
+import 'features/discovery/search_alert_store.dart';
 import 'theme/app_theme.dart';
 
 void main() {
@@ -132,8 +133,10 @@ class _CumpleNowAppState extends State<CumpleNowApp> {
         ? CompanyDashboardPage(onLogout: () => _logout())
         : WorkerShell(
             onLogout: () => _logout(),
+            workerName: _session?.name,
+            alertStore: SharedPreferencesSearchAlertStore(),
             repository: _useLocalApi
-                ? HttpWorkerMarketplaceRepository()
+                ? HttpWorkerMarketplaceRepository(token: _session?.token)
                 : createWorkerMarketplaceRepository(useLocalApi: false),
           ),
   );

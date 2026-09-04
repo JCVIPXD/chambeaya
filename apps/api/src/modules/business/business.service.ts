@@ -3,11 +3,11 @@ import {
   MessageSender,
   PaymentStatus,
   PrismaClient,
-  ShiftStatus,
   WorkerStatus,
 } from '@prisma/client';
 
 import type { AuthSession } from '../auth/auth.service.js';
+import { isTerminalShift, nextOperationalAction } from '../operations/shift-state.js';
 
 export type CompanyUpdate = {
   name?: string;
@@ -25,10 +25,13 @@ export type ShiftInput = {
   endsAt: Date;
   payCents: number;
   requiredWorkers: number;
-  confirmedWorkers?: number;
+  description?: string | null;
+  responsibilities?: string | null;
+  requirements?: string | null;
+  screeningQuestions?: string[];
+  modality?: 'PRESENCIAL' | 'REMOTO' | 'HIBRIDO';
   notes?: string | null;
   rescueActive?: boolean;
-  status?: ShiftStatus;
 };
 
 export type WorkerInput = {
@@ -62,6 +65,9 @@ export type PaymentInput = {
   processedAt?: Date | null;
 };
 
+export type ApplicationDecision = 'ACCEPTED' | 'REJECTED';
+export type PendingApplicationsSummary = { count: number; shiftIds: string[] };
+
 export class BusinessRecordNotFoundError extends Error {}
 export class BusinessValidationError extends Error {}
 export class BusinessForbiddenError extends Error {}
@@ -74,6 +80,12 @@ export interface BusinessOperations {
   createShift(session: AuthSession, input: ShiftInput): Promise<unknown>;
   updateShift(session: AuthSession, id: string, input: Partial<ShiftInput>): Promise<unknown>;
   deleteShift(session: AuthSession, id: string): Promise<void>;
+  cancelShift(session: AuthSession, id: string, reason: string): Promise<unknown>;
+  getSubscription(session: AuthSession): Promise<unknown>;
+  listShiftEvents(session: AuthSession, shiftId: string): Promise<unknown>;
+  listShiftApplications(session: AuthSession, shiftId: string): Promise<unknown>;
+  pendingApplications(session: AuthSession): Promise<PendingApplicationsSummary>;
+  decideShiftApplication(session: AuthSession, shiftId: string, applicationId: string, decision: ApplicationDecision, reason?: string): Promise<unknown>;
   listWorkers(session: AuthSession): Promise<unknown>;
   getWorker(session: AuthSession, id: string): Promise<unknown>;
   createWorker(session: AuthSession, input: WorkerInput): Promise<unknown>;
@@ -117,23 +129,113 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async createShift(session: AuthSession, input: ShiftInput) {
     const company = await this.companyFor(session);
-    return this.prisma.shift.create({ data: { ...input, companyId: company.id } });
+    const shift = await this.prisma.shift.create({ data: { ...input, companyId: company.id, confirmedWorkers: 0 } });
+    await this.prisma.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'PUBLISHED', detail: 'Turno publicado' } });
+    return shift;
   }
 
   async updateShift(session: AuthSession, id: string, input: Partial<ShiftInput>) {
     const shift = await this.ownedShift(session, id);
+    if (isTerminalShift(shift.status) || shift.status === 'CHECKED_IN') throw new BusinessValidationError('SHIFT_NOT_EDITABLE');
     const requiredWorkers = input.requiredWorkers ?? shift.requiredWorkers;
-    const confirmedWorkers = input.confirmedWorkers ?? shift.confirmedWorkers;
+    const confirmedWorkers = shift.confirmedWorkers;
     const startsAt = input.startsAt ?? shift.startsAt;
     const endsAt = input.endsAt ?? shift.endsAt;
     if (confirmedWorkers > requiredWorkers) throw new BusinessValidationError('INVALID_COVERAGE');
     if (endsAt <= startsAt) throw new BusinessValidationError('INVALID_DATE_RANGE');
-    return this.prisma.shift.update({ where: { id: shift.id }, data: input });
+    const updated = await this.prisma.shift.update({ where: { id: shift.id }, data: input });
+    await this.prisma.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'UPDATED', detail: 'Turno actualizado' } });
+    return updated;
   }
 
   async deleteShift(session: AuthSession, id: string) {
     const shift = await this.ownedShift(session, id);
+    const applications = await this.prisma.shiftApplication.count({ where: { shiftId: shift.id } });
+    if (applications > 0 || shift.status !== 'PUBLISHED') throw new BusinessValidationError('SHIFT_NOT_DELETABLE');
     await this.prisma.shift.delete({ where: { id: shift.id } });
+  }
+
+  async cancelShift(session: AuthSession, id: string, reason: string) {
+    if (reason.trim().length < 3) throw new BusinessValidationError('INVALID_CANCELLATION_REASON');
+    const shift = await this.ownedShift(session, id);
+    if (isTerminalShift(shift.status) || shift.status === 'CHECKED_IN') throw new BusinessValidationError('SHIFT_NOT_CANCELLABLE');
+    const checkedIn = await this.prisma.shiftAssignment.count({ where: { shiftId: shift.id, checkedInAt: { not: null } } });
+    if (checkedIn > 0) throw new BusinessValidationError('SHIFT_NOT_CANCELLABLE');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: 'ASSIGNED' }, data: { status: 'CANCELLED' } });
+      await tx.shiftApplication.updateMany({ where: { shiftId: shift.id, status: { in: ['PENDING', 'ACCEPTED'] } }, data: { status: 'CANCELLED' } });
+      await tx.shiftCancellation.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', reason: reason.trim() } });
+      await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'CANCELLED', detail: reason.trim() } });
+      return tx.shift.update({ where: { id: shift.id }, data: { status: 'CANCELLED', confirmedWorkers: 0 }, include: { company: true } });
+    });
+  }
+
+  async getSubscription(session: AuthSession) {
+    const company = await this.companyFor(session);
+    return this.prisma.companySubscription.upsert({
+      where: { companyId: company.id },
+      create: { companyId: company.id, plan: 'PILOT', status: 'TRIAL', trialEndsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) },
+      update: {},
+    });
+  }
+
+  async listShiftEvents(session: AuthSession, shiftId: string) {
+    const shift = await this.ownedShift(session, shiftId);
+    return this.prisma.shiftEvent.findMany({
+      where: { shiftId: shift.id },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async listShiftApplications(session: AuthSession, shiftId: string) {
+    const shift = await this.ownedShift(session, shiftId);
+    const applications = await this.prisma.shiftApplication.findMany({
+      where: { shiftId: shift.id },
+      include: { worker: { select: { id: true, name: true, email: true, identifier: true } }, assignment: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    return applications.map((application) => ({
+      ...application,
+      nextAction: nextOperationalAction({
+        shiftStatus: shift.status,
+        applicationStatus: application.status,
+        assignment: application.assignment,
+      }),
+    }));
+  }
+
+  async pendingApplications(session: AuthSession): Promise<PendingApplicationsSummary> {
+    const company = await this.companyFor(session);
+    const applications = await this.prisma.shiftApplication.findMany({
+      where: { status: 'PENDING', shift: { companyId: company.id } },
+      select: { shiftId: true },
+    });
+    return { count: applications.length, shiftIds: [...new Set(applications.map((application) => application.shiftId))] };
+  }
+
+  async decideShiftApplication(session: AuthSession, shiftId: string, applicationId: string, decision: ApplicationDecision, reason?: string) {
+    const shift = await this.ownedShift(session, shiftId);
+    if (isTerminalShift(shift.status) || shift.status === 'CHECKED_IN' || shift.endsAt <= new Date()) {
+      throw new BusinessValidationError('SHIFT_NOT_ASSIGNABLE');
+    }
+    return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      const application = await tx.shiftApplication.findFirst({ where: { id: applicationId, shiftId: shift.id }, include: { worker: { select: { id: true, name: true, email: true, identifier: true } } } });
+      if (!application) throw new BusinessRecordNotFoundError('APPLICATION_NOT_FOUND');
+      if (application.status !== 'PENDING') throw new BusinessValidationError('APPLICATION_ALREADY_DECIDED');
+      if (decision === 'REJECTED') {
+        const normalizedReason = reason?.trim();
+        await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'APPLICATION_REJECTED', detail: `${application.id} · ${normalizedReason ?? 'Sin motivo registrado'}` } });
+        return tx.shiftApplication.update({ where: { id: application.id }, data: { status: 'REJECTED' }, include: { worker: { select: { id: true, name: true, email: true, identifier: true } } } });
+      }
+      const assignedCount = await tx.shiftAssignment.count({ where: { shiftId: shift.id, status: 'ASSIGNED' } });
+      if (assignedCount >= shift.requiredWorkers) throw new BusinessValidationError('SHIFT_FULL');
+      const updated = await tx.shiftApplication.update({ where: { id: application.id }, data: { status: 'ACCEPTED' }, include: { worker: { select: { id: true, name: true, email: true, identifier: true } } } });
+      await tx.shiftAssignment.create({ data: { shiftId: shift.id, workerId: application.workerId, applicationId: application.id, checkInCredential: `CUMPLE-${shift.id.slice(-8).toUpperCase()}` } });
+      await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'APPLICATION_ACCEPTED', detail: application.id } });
+      const nextCount = assignedCount + 1;
+      await tx.shift.update({ where: { id: shift.id }, data: { confirmedWorkers: nextCount, status: nextCount >= shift.requiredWorkers ? 'ASSIGNED' : 'PUBLISHED' } });
+      return updated;
+    }, { isolationLevel: 'Serializable' }));
   }
 
   async listWorkers(session: AuthSession) {
@@ -176,6 +278,7 @@ export class DatabaseBusinessService implements BusinessOperations {
       include: { worker: true, shift: true, messages: { orderBy: { createdAt: 'asc' } } },
     });
     if (!conversation) throw new BusinessRecordNotFoundError('CONVERSATION_NOT_FOUND');
+    await this.prisma.message.updateMany({ where: { conversationId: id, sender: 'WORKER', readAt: null }, data: { readAt: new Date() } });
     return conversation;
   }
 
@@ -183,8 +286,12 @@ export class DatabaseBusinessService implements BusinessOperations {
     const company = await this.companyFor(session);
     await this.requireWorker(company.id, input.workerId);
     if (input.shiftId) await this.requireShift(company.id, input.shiftId);
+    const workerProfile = await this.prisma.workerProfile.findUnique({ where: { id: input.workerId } });
+    const workerUser = workerProfile?.email
+      ? await this.prisma.user.findFirst({ where: { email: workerProfile.email, role: 'WORKER' } })
+      : null;
     return this.prisma.conversation.create({
-      data: { ...input, companyId: company.id },
+      data: { ...input, companyId: company.id, workerUserId: workerUser?.id },
       include: { worker: true, shift: true, messages: true },
     });
   }
@@ -224,7 +331,11 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async listPayments(session: AuthSession) {
     const company = await this.companyFor(session);
-    return this.prisma.payment.findMany({ where: { companyId: company.id }, orderBy: { createdAt: 'desc' } });
+    return this.prisma.payment.findMany({
+      where: { companyId: company.id },
+      include: { shift: { select: { id: true, title: true, startsAt: true, endsAt: true } }, assignment: { include: { worker: { select: { id: true, name: true, email: true } } } } },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   async getPayment(session: AuthSession, id: string) {
@@ -236,12 +347,25 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async createPayment(session: AuthSession, input: PaymentInput) {
     const company = await this.companyFor(session);
-    return this.prisma.payment.create({ data: { ...input, companyId: company.id } });
+    return this.prisma.payment.create({ data: { ...input, companyId: company.id, processedAt: input.status === PaymentStatus.PROCESSED ? input.processedAt ?? new Date() : input.processedAt } });
   }
 
   async updatePayment(session: AuthSession, id: string, input: Partial<PaymentInput>) {
-    const payment = await this.getPayment(session, id) as { id: string };
-    return this.prisma.payment.update({ where: { id: payment.id }, data: input });
+    const payment = await this.getPayment(session, id) as { id: string; status: PaymentStatus; assignmentId: string | null; shiftId: string | null };
+    const nextStatus = input.status ?? payment.status;
+    const updated = await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        ...input,
+        processedAt: nextStatus === PaymentStatus.PROCESSED
+          ? input.processedAt ?? new Date()
+          : input.processedAt ?? null,
+      },
+    });
+    if (nextStatus === PaymentStatus.PROCESSED && payment.assignmentId && payment.shiftId) {
+      await this.prisma.shiftEvent.create({ data: { shiftId: payment.shiftId, actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: payment.id } });
+    }
+    return updated;
   }
 
   async deletePayment(session: AuthSession, id: string) {
@@ -278,4 +402,17 @@ export class DatabaseBusinessService implements BusinessOperations {
     if (!worker) throw new BusinessRecordNotFoundError('WORKER_NOT_FOUND');
     return worker;
   }
+}
+
+/** Reintenta conflictos de serialización/transacción que pueden ocurrir bajo concurrencia real. */
+export async function withSerializableRetry<T>(operation: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+      if (code !== 'P2034' || attempt === maxAttempts) throw error;
+    }
+  }
+  throw new Error('UNREACHABLE');
 }

@@ -5,14 +5,18 @@ Aplicación adaptable de empleos temporales para Android, iOS y web. Incluye onb
 ## Ejecutar la demostración
 
 ```powershell
-..\..\.tools\flutter\bin\flutter.bat run -d chrome --web-port 7357
+npm run dev:mobile
 ```
 
 El modo predeterminado usa datos locales y no necesita Docker. Para conectarlo a la API local:
 
 ```powershell
-..\..\.tools\flutter\bin\flutter.bat run -d chrome --web-port 7357 --dart-define=USE_LOCAL_API=true
+npm run dev:mobile -- -UseLocalApi
 ```
+
+El lanzador detecta el SDK de Flutter instalado, usa `web-server` en el puerto
+`7357` y evita depender de un Flutter embebido en `.tools`. Para abrir una
+ventana Chrome administrada por Flutter usa `npm run dev:mobile -- -Device chrome`.
 
 Para Android Emulator usa además `--dart-define=API_BASE_URL=http://10.0.2.2:4000/api`. En un celular físico usa la IP local de la laptop y mantén ambos equipos en la misma red.
 
