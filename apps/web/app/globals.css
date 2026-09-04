@@ -822,6 +822,8 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 @media (max-width: 600px) { .membership-current { align-items:flex-start; flex-direction:column; } .membership-current-meta { justify-items:start; } .membership-principle-list { grid-template-columns:1fr; } .membership-coming-soon { font-size:10px; } }
 @media (max-width: 600px) { .membership-pricing-rules { grid-template-columns:1fr; } }
 
+/* Cache-buster: transitions remain in the development bundle after reload. */
+
 /* Movimiento consistente para los paneles web. Las animaciones son cortas y
    sólo acompañan cambios de contexto, no retrasan ninguna acción. */
 .view-workspace,
