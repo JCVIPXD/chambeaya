@@ -456,7 +456,7 @@ function AdminWorkspace({
       {loading ? (
         <div className="admin-loading">Cargando operación…</div>
       ) : (
-        <>
+        <div className="admin-view" key={section}>
           <section className="admin-metrics">
             {metricItems.map(({ icon: Icon, label, value }) => (
               <article className="admin-metric" key={label}>
@@ -804,7 +804,7 @@ function AdminWorkspace({
               onSubmit={saveCompany}
             />
           )}
-        </>
+        </div>
       )}
     </main>
   );
