@@ -2,7 +2,6 @@
 
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import {
   AlertTriangle,
   ArrowDownLeft,
@@ -1144,10 +1143,6 @@ export default function HomePage() {
             );
           })}
         </nav>
-        <Link className="nav-item" href="/admin">
-          <ShieldCheck size={18} />
-          <span>Super admin</span>
-        </Link>
         <div className="sidebar-spacer" />
         <div className="support-card">
           <Sparkles size={17} />
