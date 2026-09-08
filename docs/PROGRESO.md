@@ -49,6 +49,90 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260908-048 — Reauditoría del cleanup ante contrato de login inesperado
+
+- Fecha: 2026-09-08 13:06 (America/Lima)
+- Agente: auditor-sol
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: CN-20260908-047
+- Alcance: reauditoría del registro temprano de tokens, limpieza de las tres sesiones ante una respuesta de login con identidad inesperada, ausencia de secretos en errores y logs, suite, build y smoke real sobre Docker/PostgreSQL.
+- Archivos: `apps/api/src/demo/demo.smoke.ts`, `apps/api/tests/demo.smoke.test.ts`, `apps/api/scripts/demo-smoke.ts`, `docs/PROGRESO.md`.
+- Decisiones: el hallazgo medio de CN-20260908-046 está corregido. Cada token de texto no vacío se normaliza y registra en el conjunto privado de cleanup inmediatamente después de decodificar la respuesta y antes de validar rol, `userId` y correo. La regresión crea tres sesiones con tokens distintos, hace que una respuesta exitosa tenga rol incorrecto y demuestra tres solicitudes DELETE y cero sesiones simuladas restantes. Los errores del runner y el entrypoint usan códigos genéricos y no incorporan el cuerpo de respuesta, encabezados, token, credenciales ni hashes. No se encontraron hallazgos críticos, altos, medios o bajos nuevos dentro del alcance.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.smoke.test.ts -t "cleans every usable login token"` — 1/1 aprobada y 3 omitidas por filtro; inspección de la prueba — tres tokens emitidos, tres tokens cerrados y conjunto de sesiones vivo vacío; `npm run test --workspace=@cumple-now/api` — 11 archivos y 50/50 pruebas aprobadas; `npm run build --workspace=@cumple-now/api` — `tsc --noEmit` correcto; `docker compose ps` — API, web y PostgreSQL saludables; `npm run demo:smoke` — semilla y recorrido HTTP reales correctos para empresa, trabajador y superadmin; consulta PostgreSQL posterior — 0 sesiones asociadas a las tres cuentas demo; revisión estática de errores/logs y búsqueda en logs del contenedor de los últimos cinco minutos — 0 coincidencias de encabezados Bearer, tokens de prueba, contraseñas o hashes; `git diff --check` — código 0, sólo avisos CRLF preexistentes.
+- Riesgos: una indisponibilidad real del endpoint DELETE aún puede impedir el cierre remoto; en un camino que ya tiene un error primario, el runner conserva ese error aunque también falle el cleanup. No bloquea la presentación ni reabre el defecto corregido, porque todos los tokens recuperables se intentan cerrar con `Promise.allSettled` y un recorrido exitoso sí falla si algún cierre no se completa. El smoke no sustituye una matriz visual exhaustiva de los tres paneles.
+- Siguiente paso: cambio aprobado; la coordinación puede continuar con la siguiente prioridad de preparación de la demo.
+
+### CN-20260908-047 — Cleanup de token previo a contrato de login
+
+- Fecha: 2026-09-08 12:58 (America/Lima)
+- Agente: implementador-terra
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: CN-20260908-046
+- Alcance: el smoke registra todo token de login utilizable para cierre antes de validar rol, usuario o correo; una respuesta exitosa con identidad inesperada ya no deja una sesión demo temporal sin cerrar.
+- Archivos: `apps/api/src/demo/demo.smoke.ts`, `apps/api/tests/demo.smoke.test.ts`, `docs/PROGRESO.md`.
+- Decisiones: los tokens se normalizan con `trim`, sólo los no vacíos se agregan a un `Set` privado de cleanup y nunca se incluyen en errores. El contrato posterior exige rol, `userId` y correo exactos, mientras el `finally` borra todos los tokens registrados incluso si el contrato de uno falla.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.smoke.test.ts` — 1 archivo y 4/4 pruebas aprobadas, incluida la regresión de tres logins exitosos con un rol inesperado, tres DELETE y cero sesiones simuladas restantes; `npm run test --workspace=@cumple-now/api` — 11 archivos y 50/50 pruebas aprobadas; `npm run build --workspace=@cumple-now/api` — `tsc --noEmit` correcto; `docker compose ps` — API, web y PostgreSQL saludables; `npm run demo:smoke` — semilla y smoke reales correctos; consulta PostgreSQL posterior — 0 sesiones de las tres cuentas demo; parseo de scripts PowerShell y `docker compose config --quiet` — correctos; `git diff --check` — código 0 (sólo avisos CRLF preexistentes).
+- Riesgos: el smoke valida contratos HTTP y cleanup, no una matriz visual exhaustiva de los tres paneles. Los tokens se eliminan por valor único; una respuesta anómala que reutilice exactamente el mismo token representa una sola sesión remota.
+- Siguiente paso: `auditor-sol` debe reauditar CN-20260908-047, en particular el registro previo a la validación de identidad, la ausencia de filtraciones y la regresión de tres sesiones.
+
+### CN-20260908-046 — Reauditoría del smoke ejecutable y limpieza de sesiones
+
+- Fecha: 2026-09-08 12:53 (America/Lima)
+- Agente: auditor-sol
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: CN-20260908-045
+- Alcance: reauditoría de los entrypoints de semilla y smoke, asentamiento concurrente de logins, limpieza de sesiones en éxito y error, construcción limpia del contenedor, alcance destructivo de la semilla y ejecución real del escenario de presentación.
+- Archivos: `apps/api/prisma/seed.ts`, `apps/api/scripts/demo-smoke.ts`, `apps/api/src/demo/demo.smoke.ts`, `apps/api/src/demo/demo.seed.ts`, `apps/api/tests/demo.smoke.test.ts`, `apps/api/tests/demo.seed.test.ts`, `apps/api/tsconfig.json`, `apps/api/Dockerfile.dev`, `package.json`, `package-lock.json`, `docker-compose.yml`, `scripts/demo-smoke.ps1`, `scripts/seed-demo.ps1`, `docs/PROGRESO.md`.
+- Decisiones: no quedan hallazgos críticos ni altos de CN-20260908-044: los entrypoints ya no usan `await` superior, están cubiertos por `tsc`; `Promise.allSettled` corrige la carrera de dos logins exitosos demorados y uno fallido; el build limpio con lockfile y workspaces funciona; y la semilla limita el borrado de sesiones a las tres cuentas demo. Se requiere un cambio medio adicional: `login()` valida rol, token y `userId` antes de guardar la sesión para el `finally`; si el servidor crea una sesión y devuelve un token válido junto con un rol o contrato inesperado, el smoke lanza el error antes de registrar ese token y no puede cerrarlo. Una simulación controlada de tres respuestas HTTP exitosas, una con rol incorrecto, obtuvo `SUCCESSFUL_LOGIN_TOKENS=3`, `CLEANUP_REQUESTS=2` y `MISMATCH_CLEANED=false`.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.smoke.test.ts` — 3/3 aprobadas, incluida la reproducción de dos éxitos demorados y un fallo HTTP; `npm run test --workspace=@cumple-now/api` — 11 archivos y 49/49 pruebas aprobadas; `npm run build --workspace=@cumple-now/api` — correcto e incluye `src`, `tests`, `scripts` y `prisma/seed.ts`; `docker compose build --no-cache api` — correcto desde instalación limpia; `docker compose up -d --build` — API, web y PostgreSQL saludables; dos ejecuciones consecutivas de `npm run demo:smoke` — correctas y sin exponer credenciales, tokens ni hashes; prueba PostgreSQL con sesión centinela no demo — preservó 1 sesión ajena, dejó 0 sesiones demo y restauró `2 turnos : 1 postulación pendiente : 0 asignaciones activas : 1 pago histórico`; guards reales con `NODE_ENV=production` para seed y smoke — ambos abortaron; parseo PowerShell, `docker compose config --quiet` y `git diff --check` — correctos; simulación adicional de respuesta de login malformada con token — reprodujo una sesión sin cleanup.
+- Riesgos: medio por la sesión demo que puede persistir cuando el endpoint crea el token pero su respuesta incumple el contrato de rol o identidad; el build limpio informó una alerta moderada de dependencias de npm que queda fuera de esta corrección y requiere revisión separada. No se ejecutó una matriz visual exhaustiva de estados UI.
+- Siguiente paso: `implementador-terra` debe registrar cualquier token no vacío recibido de un login exitoso para cleanup antes de validar el resto del contrato y añadir una prueba negativa que demuestre el cierre de ese token ante rol o identidad inesperados; luego solicitar reauditoría.
+
+### CN-20260908-045 — Smoke ejecutable, cleanup concurrente y build local reparado
+
+- Fecha: 2026-09-08 12:45 (America/Lima)
+- Agente: implementador-terra
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: CN-20260908-044
+- Alcance: se corrigieron los entrypoints CJS de semilla y smoke, el cleanup ante login parcial concurrente y la instalación limpia del contenedor API. El smoke oficial se ejecutó repetidamente contra PostgreSQL real y dejó cero sesiones de las cuentas demo.
+- Archivos: `apps/api/prisma/seed.ts`, `apps/api/scripts/demo-smoke.ts`, `apps/api/src/demo/demo.smoke.ts`, `apps/api/src/demo/demo.seed.ts`, `apps/api/tests/demo.smoke.test.ts`, `apps/api/tests/demo.seed.test.ts`, `apps/api/tsconfig.json`, `apps/api/Dockerfile.dev`, `docs/PROGRESO.md`.
+- Decisiones: ambos entrypoints usan `main()` con `void main().catch(...)`, preservando `process.exitCode` y la desconexión Prisma. Los logins usan `Promise.allSettled`, por lo que todos los éxitos se registran antes de decidir el error y el `finally` los cierra. La semilla borra sesiones existentes sólo de las tres cuentas reservadas antes de restablecerlas, logrando que un smoke exitoso deje cero sesiones demo. El Dockerfile instala desde la raíz con `package-lock.json` y `npm ci --workspace=@cumple-now/api`, corrigiendo el error npm de árbol incompleto causado por copiar sólo el manifiesto del workspace.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.smoke.test.ts` — 3/3 pruebas aprobadas, incluida la carrera de dos logins demorados y uno fallido; `npm run test --workspace=@cumple-now/api` — 11 archivos y 49/49 pruebas aprobadas; `npm run build --workspace=@cumple-now/api` — `tsc --noEmit` correcto e incluye los entrypoints; `docker compose build api` — correcto; `docker compose up -d --build` — correcto, API/web/db saludables; `npm run demo:smoke` — correcto en tres ejecuciones, incluidas dos consecutivas de idempotencia; PostgreSQL posterior — 0 sesiones de las tres cuentas demo y escenario `2 turnos : 1 postulación pendiente : 1 pago histórico procesado`; parseo PowerShell, `docker compose config --quiet` y `git diff --check` — código 0.
+- Riesgos: la comprobación PostgreSQL verificó el escenario reservado y las sesiones demo, no cada posible estado UI; el aviso de Compose sobre un volumen histórico con etiqueta distinta es preexistente y no afecta servicios ni datos.
+- Siguiente paso: `auditor-sol` debe reauditar CN-20260908-045, especialmente la compatibilidad de entrypoints, el asentamiento de logins antes del cleanup y la instalación reproducible con el lockfile raíz.
+
+### CN-20260908-044 — Auditoría del smoke reproducible de tres paneles
+
+- Fecha: 2026-09-08 12:32 (America/Lima)
+- Agente: auditor-sol
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: CN-20260908-043
+- Alcance: auditoría de seguridad, ejecución oficial, limpieza de sesiones, coherencia entre identidades sembradas, permisos cruzados, historial, pago, métricas y ausencia de mutaciones posteriores a la semilla.
+- Archivos: `apps/api/src/demo/demo.seed.ts`, `apps/api/src/demo/demo.smoke.ts`, `apps/api/scripts/demo-smoke.ts`, `apps/api/prisma/seed.ts`, `apps/api/tests/demo.smoke.test.ts`, `apps/api/package.json`, `apps/api/tsconfig.json`, `scripts/demo-smoke.ps1`, `scripts/seed-demo.ps1`, `package.json`, `docs/CLIENT_DEMO.md`, `docs/PROGRESO.md`, `apps/api/Dockerfile.dev`.
+- Decisiones: se requieren cambios por dos fallos funcionales. Primero, el comando oficial no puede ejecutarse en el contenedor: `prisma/seed.ts` y `scripts/demo-smoke.ts` usan `await` de nivel superior, `tsx` los transforma como CommonJS y ambos terminan con `Top-level await is currently not supported with the "cjs" output format`; el build no lo detecta porque `tsconfig.json` incluye sólo `src` y `tests`. Segundo, los tres logins concurrentes usan `Promise.all`: si uno falla antes y los otros completan después, `finally` toma una lista aún vacía y esas sesiones exitosas quedan sin cerrar. Una simulación con dos logins exitosos demorados y uno fallido inmediato produjo dos sesiones y cero solicitudes de cierre. La prueba sólo cubre el camino exitoso. No se hallaron filtraciones de contraseñas, tokens o hashes en mensajes/salidas; tras la semilla, el núcleo usa lecturas y operaciones de sesión únicamente.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.smoke.test.ts` — 2/2 aprobadas; `npm run test --workspace=@cumple-now/api` — 11 archivos y 48/48 pruebas aprobadas; `npm run build --workspace=@cumple-now/api` — `tsc --noEmit` correcto; parseo de ambos scripts PowerShell — cero errores; `docker compose config --quiet` — código 0; `git diff --check` — código 0; `docker compose up -d --build` — falló en `apps/api/Dockerfile.dev` durante `npm install --workspaces=false` con error interno `Cannot read properties of null (reading 'edgesOut')`; con imágenes existentes los servicios quedaron saludables; `npm run demo:smoke` — falló en el entrypoint de semilla por transformación CommonJS; ejecución directa del entrypoint smoke — mismo fallo; invocación temporal de las funciones mediante IIFE — semilla real y smoke HTTP correctos para los tres paneles, permisos, postulación, historial/pago y métricas; consulta PostgreSQL posterior — cero sesiones demo creadas en los últimos cinco minutos.
+- Riesgos: alto porque el comando presentado al usuario no funciona en el entorno real y la construcción limpia de Docker también está bloqueada; medio por sesiones temporales que pueden persistir tras un fallo parcial de autenticación. La comprobación feliz del núcleo no sustituye la ejecución del comando oficial ni cubre la carrera de error.
+- Siguiente paso: `implementador-terra` debe eliminar el `await` superior de ambos entrypoints o asegurar su ejecución ESM, incluirlos en una validación de build ejecutable, hacer que los logins terminen de asentarse antes de capturar/limpiar todas las sesiones y añadir una prueba del fallo parcial demorado. También debe corregir o aislar el fallo de construcción limpia del Dockerfile de desarrollo; luego registrar una corrección para reauditoría.
+
+### CN-20260908-043 — Smoke reproducible de contratos para los tres paneles
+
+- Fecha: 2026-09-08 12:30 (America/Lima)
+- Agente: implementador-terra
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: CN-20260908-042
+- Alcance: se añadió `npm run demo:smoke`, que restablece el escenario local mediante la semilla aprobada y realiza un smoke HTTP de Empresa, Trabajador y Superadmin contra la API real: autenticación, acceso autorizado/denegado por rol, turno/postulación pendiente, historial-pago y métricas administrativas.
+- Archivos: `apps/api/src/demo/demo.seed.ts`, `apps/api/src/demo/demo.smoke.ts`, `apps/api/scripts/demo-smoke.ts`, `apps/api/tests/demo.smoke.test.ts`, `apps/api/package.json`, `scripts/demo-smoke.ps1`, `package.json`, `docs/CLIENT_DEMO.md`, `docs/PROGRESO.md`.
+- Decisiones: se priorizó un smoke de contratos HTTP sin framework E2E visual. El runner exige `development` y opt-in, no muestra contraseñas/tokens, cierra las sesiones temporales en `finally` y sólo ejecuta lecturas sobre el escenario después del seed. El script raíz delega el guard de entorno y la preparación al mecanismo local existente antes de invocar el runner dentro de la API.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.smoke.test.ts` — 2/2 pruebas aprobadas; `npm run test --workspace=@cumple-now/api` — 11 archivos y 48/48 pruebas aprobadas; `npm run build --workspace=@cumple-now/api` — `tsc --noEmit` correcto; parseo de `scripts/demo-smoke.ps1` y `scripts/seed-demo.ps1` — código 0; `docker compose config --quiet` — código 0; `git diff --check` — código 0.
+- Riesgos: la ejecución HTTP contra API/PostgreSQL real está NO_EJECUTADA mientras Docker Desktop no exponga el motor Linux; las pruebas unitarias cubren el runner con una API simulada y su limpieza de sesiones.
+- Siguiente paso: ejecutar las validaciones restantes y, si son correctas, `auditor-sol` debe revisar CN-20260908-043.
+
 ### CN-20260908-042 — Auditoría de aislamiento de suites fuente API
 
 - Fecha: 2026-09-08 12:15 (America/Lima)

@@ -11,6 +11,7 @@ type UpsertInput = { where: Record<string, unknown>; update: Record<string, unkn
  */
 class InMemoryDemoDatabase {
   readonly users: Row[] = [];
+  readonly sessions: Row[] = [];
   readonly companies: Row[] = [];
   readonly subscriptions: Row[] = [];
   readonly profiles: Row[] = [];
@@ -100,6 +101,12 @@ class InMemoryDemoDatabase {
 
   readonly user = {
     upsert: async (input: UpsertInput) => this.upsert(this.users, `email:${input.where.email}`, input, `user-${input.where.email}`),
+  };
+
+  readonly authSession = {
+    deleteMany: async ({ where }: { where: { userId: { in: string[] } } }) => {
+      this.sessions.splice(0, this.sessions.length, ...this.sessions.filter((session) => !where.userId.in.includes(String(session.userId))));
+    },
   };
 
   readonly company = {
@@ -194,6 +201,7 @@ describe('seedDemoDatabase', () => {
 
     const first = await seedDemoDatabase(database as never, localEnvironment);
     const flowApplication = database.applications.find((application) => application.shiftId === first.flowShiftId)!;
+    database.sessions.push({ id: 'stale-demo-session', userId: first.workerId });
     database.assignments.push({ id: 'stale-flow-assignment', shiftId: first.flowShiftId, applicationId: flowApplication.id, workerId: first.workerId, status: 'ASSIGNED' });
     database.payments.push({ id: 'stale-flow-payment', shiftId: first.flowShiftId, assignmentId: 'stale-flow-assignment', status: 'PENDING' });
     flowApplication.status = 'ACCEPTED';
@@ -202,6 +210,7 @@ describe('seedDemoDatabase', () => {
 
     expect(second).toEqual(first);
     expect(database.users).toHaveLength(3);
+    expect(database.sessions).toHaveLength(0);
     expect(database.companies).toHaveLength(1);
     expect(database.subscriptions).toHaveLength(1);
     expect(database.profiles).toHaveLength(1);

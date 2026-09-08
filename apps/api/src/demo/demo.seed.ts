@@ -22,6 +22,15 @@ const ids = {
   flowConversation: 'demo-presentation-flow-conversation',
 } as const;
 
+export const demoPresentation = {
+  accounts: {
+    business: { email: demoEmails.business, password: demoPasswords.business, role: 'BUSINESS' },
+    worker: { email: demoEmails.worker, password: demoPasswords.worker, role: 'WORKER' },
+    admin: { email: demoEmails.admin, password: demoPasswords.admin, role: 'ADMIN' },
+  },
+  ids,
+} as const;
+
 type SeedEnvironment = {
   NODE_ENV?: string;
   CUMPLENOW_ALLOW_DEMO_SEED?: string;
@@ -87,6 +96,7 @@ export async function seedDemoDatabase(
       role: 'ADMIN',
     }),
   ]);
+  await prisma.authSession.deleteMany({ where: { userId: { in: [business.id, worker.id, admin.id] } } });
 
   const company = await prisma.company.upsert({
     where: { ownerId: business.id },

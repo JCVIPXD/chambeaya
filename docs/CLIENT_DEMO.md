@@ -20,6 +20,7 @@ desde la raíz:
 ```powershell
 docker compose up -d --build
 npm run demo:seed
+npm run demo:smoke
 npm run dev:mobile -- -UseLocalApi
 ```
 
@@ -29,6 +30,12 @@ pendiente para recorrer selección, confirmación, asistencia y pago; también d
 un turno histórico pagado para mostrar historial y billetera. El comando
 requiere exactamente `NODE_ENV=development`, se rechaza en producción y nunca se
 ejecuta al iniciar Docker.
+
+Antes de presentar, ejecuta `npm run demo:smoke`. El comando vuelve a preparar
+la demo y valida por HTTP los contratos de Empresa, Trabajador y Superadmin:
+sesiones y permisos por rol, postulación pendiente para decidir, historial con
+pago y métricas administrativas. Sólo crea sesiones temporales y las cierra al
+terminar; no acepta producción ni una API local indisponible.
 
 ## Datos sugeridos para la presentación
 
@@ -48,15 +55,13 @@ Todos estos datos son ficticios. También puede usarse cualquier correo válido,
 
 ## Recorrido recomendado
 
-1. Completa el onboarding como trabajador y crea la cuenta de demostración.
-2. En `Inicio`, busca `mozo`, `hotel` o `Miraflores`.
-3. Activa los filtros `Urgentes` y `Recomendados`, y después usa `Limpiar filtros`.
-4. Guarda una oportunidad con el icono de marcador.
-5. En escritorio, revisa el detalle lateral y pulsa `Postular ahora`.
-6. Abre `Postulaciones` para mostrar las etapas del proceso.
-7. Abre `Mensajes` para mostrar conversaciones seguras de ejemplo.
-8. Abre `Perfil` para mostrar reputación, certificados y experiencia.
-9. Usa `Datos de demostración` para alternar entre resultados normales, lista vacía y error simulado.
+1. Abre el panel Empresa, entra a `Turnos` y selecciona `Anfitrión/a de eventos`.
+2. En `Selección de talento`, muestra la postulación pendiente de Trabajador Demo y acepta el perfil.
+3. En el panel Trabajador, abre `Postulaciones`, confirma el turno y sigue el paso de llegada/check-in; completa la salida para generar el pago pendiente.
+4. Vuelve a Empresa, abre `Pagos` y marca el pago generado como procesado.
+5. En Trabajador, confirma la recepción y abre el historial/billetera; el turno `Apoyo de salón` ya muestra un pago histórico liberado.
+6. Abre Superadmin para mostrar el resumen, la empresa y el trabajador con el mismo escenario.
+7. Si necesitas repetir desde el comienzo, ejecuta de nuevo `npm run demo:smoke` y recarga los paneles.
 
 ## Vistas adaptables
 
