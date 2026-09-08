@@ -49,6 +49,118 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260908-042 — Auditoría de aislamiento de suites fuente API
+
+- Fecha: 2026-09-08 12:15 (America/Lima)
+- Agente: auditor-sol
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: CN-20260908-041
+- Alcance: revisión independiente de la configuración oficial de Vitest, descubrimiento de pruebas, ejecución de todas las suites fuente, build de API y alcance de archivos de la corrección.
+- Archivos: `apps/api/vitest.config.mts`, `apps/api/package.json`, `apps/api/tests/`, `apps/api/dist/tests/`, `docs/PROGRESO.md`.
+- Decisiones: no se encontraron hallazgos críticos, altos, medios ni bajos. La exclusión `**/dist/**` se carga automáticamente desde `vitest.config.mts`; el comando oficial ejecuta las diez suites TypeScript fuente y omite los nueve archivos `*.test.js` presentes en `apps/api/dist/tests`. La extensión `.mts` es coherente con la configuración ESM y no introduce cambios de runtime. Respecto del ciclo aprobado anterior, el alcance funcional nuevo se limita a la configuración declarada.
+- Validaciones: `npm run test --workspace=@cumple-now/api` — 10 archivos y 46/46 pruebas aprobadas; el mismo comando con `--reporter=verbose` enumeró exclusivamente rutas `tests/*.test.ts` y ninguna ruta `dist/tests/*.test.js`; inventario — 10 pruebas fuente y 9 artefactos compilados presentes; `npm run build --workspace=@cumple-now/api` — `tsc --noEmit` correcto; `git diff --check` — código 0.
+- Riesgos: la exclusión evita ejecutar artefactos compilados y, por diseño, no valida que ese contenido sea equivalente a las fuentes; el directorio `dist` permanece ignorado y fuera del paquete versionado. Continúa pendiente la doble ejecución de la semilla contra PostgreSQL real indicada en CN-20260908-040.
+- Siguiente paso: corrección aprobada; el coordinador puede cerrar CN-20260908-041 y continuar con la validación reproducible de la demostración.
+
+### CN-20260908-041 — Suite oficial de API aislada de artefactos compilados
+
+- Fecha: 2026-09-08 12:15 (America/Lima)
+- Agente: implementador-terra
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: CN-20260908-040
+- Alcance: la configuración oficial de Vitest excluye `dist` para ejecutar solamente las suites TypeScript fuente de la API, evitando que los artefactos CommonJS generados por compilaciones locales se descubran como pruebas.
+- Archivos: `apps/api/vitest.config.mts`, `docs/PROGRESO.md`.
+- Decisiones: la exclusión es declarativa en la configuración de Vitest, no depende de flags manuales en cada ejecución e incluye también `node_modules` y `.git`. Se usa extensión `.mts` para conservar la carga ESM sin advertencias de configuración futuras.
+- Validaciones: `npm run test --workspace=@cumple-now/api` — 10 archivos y 46/46 pruebas aprobadas; `npm run build --workspace=@cumple-now/api` — `tsc --noEmit` correcto; `git diff --check` — código 0.
+- Riesgos: no se ejecutó validación contra PostgreSQL real porque el alcance corrige sólo descubrimiento de pruebas; permanece pendiente la doble ejecución de semilla en Docker indicada en CN-20260908-040.
+- Siguiente paso: `auditor-sol` debe auditar CN-20260908-041 y confirmar que el comando oficial no descubre `apps/api/dist/tests`.
+
+### CN-20260908-040 — Aprobación de defensa e integridad de semilla demo
+
+- Fecha: 2026-09-08 12:09 (America/Lima)
+- Agente: auditor-sol
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: CN-20260908-039
+- Alcance: reauditoría del entorno efectivo usado por el lanzador, comportamiento fail-closed, robustez de ejecución y cobertura de idempotencia, restauración, conteos e integridad relacional de la semilla demo.
+- Archivos: `scripts/seed-demo.ps1`, `apps/api/tests/demo.seed.test.ts`, `apps/api/src/demo/demo.seed.ts`, `apps/api/prisma/seed.ts`, `apps/api/prisma/schema.prisma`, `docker-compose.yml`, `docker-compose.production.yml`, `docs/PROGRESO.md`.
+- Decisiones: no se encontraron hallazgos críticos, altos, medios ni bajos. El lanzador consulta `NODE_ENV` dentro del contenedor sin sobrescribirlo, compara exactamente con `development`, aborta ante cualquier otro valor y sólo transmite el opt-in al comando final; el guard del proceso vuelve a comprobar ambas condiciones. La prueba ejecuta dos semillas, restaura estado alterado, mantiene conteos, verifica los vínculos principales y su adaptador rechaza explícitamente referencias inexistentes.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.seed.test.ts` — 8/8 aprobadas; `npm --workspace @cumple-now/api test -- --exclude dist` — 46/46 aprobadas; `npm --workspace @cumple-now/api run build` — `tsc --noEmit` correcto; parseo de `scripts/seed-demo.ps1` — cero errores; simulación controlada del lanzador — `development` ejecutó la semilla sin argumento `NODE_ENV` y `production` abortó antes del comando de semilla; `docker compose config --quiet` — código 0; `git diff --check` — código 0; validación contra PostgreSQL real — NO_EJECUTADA porque Docker Desktop no expone el motor Linux.
+- Riesgos: la persistencia en memoria no sustituye las restricciones ni transacciones efectivas de PostgreSQL; la doble ejecución y el acceso a los tres paneles deben comprobarse en el entorno Docker cuando esté disponible. La suite completa sin exclusión conserva el problema preexistente de artefactos ignorados en `apps/api/dist`.
+- Siguiente paso: corrección aprobada; el coordinador puede cerrar CN-20260908-039 y ejecutar la preparación real de la demostración cuando Docker esté disponible.
+
+### CN-20260908-039 — Defensa en profundidad y relaciones de semilla demo
+
+- Fecha: 2026-09-08 12:10 (America/Lima)
+- Agente: implementador-terra
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: CN-20260908-038
+- Alcance: el lanzador dejó de sobrescribir `NODE_ENV`; ahora consulta el entorno efectivo de la API activa y sólo continúa si es exactamente `development`. La prueba de semilla aplica restricciones relacionales en memoria y verifica propietario, suscripción, perfil, conversación, mensajes, eventos, asignación y pago tras dos ejecuciones.
+- Archivos: `scripts/seed-demo.ps1`, `apps/api/tests/demo.seed.test.ts`, `docs/PROGRESO.md`.
+- Decisiones: `CUMPLENOW_ALLOW_DEMO_SEED=true` sigue siendo el único override que el lanzador transmite; el guard de la API decide con el `NODE_ENV` real del contenedor. El adaptador de prueba valida las referencias equivalentes a las FKs y rechaza una conversación con empresa inexistente, de modo que los vínculos erróneos no puedan pasar silenciosamente.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.seed.test.ts` — 8/8 pruebas aprobadas; `npm --workspace @cumple-now/api test -- --exclude dist` — 46/46 pruebas aprobadas; `npm --workspace @cumple-now/api run build` — `tsc --noEmit` correcto; parseo de `scripts/seed-demo.ps1` — código 0; `docker compose config --quiet` — código 0; `git diff --check` — código 0.
+- Riesgos: la validación doble contra PostgreSQL real continúa NO_EJECUTADA porque Docker Desktop no expone el motor Linux en este entorno. La suite sin `--exclude dist` conserva el fallo preexistente por artefactos CommonJS ignorados en `apps/api/dist`.
+- Siguiente paso: `auditor-sol` debe reauditar CN-20260908-039, confirmando la ausencia de override de entorno y la cobertura de referencias relacionales.
+
+### CN-20260908-038 — Reauditoría de endurecimiento de semilla demo
+
+- Fecha: 2026-09-08 12:01 (America/Lima)
+- Agente: auditor-sol
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: CN-20260908-037
+- Alcance: reauditoría del fail-closed por entorno, configuración Compose/script y prueba de doble ejecución, restauración, conteos e integridad relacional de la semilla demo.
+- Archivos: `apps/api/src/demo/demo.seed.ts`, `apps/api/tests/demo.seed.test.ts`, `apps/api/prisma/seed.ts`, `apps/api/prisma/schema.prisma`, `docker-compose.yml`, `docker-compose.production.yml`, `scripts/seed-demo.ps1`, `docs/CLIENT_DEMO.md`, `docs/PROGRESO.md`.
+- Decisiones: el guard ya rechaza correctamente entorno ausente, `Production`, `staging` y `production`, y los Compose resuelven `development`/`production` según corresponde. No obstante, el lanzador fuerza `NODE_ENV=development` mediante `docker compose exec`; si un despliegue de producción fue levantado con el proyecto Compose predeterminado, la comprobación de un servicio `api` activo puede encontrarlo y el override neutraliza el entorno protegido antes de ejecutar credenciales demo conocidas. Además, el adaptador en memoria no impone claves foráneas ni restricciones únicas de Prisma y las aserciones omiten relaciones de propietario, suscripción, perfil, conversación-perfil, mensajes y eventos, por lo que varias inconsistencias relacionales no harían fallar la prueba.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.seed.test.ts` — 7/7 aprobadas; `npm --workspace @cumple-now/api test -- --exclude dist` — 45/45 aprobadas; `npm --workspace @cumple-now/api run build` — `tsc --noEmit` correcto; parseo de `scripts/seed-demo.ps1` — cero errores; `docker compose config --format json` — API de desarrollo resuelve `NODE_ENV=development`; configuración de producción — API/web resuelven `NODE_ENV=production`; revisión estática confirmó el override en el lanzador y la cobertura relacional parcial; `git diff --check` — código 0; validación real contra PostgreSQL — NO_EJECUTADA porque Docker Desktop continúa sin exponer el motor Linux.
+- Riesgos: alto por la posibilidad de sobreescribir el entorno protegido desde el lanzador y medio por una prueba relacional más permisiva que PostgreSQL. La idempotencia secuencial sí queda ejercitada en memoria, pero las restricciones reales y el acceso al escenario permanecen sin validación dinámica.
+- Siguiente paso: `implementador-terra` debe dejar de sobreescribir `NODE_ENV` al ejecutar la semilla, confiar en el valor declarado por el servicio y reforzar la prueba con todas las relaciones relevantes o validación explícita de integridad; luego registrar una corrección para nueva reauditoría. Ejecutar dos semillas y comprobar el escenario contra PostgreSQL cuando Docker esté disponible.
+
+### CN-20260908-037 — Endurecimiento y prueba relacional de semilla demo
+
+- Fecha: 2026-09-08 12:00 (America/Lima)
+- Agente: implementador-terra
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: CN-20260908-036
+- Alcance: la semilla demo ahora falla cerrada salvo cuando `NODE_ENV` es exactamente `development` y existe el opt-in explícito. Se añadió una prueba que ejecuta toda la semilla dos veces contra un adaptador de persistencia en memoria y verifica conteos, relaciones y el restablecimiento del flujo pendiente.
+- Archivos: `apps/api/src/demo/demo.seed.ts`, `apps/api/tests/demo.seed.test.ts`, `docker-compose.yml`, `scripts/seed-demo.ps1`, `docs/CLIENT_DEMO.md`, `docs/PROGRESO.md`.
+- Decisiones: no se acepta entorno ausente, con distinta capitalización, staging ni producción. El Compose de desarrollo y el lanzador fijan explícitamente `NODE_ENV=development`; el Compose de producción conserva `NODE_ENV=production`. La prueba en memoria aísla la idempotencia determinista del requisito de Docker/PostgreSQL y simula un flujo pendiente alterado antes de resembrar.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.seed.test.ts` — 7/7 pruebas aprobadas; `npm --workspace @cumple-now/api test -- --exclude dist` — 45/45 pruebas aprobadas; `npm --workspace @cumple-now/api run build` — `tsc --noEmit` correcto; parseo de `scripts/seed-demo.ps1` — código 0; `git diff --check` — código 0.
+- Riesgos: la prueba de idempotencia usa un adaptador de persistencia en memoria; la doble ejecución contra PostgreSQL real continúa NO_EJECUTADA porque Docker Desktop no expone el motor Linux en este entorno. La suite sin `--exclude dist` conserva el fallo preexistente por artefactos CommonJS ignorados en `apps/api/dist`.
+- Siguiente paso: `auditor-sol` debe reauditar CN-20260908-037, en particular el fail-closed del entorno y los conteos/relaciones cubiertos por la prueba.
+
+### CN-20260908-036 — Auditoría de semilla local para presentación
+
+- Fecha: 2026-09-08 11:53 (America/Lima)
+- Agente: auditor-sol
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: CN-20260908-035
+- Alcance: revisión independiente del bloqueo de producción, manejo de credenciales demo, idempotencia y consistencia relacional de la semilla, comandos de ejecución y cobertura automatizada.
+- Archivos: `apps/api/src/demo/demo.seed.ts`, `apps/api/prisma/seed.ts`, `apps/api/tests/demo.seed.test.ts`, `apps/api/prisma/schema.prisma`, `apps/api/src/modules/auth/auth.service.ts`, `apps/api/src/modules/business/business.service.ts`, `apps/api/src/modules/marketplace/marketplace.service.ts`, `apps/api/package.json`, `package.json`, `scripts/seed-demo.ps1`, `docker-compose.yml`, `docker-compose.production.yml`, `apps/api/Dockerfile.production`, `docs/CLIENT_DEMO.md`, `docs/PROGRESO.md`.
+- Decisiones: se requiere corregir el guard porque opera en modo permisivo: con el opt-in explícito acepta `NODE_ENV` ausente, `Production` o `staging`; al contener cuentas demo con una identidad ADMIN y credenciales conocidas, una ejecución accidental contra una base no local podría crear o restablecer acceso privilegiado. La suite sólo prueba tres ramas de `assertDemoSeedAllowed` y no invoca `seedDemoDatabase`, por lo que no demuestra la idempotencia secuencial, los conteos ni los vínculos entre empresa, perfil, turnos, postulación, asignación, pago, conversación y eventos. La revisión estática de las relaciones preparadas no reveló otra inconsistencia determinista.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.seed.test.ts` — 3/3 aprobadas; `npm --workspace @cumple-now/api test -- --exclude dist` — 41/41 aprobadas; `npm --workspace @cumple-now/api run build` — `tsc --noEmit` correcto; parseo de `scripts/seed-demo.ps1` — cero errores; prueba directa del guard — `<unset>`, `Production` y `staging` fueron aceptados con opt-in; `git diff --check` — código 0; `docker info` y `docker compose ps` — NO_EJECUTADAS efectivamente porque Docker Desktop no expone el motor Linux, por lo que no fue posible ejecutar la semilla dos veces ni validar acceso/escenario contra PostgreSQL real.
+- Riesgos: alto mientras el guard no falle de forma cerrada ante todo entorno que no sea inequívocamente local; la idempotencia relacional y el escenario real permanecen sin evidencia dinámica. No se imprimieron contraseñas ni datos de autenticación durante la auditoría.
+- Siguiente paso: `implementador-terra` debe endurecer el guard para permitir exclusivamente un entorno local verificable, agregar pruebas que ejecuten la lógica completa dos veces y comprueben relaciones/conteos, registrar una corrección y devolverla a `auditor-sol`; después debe repetirse la validación contra PostgreSQL cuando Docker esté disponible.
+
+### CN-20260908-035 — Semilla local idempotente para presentación integral
+
+- Fecha: 2026-09-08 10:00 (America/Lima)
+- Agente: implementador-terra
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: N/A
+- Alcance: se añadió una semilla local explícita e idempotente que prepara cuentas WORKER, BUSINESS y ADMIN, empresa, suscripción, perfil vinculado, una postulación pendiente y un historial completado con pago procesado. Permite mostrar el recorrido publicación/postulación/selección/asistencia/pago sin crear datos manualmente.
+- Archivos: `apps/api/src/demo/demo.seed.ts`, `apps/api/prisma/seed.ts`, `apps/api/tests/demo.seed.test.ts`, `apps/api/package.json`, `package.json`, `scripts/seed-demo.ps1`, `docs/CLIENT_DEMO.md`, `docs/PROGRESO.md`.
+- Decisiones: la semilla sólo modifica IDs/correos reservados para demo, se invoca desde el contenedor de desarrollo mediante `npm run demo:seed`, exige el opt-in `CUMPLENOW_ALLOW_DEMO_SEED=true` y se bloquea con `NODE_ENV=production`; Docker no la ejecuta automáticamente. Las credenciales demo se documentan exclusivamente en la guía de demostración existente.
+- Validaciones: `npm --workspace @cumple-now/api test -- demo.seed.test.ts` — 3/3 pruebas aprobadas; `npm --workspace @cumple-now/api test -- --exclude dist` — 41/41 pruebas aprobadas; `npm --workspace @cumple-now/api run build` — `tsc --noEmit` correcto; parseo de `scripts/seed-demo.ps1` — código 0; `git diff --check` — código 0. Validación real contra PostgreSQL — NO_EJECUTADA, Docker Desktop no está disponible en este entorno.
+- Riesgos: la semilla restaura el estado del flujo reservado al reejecutarse; no debe usarse para conservar una demostración que se quiera inspeccionar después de completarla. La ejecución en una base local activa queda pendiente de Docker. La suite sin `--exclude dist` intenta ejecutar artefactos CommonJS ignorados en `apps/api/dist` y falla antes de evaluar cambios fuente; no se modificó ese artefacto ajeno al alcance.
+- Siguiente paso: `auditor-sol` debe revisar el guard de producción, la idempotencia relacional y ejecutar las validaciones disponibles.
+
 ### CN-20260831-034-A — Auditoría de layout responsive de chats
 
 - Fecha: 2026-08-31 14:00 (America/Lima)

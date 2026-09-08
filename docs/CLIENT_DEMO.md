@@ -12,6 +12,24 @@ npm run dev:mobile
 
 Abre `http://localhost:7357`. El lanzador usa `web-server` para evitar pantallas en blanco por el arranque de Chrome; si necesitas una ventana Chrome administrada por Flutter, añade `-- -Device chrome`.
 
+## Preparar la demostración persistente local
+
+Para presentar los tres paneles conectados a PostgreSQL, inicia Docker y ejecuta
+desde la raíz:
+
+```powershell
+docker compose up -d --build
+npm run demo:seed
+npm run dev:mobile -- -UseLocalApi
+```
+
+`npm run demo:seed` es explícito, idempotente y sólo opera sobre los registros
+reservados para la demostración local. Restablece un turno con una postulación
+pendiente para recorrer selección, confirmación, asistencia y pago; también deja
+un turno histórico pagado para mostrar historial y billetera. El comando
+requiere exactamente `NODE_ENV=development`, se rechaza en producción y nunca se
+ejecuta al iniciar Docker.
+
 ## Datos sugeridos para la presentación
 
 - Tipo de cuenta: `Quiero trabajar`
@@ -19,6 +37,12 @@ Abre `http://localhost:7357`. El lanzador usa `web-server` para evitar pantallas
 - Correo: `cliente@demo.pe`
 - Contraseña: `Demo2026!`
 - DNI de prueba: `12345678`
+
+Para los paneles persistentes locales preparados con `npm run demo:seed`:
+
+- Empresa: `empresa.demo@cumplenow.local` / `Demo2026!`
+- Trabajador: `trabajador.demo@cumplenow.local` / `Demo2026!`
+- Superadmin: `superadmin@cumplenow.local` / `Admin2026!`
 
 Todos estos datos son ficticios. También puede usarse cualquier correo válido, contraseña de ocho o más caracteres y DNI de ocho dígitos.
 

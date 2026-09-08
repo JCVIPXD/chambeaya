@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "demo:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "6.12.0",
