@@ -69,7 +69,7 @@ Desde esta iteración cada turno puede guardar y mostrar:
 - modalidad presencial, remota o híbrida;
 - horario, distrito/sede, cupos y pago por persona.
 
-La interfaz empresarial guía estos datos en dos pasos y el detalle del trabajador los presenta junto con empresa verificada, pago protegido y estado de postulación. Las alertas guardadas y el filtro por modalidad ya forman parte de la primera iteración. También se añadieron hasta tres preguntas opcionales de filtro por publicación; el trabajador las responde antes de postular y la empresa ve las respuestas junto al candidato. No se incorporarán algoritmos de ranking complejos hasta contar con datos reales de postulaciones.
+La interfaz empresarial guía estos datos en dos pasos y el detalle del trabajador los presenta junto con los datos declarados por la empresa y el estado de la postulación. El detalle **no** muestra "empresa verificada" ni "pago protegido": no existe verificación de empresas ni protección de pago en el producto, y el Bloque 0 del plan maestro prohíbe afirmarlas mientras no haya una fuente real (corregido al cerrar el Hito A, `CN-20260916-093`). Las alertas guardadas y el filtro por modalidad ya forman parte de la primera iteración. También se añadieron hasta tres preguntas opcionales de filtro por publicación; el trabajador las responde antes de postular y la empresa ve las respuestas junto al candidato. No se incorporarán algoritmos de ranking complejos hasta contar con datos reales de postulaciones.
 
 ## Punto profesional inicial
 
@@ -399,9 +399,14 @@ El siguiente orden activo es:
 Al terminar cada fase se actualizarán:
 
 - este documento;
-- `docs/AVANCE_2026-08-22.md`;
-- la documentación de API correspondiente;
+- [la referencia de API](../reference/api.md), si cambia un contrato o regla;
+- la guía afectada, si cambia un procedimiento de uso u operación;
 - pruebas y criterios de aceptación;
 - decisiones que cambien el modelo de negocio o el alcance regulatorio.
+
+Los cierres, resultados de pruebas y riesgos se registran únicamente en
+[`docs/PROGRESO.md`](../PROGRESO.md). El avance del 22 de agosto y los planes
+anteriores se conservan en el archivo documental como contexto, no como una
+lista de trabajo vigente.
 
 La siguiente fase no debe comenzar si el flujo anterior todavía tiene estados simulados, errores críticos o información contradictoria entre web, API y Flutter.

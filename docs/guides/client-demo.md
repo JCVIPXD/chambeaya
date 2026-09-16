@@ -7,7 +7,7 @@ Esta versión presenta el flujo profesional para trabajadores en Android, iOS y 
 Desde la raíz del proyecto:
 
 ```powershell
-npm run dev:mobile
+npm run dev:mobile -- -Demo
 ```
 
 Abre `http://localhost:7357`. El lanzador usa `web-server` para evitar pantallas en blanco por el arranque de Chrome; si necesitas una ventana Chrome administrada por Flutter, añade `-- -Device chrome`.
@@ -21,7 +21,7 @@ desde la raíz:
 docker compose up -d --build
 npm run demo:seed
 npm run demo:smoke
-npm run dev:mobile -- -UseLocalApi
+npm run dev:mobile
 ```
 
 `npm run demo:seed` es explícito, idempotente y sólo opera sobre los registros
@@ -60,8 +60,9 @@ Todos estos datos son ficticios. También puede usarse cualquier correo válido,
 3. En el panel Trabajador, abre `Postulaciones`, confirma el turno y sigue el paso de llegada/check-in; completa la salida para generar el pago pendiente.
 4. Vuelve a Empresa, abre `Pagos` y marca el pago generado como procesado.
 5. En Trabajador, confirma la recepción y abre el historial/billetera; el turno `Apoyo de salón` ya muestra un pago histórico liberado.
-6. Abre Superadmin para mostrar el resumen, la empresa y el trabajador con el mismo escenario.
-7. Si necesitas repetir desde el comienzo, ejecuta de nuevo `npm run demo:smoke` y recarga los paneles.
+6. En Trabajador, abre `Invitaciones`: el modo demo siembra una invitación pendiente de `Restaurante La Mar` que puede aceptarse o rechazarse. Contra la API real, esa pantalla lista las invitaciones creadas desde `Talento disponible` del panel Empresa y responde llamando al servidor; la tarjeta solo cambia de estado con la respuesta real.
+7. Abre Superadmin para mostrar el resumen, la empresa y el trabajador con el mismo escenario.
+8. Si necesitas repetir desde el comienzo, ejecuta de nuevo `npm run demo:smoke` y recarga los paneles.
 
 ## Vistas adaptables
 
@@ -77,7 +78,7 @@ Cuando Docker Desktop esté listo:
 
 ```powershell
 docker compose up --build
-npm run dev:mobile -- -UseLocalApi
+npm run dev:mobile
 ```
 
 Este modo envía registro e inicio de sesión a `http://127.0.0.1:4000/api` y consulta la API local de empleos.

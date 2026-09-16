@@ -96,7 +96,7 @@ El entorno local fue levantado y validado en Windows con Docker Desktop. Los ser
 - Respuestas coherentes para validación, registros duplicados, acceso denegado y recursos inexistentes.
 - Relaciones con eliminación en cascada para evitar registros huérfanos.
 - Migración Prisma `20260822210930_core_business_crud` aplicada correctamente.
-- Consulta la referencia completa en [API_CRUD.md](API_CRUD.md).
+- Consulta la referencia vigente en [API y reglas operativas](../../reference/api.md).
 
 ### Sincronización de turnos en tiempo real
 
@@ -271,7 +271,7 @@ No están habilitados pagos reales, retiros, contacto con empleadores reales, c�
 
 El desarrollo continuará de forma incremental, priorizando primero un flujo profesional de publicación, postulación, selección y asignación. Los pagos reales, la biometría y las integraciones regulatorias se incorporarán únicamente después de validar el núcleo operativo.
 
-La ruta completa, sus criterios de salida, el modelo de negocio progresivo y las referencias peruanas se encuentran en [PLAN_MEJORA_PROGRESIVA.md](PLAN_MEJORA_PROGRESIVA.md).
+La ruta completa, sus criterios de salida, el modelo de negocio progresivo y las referencias peruanas se encuentran en la [hoja de ruta](../../product/roadmap.md).
 
 La siguiente fase activa es:
 
