@@ -328,6 +328,8 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 .payment-stats button { align-self: end; border: 0; padding: 0; background: transparent; color: var(--teal-dark); display: flex; align-items: center; gap: 5px; font-size: 9px; font-weight: 800; }
 .activity-list { display: grid; gap: 3px; }
 .activity-item { min-height: 58px; display: flex; align-items: center; gap: 10px; }
+.activity-action { width: 100%; border: 0; padding: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.activity-action:hover { background: var(--surface-muted); }
 .activity-icon { width: 34px; height: 34px; flex: 0 0 auto; border-radius: 10px; display: grid; place-items: center; }
 .activity-icon.teal { background: var(--teal-soft); color: var(--teal-dark); }
 .activity-icon.navy { background: #e9eef5; color: var(--navy); }
@@ -545,6 +547,15 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 .directory-actions { margin-top: 13px; display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .directory-actions button { min-height: 38px; padding: 0 8px; font-size: 9px; }
 .directory-empty { grid-column: 1 / -1; }
+.directory-card-actions { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.directory-card-actions button { min-height: 36px; padding: 0 10px; font-size: 9px; }
+.invite-error { color: var(--danger); font-size: 8px; font-weight: 700; }
+.invitation-status { padding: 5px 9px; border-radius: 999px; font-size: 8px; font-weight: 800; white-space: nowrap; }
+.invitation-status-pending { background: #fff4dc; color: #9b6400; }
+.invitation-status-accepted { background: #dcf8ef; color: #008f70; }
+.invitation-status-declined { background: #fce5e8; color: #b9404e; }
+.invitation-status-expired, .invitation-status-cancelled { background: var(--background); color: var(--muted); }
+.invitation-card .directory-identity { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
 .messages-workspace { height: calc(100vh - 72px); min-height: 640px; padding-bottom: 28px; display: flex; flex-direction: column; }
 .messages-shell { flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: 17px; background: white; overflow: hidden; display: grid; grid-template-columns: 330px minmax(0, 1fr); }

@@ -27,13 +27,34 @@ import {
 const key = "cumplenow_admin_session";
 export default function AdminPage() {
   const [session, setSession] = useState<AdminSession | null>(null);
+  const [restoringSession, setRestoringSession] = useState(true);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     const saved = localStorage.getItem(key);
-    if (saved) setSession(JSON.parse(saved));
+    if (!saved) {
+      setRestoringSession(false);
+      return;
+    }
+    try {
+      const candidate = JSON.parse(saved) as AdminSession;
+      void adminApi
+        .restore(candidate.token)
+        .then((restored) => {
+          if (restored.role !== "ADMIN") throw new Error("ADMIN_ACCOUNT_REQUIRED");
+          localStorage.setItem(key, JSON.stringify(restored));
+          setSession(restored);
+        })
+        .catch(() => localStorage.removeItem(key))
+        .finally(() => setRestoringSession(false));
+    } catch {
+      localStorage.removeItem(key);
+      setRestoringSession(false);
+    }
   }, []);
+  if (restoringSession)
+    return <main className="admin-auth"><div className="admin-auth-card">Validando sesiÃ³nâ€¦</div></main>;
   if (!session)
     return (
       <main className="admin-auth">
@@ -231,7 +252,7 @@ function AdminWorkspace({
   const [workers, setWorkers] = useState<AdminWorker[]>([]);
   const [incidents, setIncidents] = useState<AdminIncident[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [failedSections, setFailedSections] = useState<string[]>([]);
   const [section, setSection] = useState<
     "overview" | "companies" | "workers" | "incidents"
   >("overview");
@@ -249,24 +270,23 @@ function AdminWorkspace({
   const [savingCompany, setSavingCompany] = useState(false);
   const load = async () => {
     setLoading(true);
-    setError(false);
-    try {
-      const [summary, companyData, workerData, incidentData] =
-        await Promise.all([
-          adminApi.overview(session.token),
-          adminApi.companies(session.token),
-          adminApi.workers(session.token),
-          adminApi.incidents(session.token),
-        ]);
-      setOverview(summary);
-      setCompanies(companyData);
-      setWorkers(workerData);
-      setIncidents(incidentData);
-    } catch {
-      setError(true);
-    } finally {
-      setLoading(false);
-    }
+    const results = await Promise.allSettled([
+      adminApi.overview(session.token),
+      adminApi.companies(session.token),
+      adminApi.workers(session.token),
+      adminApi.incidents(session.token),
+    ]);
+    const labels = ["resumen", "empresas", "trabajadores", "incidencias"];
+    const failures = results.flatMap((result, index) =>
+      result.status === "rejected" ? [labels[index]] : [],
+    );
+    const [summary, companyData, workerData, incidentData] = results;
+    if (summary.status === "fulfilled") setOverview(summary.value);
+    if (companyData.status === "fulfilled") setCompanies(companyData.value);
+    if (workerData.status === "fulfilled") setWorkers(workerData.value);
+    if (incidentData.status === "fulfilled") setIncidents(incidentData.value);
+    setFailedSections(failures);
+    setLoading(false);
   };
   useEffect(() => {
     void load();
@@ -284,7 +304,7 @@ function AdminWorkspace({
   const filteredWorkers = useMemo(
     () =>
       workers.filter((worker) =>
-        `${worker.name} ${worker.email ?? ""} ${worker.identifier} ${worker.workerProfiles.map((profile) => profile.company.name).join(" ")}`
+        `${worker.name} ${worker.email ?? ""} ${worker.identifier} ${worker.companyWorkerContacts.map((contact) => contact.company?.name ?? "").join(" ")}`
           .toLowerCase()
           .includes(normalizedQuery),
       ),
@@ -347,7 +367,7 @@ function AdminWorkspace({
       setCompanyModal(null);
       setSelected(null);
     } catch {
-      setError(true);
+      setFailedSections(["empresa"]);
     } finally {
       setSavingCompany(false);
     }
@@ -391,9 +411,9 @@ function AdminWorkspace({
           </button>
         </div>
       </header>
-      {error && (
+      {failedSections.length > 0 && (
         <div className="admin-error-banner">
-          <AlertTriangle size={18} /> No se pudo actualizar toda la información.{" "}
+          <AlertTriangle size={18} /> No se pudo actualizar: {failedSections.join(", ")}. Los demás datos siguen disponibles.{" "}
           <button onClick={() => void load()}>Reintentar</button>
         </div>
       )}
@@ -559,8 +579,7 @@ function AdminWorkspace({
                     <strong>{worker.name}</strong>
                     <small>{worker.email}</small>
                     <span>
-                      {worker.workerProfiles[0]?.company.name ?? "Sin empresa"}{" "}
-                      · Índice {worker.workerProfiles[0]?.cumpleScore ?? "—"}
+                      {worker.companyWorkerContacts[0]?.company?.name ?? "Sin empresa"}
                     </span>
                   </button>
                 ))}
@@ -634,8 +653,7 @@ function AdminWorkspace({
                     <strong>{worker.name}</strong>
                     <small>{worker.email ?? "Sin correo"}</small>
                     <span>
-                      {worker.workerProfiles[0]?.company.name ?? "Sin empresa"}{" "}
-                      · Índice {worker.workerProfiles[0]?.cumpleScore ?? "—"}
+                      {worker.companyWorkerContacts[0]?.company?.name ?? "Sin empresa"}
                     </span>
                   </button>
                 ))}
@@ -726,16 +744,31 @@ function AdminWorkspace({
                             )
                           )
                             return;
-                          await adminApi.deleteCompany(
-                            session.token,
-                            selectedCompany.id,
-                          );
-                          setCompanies((current) =>
-                            current.filter(
-                              (item) => item.id !== selectedCompany.id,
-                            ),
-                          );
-                          setSelected(null);
+                          try {
+                            await adminApi.deleteCompany(
+                              session.token,
+                              selectedCompany.id,
+                            );
+                            setCompanies((current) =>
+                              current.filter(
+                                (item) => item.id !== selectedCompany.id,
+                              ),
+                            );
+                            setOverview((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    companies: Math.max(
+                                      0,
+                                      (current.companies ?? 0) - 1,
+                                    ),
+                                  }
+                                : current,
+                            );
+                            setSelected(null);
+                          } catch {
+                            setFailedSections(["eliminar empresa"]);
+                          }
                         }}
                       >
                         Eliminar cuenta
@@ -754,15 +787,56 @@ function AdminWorkspace({
                       <dd>{selectedWorker.identifier}</dd>
                       <dt>Empresa</dt>
                       <dd>
-                        {selectedWorker.workerProfiles[0]?.company.name ??
+                        {selectedWorker.companyWorkerContacts[0]?.company?.name ??
                           "Sin empresa"}
                       </dd>
                       <dt>Estado</dt>
                       <dd>
-                        {selectedWorker.workerProfiles[0]?.status ??
+                        {selectedWorker.companyWorkerContacts[0]?.status ??
                           "Sin perfil"}
                       </dd>
                     </dl>
+                    <div className="admin-detail-actions">
+                      <button
+                        className="danger-button"
+                        type="button"
+                        onClick={async () => {
+                          if (
+                            !window.confirm(
+                              "¿Eliminar esta cuenta de trabajador?",
+                            )
+                          )
+                            return;
+                          try {
+                            await adminApi.deleteWorker(
+                              session.token,
+                              selectedWorker.id,
+                            );
+                            setWorkers((current) =>
+                              current.filter(
+                                (item) => item.id !== selectedWorker.id,
+                              ),
+                            );
+                            setOverview((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    workers: Math.max(
+                                      0,
+                                      (current.workers ?? 0) - 1,
+                                    ),
+                                  }
+                                : current,
+                            );
+                            setSelected(null);
+                          } catch {
+                            setFailedSections(["eliminar trabajador"]);
+                          }
+                        }}
+                      >
+                        Eliminar trabajador
+                      </button>
+                    </div>
                   </>
                 )}
                 {selectedIncident && (

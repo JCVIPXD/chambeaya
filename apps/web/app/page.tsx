@@ -38,7 +38,6 @@ import {
   Send,
   ShieldCheck,
   Sparkles,
-  Star,
   TrendingUp,
   UserCheck,
   UserPlus,
@@ -62,6 +61,10 @@ import {
   type SubscriptionRecord,
   type ShiftRecord,
   type WorkerRecord,
+  type TalentCardRecord,
+  type SpecialtyRecord,
+  type BusinessTalentInvitationRecord,
+  type TalentInvitationStatus,
 } from "../lib/business-api";
 import { BusinessAuth } from "../components/business-auth";
 import { CrudModal } from "../components/crud-modal";
@@ -100,15 +103,11 @@ type Worker = {
   initials: string;
   name: string;
   role: string;
-  match: number;
-  score: number;
   available: string;
   status: "Disponible" | "En turno" | "No disponible";
-  jobs: number;
   skills: string[];
   email?: string | null;
   phone?: string | null;
-  verified?: boolean;
 };
 type Conversation = {
   id: string;
@@ -162,27 +161,6 @@ const initialWorkers: Worker[] = [];
 const initialConversations: Conversation[] = [];
 const initialMessages: Record<string, ChatMessage[]> = {};
 const initialTransactions: Transaction[] = [];
-
-const activity = [
-  {
-    icon: UserCheck,
-    title: "Ana confirmó el turno",
-    detail: "Mozo de salón · hace 8 min",
-    tone: "teal",
-  },
-  {
-    icon: MessageSquareText,
-    title: "Nuevo mensaje de Carlos",
-    detail: "Consulta sobre uniforme · hace 24 min",
-    tone: "navy",
-  },
-  {
-    icon: ReceiptText,
-    title: "Pago de turno reportado",
-    detail: "S/ 360 · hace 1 h",
-    tone: "gold",
-  },
-];
 
 function coverageClass(coverage: Coverage) {
   if (coverage === "Completo") return "complete";
@@ -256,15 +234,11 @@ function mapWorker(record: WorkerRecord): Worker {
     initials: initials(record.name),
     name: record.name,
     role: record.role,
-    match: record.matchScore,
-    score: record.cumpleScore,
     available: record.availability ?? status,
     status,
-    jobs: record.completedJobs,
     skills: record.skills,
     email: record.email,
     phone: record.phone,
-    verified: record.verified,
   };
 }
 function mapConversation(record: ConversationRecord): Conversation {
@@ -315,6 +289,14 @@ function mapPayment(record: PaymentRecord): Transaction {
   };
 }
 
+const INVITATION_STATUS_LABEL: Record<TalentInvitationStatus, string> = {
+  PENDING: "Pendiente",
+  ACCEPTED: "Aceptada",
+  DECLINED: "Rechazada",
+  EXPIRED: "Vencida",
+  CANCELLED: "Cancelada",
+};
+
 export default function HomePage() {
   const [authChecking, setAuthChecking] = useState(true);
   const [session, setSession] = useState<BusinessSession | null>(null);
@@ -350,6 +332,24 @@ export default function HomePage() {
   const [workerFilter, setWorkerFilter] = useState<
     "Todos" | "Disponibles" | "En turno"
   >("Todos");
+  const [talent, setTalent] = useState<TalentCardRecord[]>([]);
+  const [talentSpecialties, setTalentSpecialties] = useState<SpecialtyRecord[]>([]);
+  const [talentSpecialty, setTalentSpecialty] = useState("");
+  const [talentAvailableOnly, setTalentAvailableOnly] = useState(false);
+  const [talentQueryInput, setTalentQueryInput] = useState("");
+  const [talentQuery, setTalentQuery] = useState("");
+  const [talentDistrictInput, setTalentDistrictInput] = useState("");
+  const [talentDistrict, setTalentDistrict] = useState("");
+  const [talentLoading, setTalentLoading] = useState(false);
+  const [talentError, setTalentError] = useState<string | null>(null);
+  const [talentNextCursor, setTalentNextCursor] = useState<string | null>(null);
+  const [talentLoadingMore, setTalentLoadingMore] = useState(false);
+  const talentRequestId = useRef(0);
+  const [invitingProfileId, setInvitingProfileId] = useState<string | null>(null);
+  const [inviteErrors, setInviteErrors] = useState<Record<string, string>>({});
+  const [sentInvitations, setSentInvitations] = useState<BusinessTalentInvitationRecord[]>([]);
+  const [invitationsLoading, setInvitationsLoading] = useState(false);
+  const [invitationsError, setInvitationsError] = useState<string | null>(null);
   const [conversationRecords, setConversationRecords] =
     useState(initialConversations);
   const [selectedConversation, setSelectedConversation] = useState("");
@@ -517,6 +517,148 @@ export default function HomePage() {
       window.clearInterval(timer);
     };
   }, [activeNav, selectedConversation, session]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setTalentQuery(talentQueryInput.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [talentQueryInput]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setTalentDistrict(talentDistrictInput.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [talentDistrictInput]);
+  useEffect(() => {
+    if (!session || activeNav !== "Trabajadores") return;
+    const requestId = ++talentRequestId.current;
+    setTalentLoading(true);
+    setTalentError(null);
+    // A stale per-card invite error belongs to the previous search/filter result;
+    // it must not stay pinned under a card that no longer matches the new criteria.
+    setInviteErrors({});
+    Promise.all([
+      businessApi.talent.specialties(session.token),
+      businessApi.talent.search(session.token, {
+        specialtyId: talentSpecialty || undefined,
+        district: talentDistrict || undefined,
+        query: talentQuery || undefined,
+        availableOnly: talentAvailableOnly,
+      }),
+    ])
+      .then(([specialties, result]) => {
+        if (talentRequestId.current !== requestId) return;
+        setTalentSpecialties(specialties);
+        setTalent(result.items);
+        setTalentNextCursor(result.nextCursor);
+      })
+      .catch(() => {
+        if (talentRequestId.current !== requestId) return;
+        setTalent([]);
+        setTalentNextCursor(null);
+        setTalentError("No se pudo cargar el talento disponible. Intenta de nuevo.");
+      })
+      .finally(() => {
+        if (talentRequestId.current !== requestId) return;
+        setTalentLoading(false);
+      });
+  }, [activeNav, session, talentSpecialty, talentAvailableOnly, talentDistrict, talentQuery]);
+  async function loadMoreTalent() {
+    if (!session || !talentNextCursor || talentLoadingMore) return;
+    const requestId = talentRequestId.current;
+    setTalentLoadingMore(true);
+    setTalentError(null);
+    try {
+      const result = await businessApi.talent.search(session.token, {
+        specialtyId: talentSpecialty || undefined,
+        district: talentDistrict || undefined,
+        query: talentQuery || undefined,
+        availableOnly: talentAvailableOnly,
+        cursor: talentNextCursor,
+      });
+      // A stale response (filters changed while this request was in flight) must not
+      // overwrite newer results, but the loading flag below is reset unconditionally:
+      // it belongs to this call's lifecycle, not to whether its data is still relevant.
+      if (talentRequestId.current !== requestId) return;
+      setTalent((current) => [...current, ...result.items]);
+      setTalentNextCursor(result.nextCursor);
+    } catch {
+      if (talentRequestId.current !== requestId) return;
+      setTalentError("No se pudieron cargar más perfiles. Intenta de nuevo.");
+    } finally {
+      setTalentLoadingMore(false);
+    }
+  }
+  const invitationsRequestId = useRef(0);
+  // Ids created locally by `inviteTalent` that a slower, already-in-flight `GET`
+  // (started before that creation) cannot yet know about. A stale response is a
+  // snapshot from before the create; it must be merged, never used to replace
+  // the list outright, or a real success flips back to "not invited" on screen.
+  const locallyCreatedInvitationIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!session || activeNav !== "Trabajadores") return;
+    const requestId = ++invitationsRequestId.current;
+    setInvitationsLoading(true);
+    setInvitationsError(null);
+    businessApi.talent.invitations
+      .list(session.token)
+      .then((result) => {
+        if (invitationsRequestId.current !== requestId) return;
+        setSentInvitations((current) => {
+          const resultIds = new Set(result.map((invitation) => invitation.id));
+          const missingLocal = current.filter(
+            (invitation) =>
+              locallyCreatedInvitationIds.current.has(invitation.id) &&
+              !resultIds.has(invitation.id),
+          );
+          return [...missingLocal, ...result];
+        });
+      })
+      .catch(() => {
+        if (invitationsRequestId.current !== requestId) return;
+        setInvitationsError("No se pudieron cargar las invitaciones enviadas. Intenta de nuevo.");
+      })
+      .finally(() => {
+        if (invitationsRequestId.current !== requestId) return;
+        setInvitationsLoading(false);
+      });
+  }, [activeNav, session]);
+  // Perfiles con una invitación activa (PENDING o ACCEPTED) según el listado real del
+  // servidor: nunca se marca "invitado" de forma optimista sólo por haber hecho clic.
+  const activelyInvitedProfileIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const invitation of sentInvitations) {
+      if (invitation.status === "PENDING" || invitation.status === "ACCEPTED") {
+        ids.add(invitation.workerTalentProfileId);
+      }
+    }
+    return ids;
+  }, [sentInvitations]);
+  async function inviteTalent(profileId: string) {
+    if (!session || invitingProfileId) return;
+    setInvitingProfileId(profileId);
+    setInviteErrors((current) => {
+      if (!(profileId in current)) return current;
+      const next = { ...current };
+      delete next[profileId];
+      return next;
+    });
+    try {
+      const created = await businessApi.talent.invitations.create(session.token, {
+        workerTalentProfileId: profileId,
+      });
+      locallyCreatedInvitationIds.current.add(created.id);
+      setSentInvitations((current) => [created, ...current]);
+      showToast(`Invitación enviada a ${created.workerName}.`);
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : null;
+      const message =
+        code === "INVITATION_ALREADY_ACTIVE"
+          ? "Ya existe una invitación activa para este perfil."
+          : code === "TALENT_PROFILE_NOT_AVAILABLE"
+            ? "Este perfil ya no está disponible para invitar."
+            : "No se pudo enviar la invitación. Intenta de nuevo.";
+      setInviteErrors((current) => ({ ...current, [profileId]: message }));
+    } finally {
+      setInvitingProfileId(null);
+    }
+  }
 
   async function loadData(token: string) {
     setDataLoading(true);
@@ -706,6 +848,16 @@ export default function HomePage() {
     setConversationRecords([]);
     setPaymentRecords([]);
     setPendingApplications({ count: 0, shiftIds: [] });
+    // Invitation state is keyed by account, not by component lifetime: the root
+    // component never unmounts on logout (it just swaps in <BusinessAuth />), so
+    // without this a second BUSINESS account signing in on the same tab would
+    // inherit the previous account's invitations list and "already invited"
+    // button state. See CN-20260915-083 MEDIO-1.
+    setSentInvitations([]);
+    setInvitationsError(null);
+    setInviteErrors({});
+    setInvitingProfileId(null);
+    locallyCreatedInvitationIds.current.clear();
     window.localStorage.removeItem(businessSessionKey);
     if (token) await authApi.logout(token).catch(() => undefined);
   }
@@ -1260,7 +1412,6 @@ export default function HomePage() {
               setSelectedShiftId(id);
               navigate("Turnos");
             }}
-            onToast={showToast}
           />
         )}
 
@@ -1634,17 +1785,8 @@ export default function HomePage() {
             <ViewHeader
               eyebrow="Red de talento"
               title="Trabajadores"
-              description="Encuentra perfiles verificados, revisa su desempeño y forma tu equipo frecuente."
+              description="Encuentra perfiles visibles, revisa sus especialidades y forma tu equipo frecuente."
             >
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() =>
-                  showToast("Invitación privada lista para compartir.")
-                }
-              >
-                <Mail size={17} /> Invitar por enlace
-              </button>
               <button
                 className="primary-button"
                 type="button"
@@ -1662,8 +1804,7 @@ export default function HomePage() {
                   <p>Equipo frecuente</p>
                   <strong>{workerRecords.length} trabajadores</strong>
                   <small>
-                    {workerRecords.filter((worker) => worker.verified).length}{" "}
-                    perfiles verificados
+                    Contactos operativos de esta empresa
                   </small>
                 </div>
                 <div className="talent-avatars">
@@ -1683,41 +1824,165 @@ export default function HomePage() {
                 icon={UserCheck}
               />
               <MiniStat
-                label="Índice promedio"
-                value={
-                  workerRecords.length
-                    ? String(
-                      Math.round(
-                        workerRecords.reduce(
-                          (sum, worker) => sum + worker.score,
-                          0,
-                        ) / workerRecords.length,
-                      ),
-                    )
-                    : "—"
-                }
-                detail="Índice CUMPLE"
-                icon={Star}
+                label="Contactos registrados"
+                value={String(workerRecords.length)}
+                detail="Historial de empresa"
+                icon={Users}
               />
             </section>
             <section className="panel directory-panel">
               <div className="directory-header">
                 <div>
-                  <h2>Directorio de talento</h2>
-                  <p>
-                    Perfiles sugeridos según tu historial y necesidades activas.
-                  </p>
+                  <h2>Talento disponible</h2>
+                  <p>Perfiles profesionales de la plataforma, con datos declarados por cada trabajador. No son contactos de tu empresa.</p>
                 </div>
-                <span className="ai-chip">
-                  <Sparkles size={12} /> Ordenado por compatibilidad
-                </span>
               </div>
               <div className="management-toolbar">
                 <label className="search-control">
                   <Search size={16} />
                   <input
-                    aria-label="Buscar trabajadores"
-                    placeholder="Buscar por nombre, rol o habilidad"
+                    aria-label="Buscar talento por nombre, presentación o distrito"
+                    placeholder="Buscar por nombre, presentación o distrito"
+                    value={talentQueryInput}
+                    onChange={(event) => setTalentQueryInput(event.target.value)}
+                  />
+                </label>
+                <input
+                  aria-label="Filtrar talento por distrito"
+                  placeholder="Distrito"
+                  value={talentDistrictInput}
+                  onChange={(event) => setTalentDistrictInput(event.target.value)}
+                />
+                <select aria-label="Filtrar talento por especialidad" value={talentSpecialty} onChange={(event) => setTalentSpecialty(event.target.value)}>
+                  <option value="">Todas las especialidades</option>
+                  {talentSpecialties.map((specialty) => <option key={specialty.id} value={specialty.id}>{specialty.name}</option>)}
+                </select>
+                <div className="filter-tabs">
+                  <button
+                    type="button"
+                    className={talentAvailableOnly ? "active" : ""}
+                    aria-pressed={talentAvailableOnly}
+                    onClick={() => setTalentAvailableOnly((current) => !current)}
+                  >
+                    Solo disponibles ahora
+                  </button>
+                </div>
+              </div>
+              <div className="worker-directory" aria-live="polite">
+                {talentLoading && <span className="muted">Buscando talento disponible…</span>}
+                {!talentLoading && talent.map((profile) => {
+                  const alreadyInvited = activelyInvitedProfileIds.has(profile.id);
+                  const sendingInvite = invitingProfileId === profile.id;
+                  const inviteError = inviteErrors[profile.id];
+                  return (
+                    <article className="directory-card" key={profile.id}>
+                      <div className="directory-identity"><strong>{profile.name}</strong><span>{profile.headline ?? "Perfil profesional en actualización"}</span></div>
+                      <p>{profile.district ?? "Distrito no indicado"} · {profile.isAvailable ? (profile.availabilityText ?? "Disponible") : "No disponible"}</p>
+                      <div className="skill-row">{profile.specialties.map((specialty) => <span key={specialty.id}>{specialty.name}</span>)}</div>
+                      <p className="muted">{profile.reputation.reviewCount > 0 ? `${profile.reputation.averageRating?.toFixed(1)} / 5 · ${profile.reputation.reviewCount} reseña${profile.reputation.reviewCount === 1 ? "" : "s"}` : "Aún no tiene reseñas"}</p>
+                      <div className="directory-card-actions">
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={sendingInvite || alreadyInvited || invitingProfileId !== null}
+                          onClick={() => void inviteTalent(profile.id)}
+                        >
+                          <Mail size={16} />
+                          {sendingInvite ? "Enviando…" : alreadyInvited ? "Invitación enviada" : "Invitar"}
+                        </button>
+                        {inviteError && <span className="invite-error">{inviteError}</span>}
+                      </div>
+                    </article>
+                  );
+                })}
+                {!talentLoading && talentError && talent.length === 0 && (
+                  <div className="empty-state directory-empty">
+                    <AlertTriangle size={24} />
+                    <strong>No se pudo cargar el talento</strong>
+                    <span>{talentError}</span>
+                  </div>
+                )}
+                {!talentLoading && !talentError && talent.length === 0 && (
+                  <div className="empty-state directory-empty">
+                    <Search size={24} />
+                    <strong>Sin datos de talento con estos criterios</strong>
+                    <span>Ajusta la especialidad, el distrito, el texto de búsqueda o la disponibilidad.</span>
+                  </div>
+                )}
+                {!talentLoading && talentNextCursor && <button className="secondary-button" type="button" disabled={talentLoadingMore} onClick={() => void loadMoreTalent()}>{talentLoadingMore ? "Cargando…" : "Ver más perfiles"}</button>}
+                {!talentLoading && talent.length > 0 && talentError && <p className="muted">{talentError}</p>}
+              </div>
+            </section>
+            <section className="panel directory-panel invitations-panel">
+              <div className="directory-header">
+                <div>
+                  <h2>Invitaciones enviadas</h2>
+                  <p>Seguimiento de las invitaciones que tu empresa envió al talento disponible, con su estado real.</p>
+                </div>
+              </div>
+              <div className="worker-directory invitation-list" aria-live="polite">
+                {/* Only the first load (no invitations known yet) shows the full-panel
+                    loading/empty/error states. A reload while invitations are already on
+                    screen (e.g. leaving and re-entering "Trabajadores") must not hide them
+                    behind a spinner; it keeps the list and adds a subtle inline notice. */}
+                {invitationsLoading && sentInvitations.length === 0 && (
+                  <span className="muted">Cargando invitaciones enviadas…</span>
+                )}
+                {!invitationsLoading && invitationsError && sentInvitations.length === 0 && (
+                  <div className="empty-state directory-empty">
+                    <AlertTriangle size={24} />
+                    <strong>No se pudieron cargar las invitaciones</strong>
+                    <span>{invitationsError}</span>
+                  </div>
+                )}
+                {!invitationsLoading && !invitationsError && sentInvitations.length === 0 && (
+                  <div className="empty-state directory-empty">
+                    <Mail size={24} />
+                    <strong>Aún no enviaste invitaciones</strong>
+                    <span>Invita a un perfil desde "Talento disponible" para verlo aquí.</span>
+                  </div>
+                )}
+                {sentInvitations.map((invitation) => (
+                  <article className="directory-card invitation-card" key={invitation.id}>
+                    <div className="directory-identity">
+                      <strong>{invitation.workerName}</strong>
+                      <span
+                        className={`invitation-status invitation-status-${invitation.status.toLowerCase()}`}
+                      >
+                        {INVITATION_STATUS_LABEL[invitation.status]}
+                      </span>
+                    </div>
+                    {invitation.shift && <p>Turno: {invitation.shift.title}</p>}
+                    {invitation.message && <p className="muted">{invitation.message}</p>}
+                    <p className="muted">
+                      Enviada el {new Date(invitation.createdAt).toLocaleDateString("es-PE")}
+                      {invitation.status === "PENDING"
+                        ? ` · vence el ${new Date(invitation.expiresAt).toLocaleDateString("es-PE")}`
+                        : ""}
+                    </p>
+                  </article>
+                ))}
+                {invitationsLoading && sentInvitations.length > 0 && (
+                  <span className="muted">Actualizando invitaciones…</span>
+                )}
+                {!invitationsLoading && invitationsError && sentInvitations.length > 0 && (
+                  <p className="muted">{invitationsError}</p>
+                )}
+              </div>
+            </section>
+            <section className="panel directory-panel">
+              <div className="directory-header">
+                <div>
+                  <h2>Equipo / contactos</h2>
+                  <p>Contactos operativos que tu empresa ya registró, con su estado dentro de esta cuenta.</p>
+                </div>
+              </div>
+              <div className="management-toolbar">
+                <label className="search-control">
+                  <Search size={16} />
+                  <input
+                    aria-label="Buscar en tu equipo"
+                    placeholder="Buscar en tu equipo por nombre, rol o habilidad"
                     value={workerSearch}
                     onChange={(event) => setWorkerSearch(event.target.value)}
                   />
@@ -1736,15 +2001,6 @@ export default function HomePage() {
                     ),
                   )}
                 </div>
-                <button
-                  className="compact-button"
-                  type="button"
-                  onClick={() =>
-                    showToast("Filtros de habilidades disponibles.")
-                  }
-                >
-                  <Filter size={15} /> Habilidades
-                </button>
               </div>
               <div className="worker-directory">
                 {filteredWorkers.map((worker) => (
@@ -2542,7 +2798,6 @@ function Overview({
   onRescue,
   onNavigate,
   onShift,
-  onToast,
 }: {
   companyName: string;
   shifts: Shift[];
@@ -2554,7 +2809,6 @@ function Overview({
   onRescue: () => void;
   onNavigate: (view: ViewName) => void;
   onShift: (id: string) => void;
-  onToast: (message: string) => void;
 }) {
   const priority =
     shifts.find((shift) => shift.coverage !== "Completo") ?? shifts[0];
@@ -2563,6 +2817,43 @@ function Overview({
   const pending = payments
     .filter((payment) => payment.rawStatus !== "PROCESSED")
     .reduce((sum, payment) => sum + payment.amount, 0);
+  const uncovered = shifts.filter((shift) => shift.coverage !== "Completo");
+  const operationalActions = [
+    ...(pendingApplications.count > 0
+      ? [{
+        icon: UserPlus,
+        title: pendingApplications.count === 1
+          ? "1 postulación por revisar"
+          : `${pendingApplications.count} postulaciones por revisar`,
+        detail: "Revisa candidatos antes de cubrir el turno.",
+        tone: "teal",
+        onClick: () => {
+          if (pendingApplications.shiftIds[0]) onShift(pendingApplications.shiftIds[0]);
+          else onNavigate("Turnos");
+        },
+      }]
+      : []),
+    ...(uncovered.length > 0
+      ? [{
+        icon: CalendarCheck2,
+        title: uncovered.length === 1
+          ? "1 turno aún necesita cobertura"
+          : `${uncovered.length} turnos aún necesitan cobertura`,
+        detail: "Consulta el estado de los cupos y las postulaciones.",
+        tone: "navy",
+        onClick: () => onNavigate("Turnos"),
+      }]
+      : []),
+    ...(pending > 0
+      ? [{
+        icon: ReceiptText,
+        title: "Registros de pago pendientes",
+        detail: `S/ ${pending.toLocaleString("es-PE", { minimumFractionDigits: 2 })} por revisar.`,
+        tone: "gold",
+        onClick: () => onNavigate("Pagos"),
+      }]
+      : []),
+  ];
   return (
     <div className="workspace">
       <section className="welcome-row">
@@ -2807,26 +3098,19 @@ function Overview({
         <aside className="panel talent-panel">
           <div className="panel-heading">
             <div>
-              <h2>Talento disponible</h2>
-              <p>Personas registradas en tu directorio.</p>
+              <h2>Equipo / contactos</h2>
+              <p>Contactos de tu equipo registrados en esta cuenta.</p>
             </div>
-            <span className="ai-chip">
-              <Sparkles size={12} /> Índice CUMPLE
-            </span>
           </div>
           <div className="worker-list">
             {workers.slice(0, 3).map((worker) => (
-              <WorkerCompact
-                key={worker.id}
-                worker={worker}
-                onInvite={() => onToast(`Invitación enviada a ${worker.name}.`)}
-              />
+              <WorkerCompact key={worker.id} worker={worker} />
             ))}
             {!workers.length && (
               <div className="empty-state">
                 <Users size={24} />
-                <strong>Sin talento registrado</strong>
-                <span>Agrega trabajadores a tu directorio.</span>
+                <strong>Sin contactos registrados</strong>
+                <span>Agrega trabajadores a tu equipo.</span>
               </div>
             )}
           </div>
@@ -2901,8 +3185,8 @@ function Overview({
         <article className="panel">
           <div className="panel-heading">
             <div>
-              <h2>Actividad reciente</h2>
-              <p>Accesos rápidos para tu equipo.</p>
+              <h2>Pendientes operativos</h2>
+              <p>Acciones derivadas de la información registrada.</p>
             </div>
             <button
               className="row-action"
@@ -2914,8 +3198,8 @@ function Overview({
             </button>
           </div>
           <div className="activity-list">
-            {activity.map(({ icon: Icon, title, detail, tone }) => (
-              <div className="activity-item" key={title}>
+            {operationalActions.map(({ icon: Icon, title, detail, tone, onClick }) => (
+              <button className="activity-item activity-action" key={title} type="button" onClick={onClick}>
                 <span className={`activity-icon ${tone}`}>
                   <Icon size={16} />
                 </span>
@@ -2923,8 +3207,15 @@ function Overview({
                   <strong>{title}</strong>
                   <small>{detail}</small>
                 </span>
-              </div>
+              </button>
             ))}
+            {!operationalActions.length && (
+              <div className="empty-state compact-empty-state">
+                <CheckCircle2 size={22} />
+                <strong>No hay pendientes registrados</strong>
+                <span>La operación está al día con la información disponible.</span>
+              </div>
+            )}
           </div>
         </article>
       </section>
@@ -3095,15 +3386,9 @@ function ManagedShift({
     </button>
   );
 }
-function WorkerCompact({
-  worker,
-  onInvite,
-}: {
-  worker: Worker;
-  onInvite: () => void;
-}) {
+function WorkerCompact({ worker }: { worker: Worker }) {
   return (
-    <button className="worker-card" type="button" onClick={onInvite}>
+    <div className="worker-card">
       <span className="worker-avatar">
         {worker.initials}
         <i />
@@ -3114,10 +3399,10 @@ function WorkerCompact({
         <em>{worker.available}</em>
       </span>
       <span className="worker-match">
-        <strong>{worker.match}%</strong>
-        <small>match</small>
+        <strong>{worker.status}</strong>
+        <small>estado</small>
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -3160,7 +3445,7 @@ function WorkerDirectoryCard({
       </div>
       <div className="directory-identity">
         <h3>
-          {worker.name} {worker.verified && <BadgeCheck size={15} />}
+          {worker.name}
         </h3>
         <p>{worker.role}</p>
         <span
@@ -3173,18 +3458,6 @@ function WorkerDirectoryCard({
         {worker.skills.map((skill) => (
           <span key={skill}>{skill}</span>
         ))}
-      </div>
-      <div className="worker-performance">
-        <span>
-          <small>Índice CUMPLE</small>
-          <strong>
-            <Star size={13} fill="currentColor" /> {worker.score}
-          </strong>
-        </span>
-        <span>
-          <small>Turnos realizados</small>
-          <strong>{worker.jobs}</strong>
-        </span>
       </div>
       <div className="directory-actions">
         <button className="secondary-button" type="button" onClick={onMessage}>

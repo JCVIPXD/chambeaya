@@ -30,10 +30,8 @@ export type AdminWorker = {
   name: string;
   email: string | null;
   identifier: string;
-  workerProfiles: {
+  companyWorkerContacts: {
     status: string;
-    cumpleScore: number;
-    verified: boolean;
     company: { id: string; name: string };
   }[];
 };
@@ -54,6 +52,7 @@ async function request<T>(
 ): Promise<T> {
   const response = await fetch(`${apiUrl}${path}`, {
     ...init,
+    signal: init?.signal ?? AbortSignal.timeout(8_000),
     headers: {
       ...(init?.headers ?? {}),
       Authorization: `Bearer ${token}`,
@@ -64,6 +63,7 @@ async function request<T>(
   return response.json() as Promise<T>;
 }
 export const adminApi = {
+  restore: (token: string) => request<AdminSession>("/auth/session", token),
   overview: (token: string) => request<AdminOverview>("/admin/overview", token),
   companies: (token: string) =>
     request<AdminCompany[]>("/admin/companies", token),
@@ -84,6 +84,8 @@ export const adminApi = {
     }),
   deleteCompany: (token: string, id: string) =>
     request<void>(`/admin/companies/${id}`, token, { method: "DELETE" }),
+  deleteWorker: (token: string, id: string) =>
+    request<void>(`/admin/workers/${id}`, token, { method: "DELETE" }),
 };
 export async function adminLogin(email: string, password: string) {
   const response = await fetch(`${apiUrl}/auth/login`, {

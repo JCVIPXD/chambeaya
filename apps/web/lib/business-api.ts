@@ -98,11 +98,25 @@ export type WorkerRecord = {
   skills: string[];
   status: 'AVAILABLE' | 'ON_SHIFT' | 'UNAVAILABLE';
   availability: string | null;
-  cumpleScore: number;
-  matchScore: number;
-  completedJobs: number;
-  verified: boolean;
 };
+export type SpecialtyRecord = { id: string; slug: string; name: string; category: string };
+export type TalentCardRecord = { id: string; name: string; headline: string | null; district: string | null; availabilityText: string | null; isAvailable: boolean; specialties: SpecialtyRecord[]; completion: number; reputation: { averageRating: number | null; reviewCount: number } };
+export type TalentSearchResult = { items: TalentCardRecord[]; nextCursor: string | null };
+
+export type TalentInvitationStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED' | 'EXPIRED' | 'CANCELLED';
+export type TalentInvitationShiftSummary = { id: string; title: string; startsAt: string; endsAt: string };
+export type BusinessTalentInvitationRecord = {
+  id: string;
+  status: TalentInvitationStatus;
+  message: string | null;
+  expiresAt: string;
+  respondedAt: string | null;
+  createdAt: string;
+  shift: TalentInvitationShiftSummary | null;
+  workerTalentProfileId: string;
+  workerName: string;
+};
+export type TalentInvitationInput = { workerTalentProfileId: string; shiftId?: string | null; message?: string | null };
 
 export type MessageRecord = {
   id: string;
@@ -197,6 +211,22 @@ export const businessApi = {
     decide: (token: string, shiftId: string, applicationId: string, decision: 'ACCEPTED' | 'REJECTED', reason?: string) => request<ShiftApplicationRecord>(`/business/shifts/${shiftId}/applications/${applicationId}`, { method: 'PATCH', token, body: JSON.stringify({ decision, ...(reason ? { reason } : {}) }) }),
   },
   workers: resource<WorkerRecord>('/business/workers'),
+  talent: {
+    specialties: (token: string) => request<SpecialtyRecord[]>('/specialties', { token }),
+    search: (token: string, input: { specialtyId?: string; district?: string; query?: string; availableOnly?: boolean; cursor?: string }) => {
+      const query = new URLSearchParams({ limit: '20' });
+      if (input.specialtyId) query.set('specialtyId', input.specialtyId);
+      if (input.district) query.set('district', input.district);
+      if (input.query) query.set('query', input.query);
+      if (input.availableOnly) query.set('availableOnly', 'true');
+      if (input.cursor) query.set('cursor', input.cursor);
+      return request<TalentSearchResult>(`/business/talent?${query}`, { token });
+    },
+    invitations: {
+      create: (token: string, input: TalentInvitationInput) => request<BusinessTalentInvitationRecord>('/business/talent-invitations', { method: 'POST', token, body: JSON.stringify(input) }),
+      list: (token: string) => request<BusinessTalentInvitationRecord[]>('/business/talent-invitations', { token }),
+    },
+  },
   conversations: {
     ...resource<ConversationRecord>('/business/conversations'),
     createMessage: (token: string, conversationId: string, body: string) => request<MessageRecord>(`/business/conversations/${conversationId}/messages`, { method: 'POST', token, body: JSON.stringify({ body }) }),
