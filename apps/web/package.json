@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "vitest run --passWithNoTests"
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:report": "playwright show-report",
+    "test:web:admin-real": "playwright test --config=playwright.admin-real.config.ts"
   },
   "dependencies": {
     "lucide-react": "^1.33.0",
@@ -15,6 +18,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

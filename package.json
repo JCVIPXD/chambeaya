@@ -10,6 +10,11 @@
     "demo:seed": "powershell -ExecutionPolicy Bypass -File scripts/seed-demo.ps1",
     "demo:smoke": "powershell -ExecutionPolicy Bypass -File scripts/demo-smoke.ps1",
     "test": "npm run test --workspaces --if-present",
+    "test:web": "npm run test --workspace=@cumple-now/web --",
+    "test:web:ui": "npm run test:ui --workspace=@cumple-now/web --",
+    "test:web:report": "npm run test:report --workspace=@cumple-now/web",
+    "test:web:install": "npm exec --workspace=@cumple-now/web -- playwright install chromium",
+    "test:web:admin-real": "npm run test:web:admin-real --workspace=@cumple-now/web --",
     "build": "npm run build --workspaces --if-present"
   }
 }
