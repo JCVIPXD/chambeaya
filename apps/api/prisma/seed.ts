@@ -6,7 +6,7 @@ async function main() {
   const prisma = new PrismaClient();
   try {
     await seedDemoDatabase(prisma);
-    console.info('Datos demo persistentes preparados. Consulta docs/CLIENT_DEMO.md para el recorrido local.');
+    console.info('Datos demo persistentes preparados. Consulta docs/guides/client-demo.md para el recorrido local.');
   } finally {
     await prisma.$disconnect();
   }

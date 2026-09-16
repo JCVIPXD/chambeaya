@@ -104,11 +104,50 @@ enum ShiftEventActorRole {
   SYSTEM
 }
 
+enum ReviewAuthorRole {
+  WORKER
+  BUSINESS
+}
+
+enum SpecialtyProficiency {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum WorkerDocumentKind {
+  CV
+  PROFILE_PHOTO
+}
+
+enum ExternalIdentityProvider {
+  GOOGLE
+}
+
+enum TalentInvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CANCELLED
+}
+
+enum LanguageProficiency {
+  BASIC
+  CONVERSATIONAL
+  FLUENT
+  NATIVE
+}
+
 model User {
   id            String              @id @default(cuid())
   email         String              @unique
   passwordHash  String
   salt          String
+  /// Whether the user has chosen a password that can be used in Cumple Now.
+  /// Google-created accounts from before the local-password onboarding remain
+  /// false until their owner creates one after authenticating with Google.
+  localPasswordConfigured Boolean @default(true)
   role          UserRole
   name          String
   identifier    String              @unique
@@ -119,8 +158,14 @@ model User {
   events        ShiftEvent[]
   walletMovements WalletMovement[]
   conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
-  workerProfiles WorkerProfile[] @relation("WorkerProfileUser")
+  companyWorkerContacts CompanyWorkerContact[] @relation("CompanyWorkerContactUser")
+  talentProfile WorkerTalentProfile?
   company       Company?
+  reviewsAuthored AssignmentReview[] @relation("ReviewAuthor")
+  reviewsReceived AssignmentReview[] @relation("ReviewRecipient")
+  documents     WorkerDocument[]
+  externalIdentities ExternalIdentity[]
+  talentInvitationsCreated TalentInvitation[] @relation("TalentInvitationCreatedBy")
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 }
@@ -137,10 +182,11 @@ model Company {
   address       String?
   district      String?
   shifts        Shift[]
-  workers       WorkerProfile[]
+  workerContacts CompanyWorkerContact[]
   conversations Conversation[]
   payments      Payment[]
   subscription  CompanySubscription?
+  talentInvitations TalentInvitation[]
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
 }
@@ -182,6 +228,7 @@ model Shift {
   cancellations    ShiftCancellation[]
   events           ShiftEvent[]
   payments         Payment[]
+  talentInvitations TalentInvitation[]
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
 
@@ -223,12 +270,30 @@ model ShiftAssignment {
   assignedAt        DateTime            @default(now())
   completedAt       DateTime?
   payment           Payment?
+  reviews           AssignmentReview[]
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
 
   @@unique([shiftId, workerId])
   @@index([workerId, status])
   @@index([shiftId, status])
+}
+
+model AssignmentReview {
+  id          String           @id @default(cuid())
+  assignmentId String
+  assignment  ShiftAssignment  @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User             @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   User             @relation("ReviewRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  authorRole  ReviewAuthorRole
+  rating      Int
+  comment     String?
+  createdAt   DateTime         @default(now())
+
+  @@unique([assignmentId, authorId])
+  @@index([recipientId, createdAt])
 }
 
 model ShiftCancellation {
@@ -275,12 +340,12 @@ model CompanySubscription {
   updatedAt   DateTime           @updatedAt
 }
 
-model WorkerProfile {
+model CompanyWorkerContact {
   id            String         @id @default(cuid())
   companyId     String
   company       Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
   workerUserId  String?
-  workerUser    User?          @relation("WorkerProfileUser", fields: [workerUserId], references: [id], onDelete: SetNull)
+  workerUser    User?          @relation("CompanyWorkerContactUser", fields: [workerUserId], references: [id], onDelete: SetNull)
   name          String
   email         String?
   phone         String?
@@ -288,10 +353,6 @@ model WorkerProfile {
   skills        String[]       @default([])
   status        WorkerStatus   @default(AVAILABLE)
   availability  String?
-  cumpleScore   Int            @default(80)
-  matchScore    Int            @default(80)
-  completedJobs Int            @default(0)
-  verified      Boolean        @default(false)
   conversations Conversation[]
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
@@ -299,6 +360,204 @@ model WorkerProfile {
   @@unique([companyId, email])
   @@index([workerUserId, status])
   @@index([companyId, status])
+  @@map("WorkerProfile")
+}
+
+model WorkerTalentProfile {
+  id               String                  @id @default(cuid())
+  userId           String                  @unique
+  user             User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  headline         String?
+  bio              String?
+  district         String?
+  availabilityText String?
+  availabilityDays String[]                @default([])
+  availabilityPeriods String[]             @default([])
+  isAvailable      Boolean                 @default(true)
+  isVisible        Boolean                 @default(true)
+  /// Radio de trabajo declarado en kilómetros desde `district`. Metadato
+  /// informativo del trabajador, no una regla de matching automática.
+  workRadiusKm     Int?
+  /// Distritos adicionales donde el trabajador acepta trabajar, distinto de
+  /// `district` (su distrito principal/de residencia declarado).
+  workDistricts    String[]                @default([])
+  /// Visibilidad granular por sección (Alcance 6 del plan de refuerzo): cada
+  /// bandera oculta la sección correspondiente únicamente en el resultado
+  /// público de `toTalentCard`; los datos permanecen intactos y visibles
+  /// para el propio trabajador en `toOwnProfile`, por lo que "ocultar" nunca
+  /// borra información y siempre es recuperable con un PATCH posterior.
+  isExperienceVisible     Boolean          @default(true)
+  isCertificationsVisible Boolean          @default(true)
+  isLanguagesVisible      Boolean          @default(true)
+  isWorkAreaVisible       Boolean          @default(true)
+  specialties      WorkerTalentSpecialty[]
+  experiences      WorkerExperience[]
+  certifications   WorkerCertification[]
+  languages        WorkerLanguage[]
+  invitations      TalentInvitation[]
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  @@index([isVisible, isAvailable, district])
+}
+
+/// Experiencia laboral declarada por el trabajador. Varias entradas por
+/// perfil; no es texto libre plano.
+model WorkerExperience {
+  id          String              @id @default(cuid())
+  profileId   String
+  profile     WorkerTalentProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  role        String
+  employer    String
+  description String?
+  startDate   DateTime
+  /// `null` significa "hasta hoy" (puesto vigente).
+  endDate     DateTime?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([profileId])
+}
+
+/// Certificación declarada por el trabajador. Es un metadato informativo:
+/// **nunca** se marca ni se muestra como "verificada" en ninguna interfaz ni
+/// respuesta de la API. La verificación de certificaciones es un ítem
+/// distinto del Bloque 4 del plan maestro, fuera del Alcance 6; este modelo
+/// no tiene (ni debe ganar sin una decisión de producto explícita, revisada
+/// por auditoría) ningún campo de estado de verificación.
+model WorkerCertification {
+  id             String              @id @default(cuid())
+  profileId      String
+  profile        WorkerTalentProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  name           String
+  issuer         String?
+  issueDate      DateTime?
+  expirationDate DateTime?
+  credentialId   String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@index([profileId])
+}
+
+/// Idioma declarado por el trabajador, con su nivel autopercibido.
+model WorkerLanguage {
+  id          String              @id @default(cuid())
+  profileId   String
+  profile     WorkerTalentProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  language    String
+  proficiency LanguageProficiency @default(CONVERSATIONAL)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@unique([profileId, language])
+  @@index([profileId])
+}
+
+/// Invitación de contacto que una empresa envía a un perfil del directorio de
+/// talento. Referencia `WorkerTalentProfile.id` (no `userId`) porque ese es
+/// el único identificador que el directorio expone a las empresas
+/// (`talent.service.ts#toTalentCard`); el servidor resuelve el `userId` real
+/// del trabajador internamente al operar sobre la invitación, sin exponerlo
+/// nunca en la respuesta de creación o listado.
+///
+/// Regla de consentimiento (ver docs/reference/api.md): crear una invitación
+/// no abre ninguna conversación por sí sola. Abrir una conversación sigue
+/// exigiendo el camino ya existente (`POST /api/business/conversations`,
+/// que requiere un `CompanyWorkerContact` de esa misma empresa); esta
+/// invitación es un registro de consentimiento independiente y no
+/// desencadena esa creación automáticamente.
+model TalentInvitation {
+  id                    String                 @id @default(cuid())
+  companyId             String
+  company               Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  workerTalentProfileId String
+  workerTalentProfile   WorkerTalentProfile    @relation(fields: [workerTalentProfileId], references: [id], onDelete: Cascade)
+  shiftId               String?
+  shift                 Shift?                 @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  status                TalentInvitationStatus @default(PENDING)
+  message               String?
+  expiresAt             DateTime
+  respondedAt           DateTime?
+  createdById           String
+  createdBy             User                   @relation("TalentInvitationCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@index([companyId, status])
+  @@index([workerTalentProfileId, status])
+  @@index([shiftId])
+}
+
+model Specialty {
+  id             String                  @id @default(cuid())
+  slug           String                  @unique
+  name           String
+  category       String
+  isActive       Boolean                 @default(true)
+  workerProfiles WorkerTalentSpecialty[]
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([category, isActive])
+}
+
+model WorkerTalentSpecialty {
+  profileId  String
+  specialtyId String
+  profile    WorkerTalentProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  specialty  Specialty           @relation(fields: [specialtyId], references: [id], onDelete: Restrict)
+  proficiency SpecialtyProficiency @default(INTERMEDIATE)
+  yearsExperience Int?
+  createdAt  DateTime            @default(now())
+
+  @@id([profileId, specialtyId])
+  @@index([specialtyId, profileId])
+}
+
+model WorkerDocument {
+  id           String             @id @default(cuid())
+  userId       String
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind         WorkerDocumentKind
+  storageKey   String             @unique
+  originalName String
+  mediaType    String
+  sizeBytes    Int
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@unique([userId, kind])
+  @@index([userId, createdAt])
+}
+
+model ExternalIdentity {
+  id        String                   @id @default(cuid())
+  userId    String
+  user      User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider  ExternalIdentityProvider
+  subject   String
+  email     String
+  createdAt DateTime                 @default(now())
+  updatedAt DateTime                 @updatedAt
+
+  @@unique([provider, subject])
+  @@index([userId, provider])
+}
+
+/// Short-lived, server-issued state between validating Google and collecting
+/// the worker's required profile identity. It stores no Google ID token.
+model GoogleProfileSetup {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  subject   String
+  email     String
+  name      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([subject, expiresAt])
+  @@index([expiresAt])
 }
 
 model Conversation {
@@ -306,7 +565,7 @@ model Conversation {
   companyId String
   company   Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
   workerId  String
-  worker    WorkerProfile      @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  worker    CompanyWorkerContact @relation(fields: [workerId], references: [id], onDelete: Cascade)
   workerUserId String?
   workerUser User?             @relation("WorkerUserConversations", fields: [workerUserId], references: [id], onDelete: Cascade)
   shiftId   String?

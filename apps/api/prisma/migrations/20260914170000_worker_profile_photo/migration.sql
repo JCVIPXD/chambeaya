@@ -1,0 +1,1 @@
+ALTER TYPE "WorkerDocumentKind" ADD VALUE 'PROFILE_PHOTO';
