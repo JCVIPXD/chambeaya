@@ -33,7 +33,7 @@ void main() {
 
     await tester.tap(find.text('Perfil'));
     await tester.pumpAndSettle();
-    expect(find.text('Amanda González'), findsOneWidget);
+    expect(find.text('Trabajador'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

@@ -57,7 +57,7 @@ void main() {
     );
 
     await tester.pumpWidget(
-      CumpleNowApp(sessionStore: store, useLocalApiOverride: false),
+      CumpleNowApp(sessionStore: store, demoModeOverride: true),
     );
     await tester.pumpAndSettle();
 

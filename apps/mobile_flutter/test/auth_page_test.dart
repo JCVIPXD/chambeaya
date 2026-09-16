@@ -15,7 +15,7 @@ void main() {
       MaterialApp(
         home: AuthPage(
           role: AppAudience.worker,
-          useLocalApi: true,
+          demoMode: false,
           repository: _FailingAuthRepository(error),
         ),
       ),
@@ -45,7 +45,7 @@ void main() {
 
   testWidgets('registration validates API password and DNI requirements', (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(home: AuthPage(role: AppAudience.worker, useLocalApi: true)),
+      const MaterialApp(home: AuthPage(role: AppAudience.worker, demoMode: false)),
     );
     await tester.tap(find.text('Quiero registrarme'));
     await tester.pump();
@@ -74,7 +74,7 @@ void main() {
     expect(find.text('DNI'), findsOneWidget);
   });
 
-  testWidgets('demo registration enters without waiting for the API', (
+  testWidgets('explicit demo registration enters without waiting for the API', (
     tester,
   ) async {
     var authenticated = false;
@@ -82,7 +82,7 @@ void main() {
       MaterialApp(
         home: AuthPage(
           role: AppAudience.worker,
-          useLocalApi: false,
+          demoMode: true,
           onAuthenticated: (_) async => authenticated = true,
         ),
       ),
@@ -116,6 +116,11 @@ void main() {
     final content = find.byKey(const Key('auth-content'));
     expect(content, findsOneWidget);
     expect(tester.getSize(content).width, lessThanOrEqualTo(600));
+    expect(find.textContaining('Modo demostración'), findsNothing);
+
+    await tester.pumpWidget(
+      const MaterialApp(home: AuthPage(role: AppAudience.worker, demoMode: true)),
+    );
     expect(find.textContaining('Modo demostración'), findsOneWidget);
   });
 }

@@ -11,7 +11,7 @@ void main() {
       );
 
       expect(results, isNotEmpty);
-      expect(results.every((shift) => shift.match >= 80), isTrue);
+      expect(results.every((shift) => (shift.match ?? -1) >= 80), isTrue);
     },
   );
 }
