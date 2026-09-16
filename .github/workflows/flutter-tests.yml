@@ -1,0 +1,35 @@
+name: Flutter quality
+
+on:
+  push:
+    paths:
+      - 'apps/mobile_flutter/**'
+      - '.github/workflows/flutter-tests.yml'
+  pull_request:
+    paths:
+      - 'apps/mobile_flutter/**'
+      - '.github/workflows/flutter-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flutter-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/mobile_flutter
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.44.0'
+          cache: true
+          pub-cache: true
+      - run: flutter --version
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter analyze
+      - run: flutter test
