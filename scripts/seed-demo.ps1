@@ -19,7 +19,7 @@ try {
   if ($LASTEXITCODE -ne 0) {
     throw 'La preparación de datos demo no terminó correctamente.'
   }
-  Write-Host 'Datos demo listos. Consulta docs/CLIENT_DEMO.md para las cuentas y el recorrido.' -ForegroundColor Green
+  Write-Host 'Datos demo listos. Consulta docs/guides/client-demo.md para las cuentas y el recorrido.' -ForegroundColor Green
 }
 finally {
   Pop-Location

@@ -43,7 +43,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-required_vars=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL NEXT_PUBLIC_API_URL)
+required_vars=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL NEXT_PUBLIC_API_URL CORS_ALLOWED_ORIGINS)
 for variable in "${required_vars[@]}"; do
   if ! grep -Eq "^${variable}=[^[:space:]]+" "$ENV_FILE"; then
     echo "Falta una variable válida en $ENV_FILE: $variable" >&2
@@ -60,6 +60,12 @@ fi
 public_api_url="$(sed -n 's/^NEXT_PUBLIC_API_URL=//p' "$ENV_FILE" | head -n 1)"
 if [[ "$public_api_url" == *"tudominio.com"* || "$public_api_url" == *"localhost"* || "$public_api_url" == *"127.0.0.1"* ]]; then
   echo "NEXT_PUBLIC_API_URL debe apuntar a un dominio o IP público real." >&2
+  exit 1
+fi
+
+cors_allowed_origins="$(sed -n 's/^CORS_ALLOWED_ORIGINS=//p' "$ENV_FILE" | head -n 1)"
+if [[ "$cors_allowed_origins" == *"tudominio.com"* ]]; then
+  echo "CORS_ALLOWED_ORIGINS debe apuntar a los dominios reales del panel (no al valor de ejemplo)." >&2
   exit 1
 fi
 

@@ -23,8 +23,22 @@ services:
       NODE_ENV: production
       API_PORT: ${API_PORT:-4000}
       DATABASE_URL: ${DATABASE_URL}
+      DOCUMENT_STORAGE_ROOT: ${DOCUMENT_STORAGE_ROOT:-/private-documents}
+      GOOGLE_OAUTH_WEB_CLIENT_ID: ${GOOGLE_OAUTH_WEB_CLIENT_ID:-}
+      GOOGLE_OAUTH_WEB_CLIENT_SECRET: ${GOOGLE_OAUTH_WEB_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
+      # Sin reenviar estas cuatro variables al contenedor, `resolveCorsOptions()`
+      # bloquea todos los orígenes en producción y el límite de intentos de
+      # /api/auth se comparte entre todo el tráfico detrás del proxy inverso
+      # (ver docs/guides/deployment.md).
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      API_TRUST_PROXY: ${API_TRUST_PROXY:-false}
+      AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-20}
     ports:
       - "${API_HOST_PORT:-4000}:4000"
+    volumes:
+      - cumplenow-production-private-documents:/private-documents
     depends_on:
       db:
         condition: service_healthy
@@ -59,3 +73,4 @@ services:
 
 volumes:
   cumplenow-production-db:
+  cumplenow-production-private-documents:

@@ -9,6 +9,8 @@ build/
 **/.next/
 dist/
 coverage/
+playwright-report/
+test-results/
 *.log
 *.tsbuildinfo
 *.zip
@@ -19,6 +21,7 @@ coverage/
 .credentials.local.md
 .tools/
 postgres-data/
+private-documents/
 apps/mobile_flutter/.metadata
 apps/mobile_flutter/android/.gradle/
 apps/mobile_flutter/android/local.properties
