@@ -33,4 +33,25 @@ describe('LocalAuthService', () => {
     service.logout(session.token);
     expect(() => service.restore(session.token)).toThrow('INVALID_SESSION');
   });
+
+  it('identifies a duplicate DNI independently from a duplicate email', () => {
+    const service = new LocalAuthService();
+    service.register({
+      role: 'WORKER',
+      name: 'Ana Torres',
+      email: 'ana@example.com',
+      password: 'ClaveSegura1',
+      dniOrRuc: '12345678',
+    });
+
+    expect(() =>
+      service.register({
+        role: 'WORKER',
+        name: 'Beatriz Ramos',
+        email: 'beatriz@example.com',
+        password: 'ClaveSegura1',
+        dniOrRuc: '12345678',
+      }),
+    ).toThrow('DUPLICATE_IDENTIFIER');
+  });
 });

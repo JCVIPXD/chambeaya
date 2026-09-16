@@ -117,7 +117,7 @@ class InMemoryDemoDatabase {
     upsert: async (input: UpsertInput) => this.upsert(this.subscriptions, `company:${input.where.companyId}`, input, `subscription-${input.where.companyId}`, this.validateSubscription),
   };
 
-  readonly workerProfile = {
+  readonly companyWorkerContact = {
     upsert: async (input: UpsertInput) => {
       const compound = input.where.companyId_email as { companyId: string; email: string };
       return this.upsert(this.profiles, `profile:${compound.companyId}:${compound.email}`, input, `profile-${compound.companyId}`, this.validateProfile);

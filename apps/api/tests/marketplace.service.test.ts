@@ -195,7 +195,7 @@ describe('DemoMarketplaceService', () => {
         findFirst: vi.fn(async ({ where }: { where: { id: string; role: string } }) =>
           where.id === 'worker-a' && where.role === 'WORKER' ? { email: 'a@example.com' } : null),
       },
-      workerProfile: {
+      companyWorkerContact: {
         updateMany: vi.fn(async (args: unknown) => { updates.push(args); return { count: 1 }; }),
       },
     };
@@ -212,7 +212,7 @@ describe('DemoMarketplaceService', () => {
         findFirst: vi.fn(async ({ where }: { where: { id: string; role: string } }) =>
           where.id === 'worker-a' ? { email: 'a@example.com' } : { email: 'b@example.com' }),
       },
-      workerProfile: { updateMany },
+      companyWorkerContact: { updateMany },
     };
     const service = new DatabaseMarketplaceService(prisma as never);
 

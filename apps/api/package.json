@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/integration/**",
+    "test:integration": "vitest run tests/integration",
     "demo:seed": "tsx prisma/seed.ts",
     "demo:smoke": "tsx scripts/demo-smoke.ts"
   },
