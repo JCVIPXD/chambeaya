@@ -5,7 +5,7 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 
-import { PrismaClient, type User } from "@prisma/client";
+import { Prisma, PrismaClient, type User } from "@prisma/client";
 
 export type AccountRole = "WORKER" | "BUSINESS" | "ADMIN";
 
@@ -17,6 +17,16 @@ export interface RegisterInput {
   dniOrRuc: string;
 }
 
+export interface GoogleIdentityInput {
+  subject: string;
+  email: string;
+  name: string;
+}
+
+export interface GoogleProfileSetup {
+  profileSetupToken: string;
+}
+
 export interface AuthSession {
   token: string;
   userId: string;
@@ -24,6 +34,7 @@ export interface AuthSession {
   name: string;
   email: string;
   identifier: string;
+  requiresPasswordSetup: boolean;
 }
 
 export interface AuthService {
@@ -31,12 +42,25 @@ export interface AuthService {
   login(email: string, password: string): Promise<AuthSession> | AuthSession;
   restore(token: string): Promise<AuthSession> | AuthSession;
   logout(token: string): Promise<void> | void;
+  startGoogleLogin(
+    input: GoogleIdentityInput,
+  ): Promise<AuthSession | GoogleProfileSetup> | AuthSession | GoogleProfileSetup;
+  completeGoogleProfile(
+    profileSetupToken: string,
+    dni: string,
+    password: string,
+  ): Promise<AuthSession> | AuthSession;
+  setInitialGooglePassword(
+    token: string,
+    password: string,
+  ): Promise<AuthSession> | AuthSession;
 }
 
 interface Account extends Omit<RegisterInput, "password"> {
   id: string;
   salt: string;
   passwordHash: string;
+  localPasswordConfigured: boolean;
 }
 
 export class AuthError extends Error {
@@ -44,14 +68,20 @@ export class AuthError extends Error {
     public readonly code:
       | "INVALID_CREDENTIALS"
       | "DUPLICATE_ACCOUNT"
+      | "DUPLICATE_IDENTIFIER"
       | "INVALID_REGISTRATION"
-      | "INVALID_SESSION",
+      | "INVALID_SESSION"
+      | "GOOGLE_EMAIL_ALREADY_REGISTERED"
+      | "GOOGLE_PROFILE_SETUP_EXPIRED"
+      | "PASSWORD_SETUP_NOT_AVAILABLE"
+      | "GOOGLE_SIGN_IN_UNAVAILABLE",
   ) {
     super(code);
   }
 }
 
 const sessionDurationMs = 30 * 24 * 60 * 60 * 1000;
+const googleProfileSetupDurationMs = 10 * 60 * 1000;
 
 function normalizeRegistration(input: RegisterInput) {
   const email = input.email.trim().toLowerCase();
@@ -59,9 +89,7 @@ function normalizeRegistration(input: RegisterInput) {
   if (
     !input.name.trim() ||
     !/^\S+@\S+\.\S+$/.test(email) ||
-    input.password.length < 8 ||
-    !/\d/.test(input.password) ||
-    !/[A-Z]/.test(input.password)
+    !isValidPassword(input.password)
   ) {
     throw new AuthError("INVALID_REGISTRATION");
   }
@@ -73,6 +101,14 @@ function normalizeRegistration(input: RegisterInput) {
     throw new AuthError("INVALID_REGISTRATION");
   }
   return { email, identifier, name: input.name.trim() };
+}
+
+function isValidPassword(password: string) {
+  return password.length >= 8 && /\d/.test(password) && /[A-Z]/.test(password);
+}
+
+function requireValidPassword(password: string) {
+  if (!isValidPassword(password)) throw new AuthError("INVALID_REGISTRATION");
 }
 
 export function hashPassword(password: string, salt: string) {
@@ -98,7 +134,7 @@ function hashToken(token: string) {
 
 function publicSession(
   token: string,
-  account: Pick<Account, "id" | "role" | "name" | "email" | "dniOrRuc">,
+  account: Pick<Account, "id" | "role" | "name" | "email" | "dniOrRuc" | "localPasswordConfigured">,
 ): AuthSession {
   return {
     token,
@@ -107,6 +143,7 @@ function publicSession(
     name: account.name,
     email: account.email,
     identifier: account.dniOrRuc,
+    requiresPasswordSetup: !account.localPasswordConfigured,
   };
 }
 
@@ -118,6 +155,13 @@ export class LocalAuthService implements AuthService {
     const normalized = normalizeRegistration(input);
     if (this.accounts.has(normalized.email))
       throw new AuthError("DUPLICATE_ACCOUNT");
+    if (
+      [...this.accounts.values()].some(
+        (account) => account.dniOrRuc === normalized.identifier,
+      )
+    ) {
+      throw new AuthError("DUPLICATE_IDENTIFIER");
+    }
 
     const salt = randomBytes(16).toString("hex");
     const account: Account = {
@@ -128,6 +172,7 @@ export class LocalAuthService implements AuthService {
       dniOrRuc: normalized.identifier,
       salt,
       passwordHash: hashPassword(input.password, salt),
+      localPasswordConfigured: true,
     };
     this.accounts.set(account.email, account);
     return this.sessionFor(account);
@@ -149,6 +194,18 @@ export class LocalAuthService implements AuthService {
 
   logout(token: string): void {
     this.sessions.delete(hashToken(token));
+  }
+
+  startGoogleLogin(_input: GoogleIdentityInput): GoogleProfileSetup {
+    throw new AuthError('GOOGLE_SIGN_IN_UNAVAILABLE');
+  }
+
+  completeGoogleProfile(_profileSetupToken: string, _dni: string, _password: string): AuthSession {
+    throw new AuthError('GOOGLE_SIGN_IN_UNAVAILABLE');
+  }
+
+  setInitialGooglePassword(_token: string, _password: string): AuthSession {
+    throw new AuthError('GOOGLE_SIGN_IN_UNAVAILABLE');
   }
 
   private sessionFor(account: Account): AuthSession {
@@ -178,12 +235,16 @@ export class DatabaseAuthService implements AuthService {
       return this.sessionFor(account);
     } catch (error) {
       if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
       ) {
-        throw new AuthError("DUPLICATE_ACCOUNT");
+        const target = error.meta?.target;
+        const identifierIsDuplicated = Array.isArray(target)
+          ? target.includes("identifier")
+          : typeof target === "string" && target.includes("identifier");
+        throw new AuthError(
+          identifierIsDuplicated ? "DUPLICATE_IDENTIFIER" : "DUPLICATE_ACCOUNT",
+        );
       }
       throw error;
     }
@@ -193,7 +254,11 @@ export class DatabaseAuthService implements AuthService {
     const account = await this.prisma.user.findUnique({
       where: { email: emailInput.trim().toLowerCase() },
     });
-    if (!account || !passwordMatches(password, this.toAccount(account))) {
+    if (
+      !account ||
+      !account.localPasswordConfigured ||
+      !passwordMatches(password, this.toAccount(account))
+    ) {
       throw new AuthError("INVALID_CREDENTIALS");
     }
     return this.sessionFor(account);
@@ -220,6 +285,122 @@ export class DatabaseAuthService implements AuthService {
     });
   }
 
+  async startGoogleLogin(
+    input: GoogleIdentityInput,
+  ): Promise<AuthSession | GoogleProfileSetup> {
+    const existingIdentity = await this.prisma.externalIdentity.findUnique({
+      where: { provider_subject: { provider: 'GOOGLE', subject: input.subject } },
+      include: { user: true },
+    });
+    if (existingIdentity) return this.sessionFor(existingIdentity.user);
+    const existingEmail = await this.prisma.user.findUnique({
+      where: { email: input.email.trim().toLowerCase() },
+      select: { id: true },
+    });
+    if (existingEmail) throw new AuthError('GOOGLE_EMAIL_ALREADY_REGISTERED');
+    if (!input.subject || !input.name.trim()) {
+      throw new AuthError('INVALID_REGISTRATION');
+    }
+    await this.prisma.googleProfileSetup.deleteMany({
+      where: { expiresAt: { lte: new Date() } },
+    });
+    const profileSetupToken = createOpaqueToken();
+    await this.prisma.googleProfileSetup.create({
+      data: {
+        tokenHash: hashToken(profileSetupToken),
+        subject: input.subject,
+        email: input.email.trim().toLowerCase(),
+        name: input.name.trim(),
+        expiresAt: new Date(Date.now() + googleProfileSetupDurationMs),
+      },
+    });
+    return { profileSetupToken };
+  }
+
+  async completeGoogleProfile(
+    profileSetupToken: string,
+    dni: string,
+    password: string,
+  ): Promise<AuthSession> {
+    const identifier = dni.trim();
+    if (!/^\d{8}$/.test(identifier) || !profileSetupToken) {
+      throw new AuthError('INVALID_REGISTRATION');
+    }
+    requireValidPassword(password);
+    const setup = await this.prisma.googleProfileSetup.findUnique({
+      where: { tokenHash: hashToken(profileSetupToken) },
+    });
+    if (!setup || setup.expiresAt <= new Date()) {
+      if (setup) {
+        await this.prisma.googleProfileSetup.delete({ where: { id: setup.id } });
+      }
+      throw new AuthError('GOOGLE_PROFILE_SETUP_EXPIRED');
+    }
+    const existingIdentity = await this.prisma.externalIdentity.findUnique({
+      where: { provider_subject: { provider: 'GOOGLE', subject: setup.subject } },
+      include: { user: true },
+    });
+    if (existingIdentity) return this.sessionFor(existingIdentity.user);
+    const existingEmail = await this.prisma.user.findUnique({
+      where: { email: setup.email },
+      select: { id: true },
+    });
+    if (existingEmail) throw new AuthError('GOOGLE_EMAIL_ALREADY_REGISTERED');
+    const salt = randomBytes(16).toString('hex');
+    try {
+      const account = await this.prisma.user.create({
+        data: {
+          email: setup.email,
+          passwordHash: hashPassword(password, salt),
+          salt,
+          localPasswordConfigured: true,
+          role: 'WORKER',
+          name: setup.name,
+          identifier,
+          externalIdentities: {
+            create: { provider: 'GOOGLE', subject: setup.subject, email: setup.email },
+          },
+        },
+      });
+      await this.prisma.googleProfileSetup.delete({ where: { id: setup.id } });
+      return this.sessionFor(account);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new AuthError('DUPLICATE_IDENTIFIER');
+      }
+      throw error;
+    }
+  }
+
+  async setInitialGooglePassword(token: string, password: string): Promise<AuthSession> {
+    requireValidPassword(password);
+    if (!token) throw new AuthError('INVALID_SESSION');
+    const session = await this.prisma.authSession.findUnique({
+      where: { tokenHash: hashToken(token) },
+      include: { user: { include: { externalIdentities: true } } },
+    });
+    if (!session || session.expiresAt <= new Date()) {
+      if (session) await this.prisma.authSession.delete({ where: { id: session.id } });
+      throw new AuthError('INVALID_SESSION');
+    }
+    const isGoogleAccount = session.user.externalIdentities.some(
+      (identity) => identity.provider === 'GOOGLE',
+    );
+    if (!isGoogleAccount || session.user.localPasswordConfigured) {
+      throw new AuthError('PASSWORD_SETUP_NOT_AVAILABLE');
+    }
+    const salt = randomBytes(16).toString('hex');
+    const account = await this.prisma.user.update({
+      where: { id: session.userId },
+      data: {
+        salt,
+        passwordHash: hashPassword(password, salt),
+        localPasswordConfigured: true,
+      },
+    });
+    return publicSession(token, this.toAccount(account));
+  }
+
   private async sessionFor(account: User): Promise<AuthSession> {
     const token = createOpaqueToken();
     await this.prisma.authSession.create({
@@ -237,6 +418,7 @@ export class DatabaseAuthService implements AuthService {
       id: account.id,
       email: account.email,
       passwordHash: account.passwordHash,
+      localPasswordConfigured: account.localPasswordConfigured,
       salt: account.salt,
       role: account.role as AccountRole,
       name: account.name,
