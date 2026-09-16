@@ -4,19 +4,22 @@ import '../../theme/app_theme.dart';
 import '../onboarding/onboarding_page.dart';
 import 'auth_repository.dart';
 import 'auth_session.dart';
+import 'google_sign_in_button.dart';
 
 class AuthPage extends StatefulWidget {
   const AuthPage({
     super.key,
     required this.role,
-    this.useLocalApi = false,
+    this.demoMode = false,
     this.repository,
     this.onAuthenticated,
+    this.initialGooglePasswordSetupSession,
   });
   final AppAudience role;
-  final bool useLocalApi;
+  final bool demoMode;
   final AuthRepository? repository;
   final Future<void> Function(AuthSession session)? onAuthenticated;
+  final AuthSession? initialGooglePasswordSetupSession;
 
   @override
   State<AuthPage> createState() => _AuthPageState();
@@ -33,8 +36,27 @@ class _AuthPageState extends State<AuthPage> {
   var _isRegistering = false;
   var _isLoading = false;
   String? _error;
+  String? _pendingGoogleProfileSetupToken;
+  AuthSession? _pendingGooglePasswordSession;
 
   bool get _canRegister => widget.role == AppAudience.worker;
+  static const _googleClientId = String.fromEnvironment(
+    'GOOGLE_OAUTH_WEB_CLIENT_ID',
+  );
+  bool get _googleEnabled =>
+      !widget.demoMode && _canRegister && _googleClientId.isNotEmpty;
+  bool get _isCompletingGoogleProfile =>
+      _pendingGoogleProfileSetupToken != null;
+  bool get _isCompletingGooglePassword =>
+      _pendingGooglePasswordSession != null;
+  bool get _isInGoogleOnboarding =>
+      _isCompletingGoogleProfile || _isCompletingGooglePassword;
+
+  @override
+  void initState() {
+    super.initState();
+    _pendingGooglePasswordSession = widget.initialGooglePasswordSetupSession;
+  }
 
   @override
   void dispose() {
@@ -46,8 +68,12 @@ class _AuthPageState extends State<AuthPage> {
   }
 
   Future<void> _submit() async {
+    if (_isInGoogleOnboarding) {
+      await _completeGoogleProfile();
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
-    if (!widget.useLocalApi) {
+    if (widget.demoMode) {
       await widget.onAuthenticated?.call(
         AuthSession(
           token: 'demo-${widget.role.name}',
@@ -92,12 +118,114 @@ class _AuthPageState extends State<AuthPage> {
     }
   }
 
+  Future<void> _signInWithGoogle(String idToken) async {
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      final repository = widget.repository ?? AuthRepository();
+      final result = await repository.startGoogleLogin(idToken: idToken);
+      if (!mounted) return;
+      if (result.session != null) {
+        if (result.session!.requiresPasswordSetup) {
+          setState(() {
+            _pendingGooglePasswordSession = result.session;
+            _password.clear();
+            _error = null;
+          });
+        } else {
+          await widget.onAuthenticated?.call(result.session!);
+        }
+      } else if (result.profileSetupToken != null) {
+        setState(() {
+          _pendingGoogleProfileSetupToken = result.profileSetupToken;
+          _error = null;
+        });
+      } else {
+        setState(() => _error = 'No se pudo preparar el perfil con Google.');
+      }
+    } on AuthFailure catch (failure) {
+      if (mounted) setState(() => _error = _messageForFailure(failure));
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'No se pudo validar la cuenta de Google.');
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _completeGoogleProfile() async {
+    final dni = _identifier.text.trim();
+    if (_isCompletingGoogleProfile && !RegExp(r'^\d{8}$').hasMatch(dni)) {
+      setState(
+        () => _error = 'Ingresa un DNI de 8 dígitos para continuar con Google.',
+      );
+      return;
+    }
+    if (!_isValidPassword(_password.text)) {
+      setState(
+        () => _error =
+            'Crea una contraseña de Cumple Now con 8 caracteres, una mayúscula y un número.',
+      );
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      final repository = widget.repository ?? AuthRepository();
+      final session = _isCompletingGoogleProfile
+          ? await repository.completeGoogleProfile(
+              profileSetupToken: _pendingGoogleProfileSetupToken!,
+              dni: dni,
+              password: _password.text,
+            )
+          : await repository.setInitialGooglePassword(
+              token: _pendingGooglePasswordSession!.token,
+              password: _password.text,
+            );
+      if (mounted) {
+        await widget.onAuthenticated?.call(
+          session.copyWith(openProfileAfterSignIn: true),
+        );
+      }
+    } on AuthFailure catch (failure) {
+      if (mounted) setState(() => _error = _messageForFailure(failure));
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'No se pudo validar la cuenta de Google.');
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  bool _isValidPassword(String password) =>
+      password.length >= 8 &&
+      RegExp(r'[A-Z]').hasMatch(password) &&
+      RegExp(r'\d').hasMatch(password);
+
   String _messageForFailure(AuthFailure failure) {
     if (_isRegistering && failure.code == 'DUPLICATE_ACCOUNT') {
       return 'Ya existe una cuenta con ese correo. Inicia sesión o usa otro correo.';
     }
     if (_isRegistering && failure.code == 'INVALID_REGISTRATION') {
       return 'Revisa nombre, correo, contraseña y DNI: deben cumplir los requisitos indicados.';
+    }
+    if (failure.code == 'DUPLICATE_IDENTIFIER') {
+      return 'Ese DNI ya está asociado a otra cuenta. Usa un DNI distinto o inicia sesión.';
+    }
+    if (failure.code == 'GOOGLE_EMAIL_ALREADY_REGISTERED') {
+      return 'Ese correo ya usa una cuenta con contraseña. Inicia sesión con ella.';
+    }
+    if (failure.code == 'GOOGLE_SIGN_IN_UNAVAILABLE') {
+      return 'Google aún no está habilitado en este entorno.';
+    }
+    if (failure.code == 'GOOGLE_PROFILE_SETUP_EXPIRED') {
+      return 'La verificación de Google venció. Elige tu cuenta nuevamente.';
     }
     switch (failure.kind) {
       case AuthFailureKind.invalidCredentials:
@@ -327,7 +455,9 @@ class _AuthPageState extends State<AuthPage> {
             ),
             SizedBox(height: sectionGap),
             Text(
-              _isRegistering
+              _isInGoogleOnboarding
+                  ? 'Protege tu acceso'
+                  : _isRegistering
                   ? 'Comienza con lo esencial'
                   : 'Ingresa para continuar',
               style: Theme.of(
@@ -337,13 +467,17 @@ class _AuthPageState extends State<AuthPage> {
             if (!compact) ...[
               const SizedBox(height: 4),
               Text(
-                _isRegistering
+                _isCompletingGoogleProfile
+                    ? 'Tu cuenta de Google ya fue verificada. Confirma tu DNI y crea una contraseña exclusiva para Cumple Now.'
+                    : _isCompletingGooglePassword
+                    ? 'Tu cuenta de Google fue verificada. Crea una contraseña exclusiva para ingresar también con tu correo.'
+                    : _isRegistering
                     ? 'Solo te pediremos lo esencial para comenzar.'
                     : 'Tus oportunidades y postulaciones te esperan.',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
             ],
-            if (!widget.useLocalApi && !(compact && _isRegistering)) ...[
+            if (widget.demoMode && !(compact && _isRegistering)) ...[
               const SizedBox(height: 12),
               Container(
                 padding: const EdgeInsets.symmetric(
@@ -382,58 +516,16 @@ class _AuthPageState extends State<AuthPage> {
               key: _formKey,
               child: Column(
                 children: [
-                  if (_isRegistering && _canRegister)
-                    TextFormField(
-                      controller: _name,
-                      decoration: InputDecoration(
-                        labelText: 'Nombre completo',
-                        contentPadding: fieldContentPadding,
-                      ),
-                      validator: (value) =>
-                          value == null || value.trim().isEmpty
-                          ? 'Ingresa un nombre'
-                          : null,
-                    ),
-                  if (_isRegistering && _canRegister)
-                    SizedBox(height: fieldGap),
-                  TextFormField(
-                    controller: _email,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: InputDecoration(
-                      labelText: 'Correo electrónico',
-                      contentPadding: fieldContentPadding,
-                    ),
-                    validator: (value) =>
-                        value == null ||
-                            !RegExp(r'^\S+@\S+\.\S+$').hasMatch(value.trim())
-                        ? 'Ingresa un correo válido'
-                        : null,
-                  ),
-                  SizedBox(height: fieldGap),
-                  TextFormField(
-                    controller: _password,
-                    obscureText: true,
-                    decoration: InputDecoration(
-                      labelText: 'Contraseña',
-                      contentPadding: fieldContentPadding,
-                    ),
-                    validator: (value) {
-                      if (value == null || value.length < 8)
-                        return 'Mínimo 8 caracteres';
-                      if (!RegExp(r'[A-Z]').hasMatch(value))
-                        return 'Incluye al menos una mayúscula';
-                      if (!RegExp(r'\d').hasMatch(value))
-                        return 'Incluye al menos un número';
-                      return null;
-                    },
-                  ),
-                  if (_isRegistering && _canRegister) ...[
-                    SizedBox(height: fieldGap),
+                  if (_isCompletingGoogleProfile)
                     TextFormField(
                       controller: _identifier,
                       keyboardType: TextInputType.number,
+                      maxLength: 8,
                       decoration: InputDecoration(
                         labelText: 'DNI',
+                        helperText:
+                            'Lo usamos para crear tu perfil de trabajador.',
+                        counterText: '',
                         contentPadding: fieldContentPadding,
                       ),
                       validator: (value) =>
@@ -442,6 +534,100 @@ class _AuthPageState extends State<AuthPage> {
                           ? 'El DNI debe tener exactamente 8 dígitos'
                           : null,
                     ),
+                  if (_isInGoogleOnboarding) ...[
+                    SizedBox(height: fieldGap),
+                    TextFormField(
+                      controller: _password,
+                      obscureText: true,
+                      autofillHints: const [AutofillHints.newPassword],
+                      decoration: InputDecoration(
+                        labelText: 'Contraseña de Cumple Now',
+                        helperText:
+                            'Nueva y exclusiva: no uses tu contraseña de Google.',
+                        contentPadding: fieldContentPadding,
+                      ),
+                      validator: (value) {
+                        if (value == null || value.length < 8) {
+                          return 'Mínimo 8 caracteres';
+                        }
+                        if (!RegExp(r'[A-Z]').hasMatch(value)) {
+                          return 'Incluye al menos una mayúscula';
+                        }
+                        if (!RegExp(r'\d').hasMatch(value)) {
+                          return 'Incluye al menos un número';
+                        }
+                        return null;
+                      },
+                    ),
+                  ]
+                  else ...[
+                    if (_isRegistering && _canRegister)
+                      TextFormField(
+                        controller: _name,
+                        decoration: InputDecoration(
+                          labelText: 'Nombre completo',
+                          contentPadding: fieldContentPadding,
+                        ),
+                        validator: (value) =>
+                            value == null || value.trim().isEmpty
+                            ? 'Ingresa un nombre'
+                            : null,
+                      ),
+                    if (_isRegistering && _canRegister)
+                      SizedBox(height: fieldGap),
+                    TextFormField(
+                      controller: _email,
+                      keyboardType: TextInputType.emailAddress,
+                      autofillHints: const [AutofillHints.email],
+                      decoration: InputDecoration(
+                        labelText: 'Correo electrónico',
+                        contentPadding: fieldContentPadding,
+                      ),
+                      validator: (value) =>
+                          value == null ||
+                              !RegExp(r'^\S+@\S+\.\S+$').hasMatch(value.trim())
+                          ? 'Ingresa un correo válido'
+                          : null,
+                    ),
+                    SizedBox(height: fieldGap),
+                    TextFormField(
+                      controller: _password,
+                      obscureText: true,
+                      autofillHints: [
+                        _isRegistering
+                            ? AutofillHints.newPassword
+                            : AutofillHints.password,
+                      ],
+                      decoration: InputDecoration(
+                        labelText: 'Contraseña',
+                        contentPadding: fieldContentPadding,
+                      ),
+                      validator: (value) {
+                        if (value == null || value.length < 8)
+                          return 'Mínimo 8 caracteres';
+                        if (!RegExp(r'[A-Z]').hasMatch(value))
+                          return 'Incluye al menos una mayúscula';
+                        if (!RegExp(r'\d').hasMatch(value))
+                          return 'Incluye al menos un número';
+                        return null;
+                      },
+                    ),
+                    if (_isRegistering && _canRegister) ...[
+                      SizedBox(height: fieldGap),
+                      TextFormField(
+                        controller: _identifier,
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          labelText: 'DNI',
+                          contentPadding: fieldContentPadding,
+                        ),
+                        validator: (value) =>
+                            value == null ||
+                                !RegExp(r'^\d{8}$').hasMatch(value.trim())
+                            ? 'El DNI debe tener exactamente 8 dígitos'
+                            : null,
+                      ),
+                    ],
                   ],
                 ],
               ),
@@ -459,11 +645,35 @@ class _AuthPageState extends State<AuthPage> {
                 child: Text(
                   _isLoading
                       ? 'Procesando…'
+                      : _isInGoogleOnboarding
+                      ? 'Guardar contraseña y continuar'
                       : (_isRegistering ? 'Crear cuenta' : 'Ingresar'),
                 ),
               ),
             ),
-            if (_canRegister)
+            if (_isInGoogleOnboarding) ...[
+              const SizedBox(height: 6),
+              const Text(
+                'Luego podrás cargar tu CV y agregar especialidades, experiencia y disponibilidad.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppColors.muted, fontSize: 12),
+              ),
+              Center(
+                child: TextButton(
+                  onPressed: _isLoading
+                      ? null
+                      : () => setState(() {
+                          _pendingGoogleProfileSetupToken = null;
+                          _pendingGooglePasswordSession = null;
+                          _identifier.clear();
+                          _password.clear();
+                          _error = null;
+                        }),
+                  child: const Text('Usar otra cuenta'),
+                ),
+              ),
+            ],
+            if (_canRegister && !_isInGoogleOnboarding)
               Center(
                 child: TextButton(
                   onPressed: () =>
@@ -475,7 +685,37 @@ class _AuthPageState extends State<AuthPage> {
                   ),
                 ),
               ),
-            if (_canRegister && !_isRegistering)
+            if (_googleEnabled &&
+                !_isRegistering &&
+                !_isInGoogleOnboarding) ...[
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 14),
+                child: Row(
+                  children: [
+                    Expanded(child: Divider()),
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10),
+                      child: Text(
+                        'o continúa con',
+                        style: TextStyle(color: AppColors.muted, fontSize: 12),
+                      ),
+                    ),
+                    Expanded(child: Divider()),
+                  ],
+                ),
+              ),
+              Center(
+                child: GoogleSignInButton(
+                  clientId: _googleClientId,
+                  enabled: !_isLoading,
+                  onIdToken: _signInWithGoogle,
+                  onFailure: (message) {
+                    if (mounted) setState(() => _error = message);
+                  },
+                ),
+              ),
+            ],
+            if (_canRegister && !_isRegistering && !_isInGoogleOnboarding)
               const Text(
                 'Las cuentas empresariales se habilitan directamente con Cumple Now.',
                 textAlign: TextAlign.center,

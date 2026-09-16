@@ -230,31 +230,33 @@ class _Hero extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: 18),
-        Row(
-          children: [
-            Expanded(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: LinearProgressIndicator(
-                  value: shift.match / 100,
-                  minHeight: 7,
-                  backgroundColor: Colors.white.withValues(alpha: .16),
-                  color: AppColors.teal,
+        if (shift.match != null) ...[
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LinearProgressIndicator(
+                    value: shift.match! / 100,
+                    minHeight: 7,
+                    backgroundColor: Colors.white.withValues(alpha: .16),
+                    color: AppColors.teal,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 12),
-            Text(
-              '${shift.match}% compatible contigo',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 10,
-                fontWeight: FontWeight.w800,
+              const SizedBox(width: 12),
+              Text(
+                '${shift.match}% compatible contigo',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ],
     ),
   );

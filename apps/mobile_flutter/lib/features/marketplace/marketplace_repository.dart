@@ -67,13 +67,13 @@ abstract interface class WorkerMarketplaceRepository {
 }
 
 WorkerMarketplaceRepository createWorkerMarketplaceRepository({
-  required bool useLocalApi,
+  required bool demoMode,
 }) {
-  // The HTTP client is constructed by main.dart only when the user explicitly
-  // opts in with USE_LOCAL_API=true. Demo is the safe default for every run.
-  if (useLocalApi) {
+  // HTTP repositories require an authenticated token and are constructed by
+  // main.dart. This factory intentionally exposes only the explicit demo path.
+  if (!demoMode) {
     throw UnsupportedError(
-      'Use HttpWorkerMarketplaceRepository in local API mode.',
+      'Use HttpWorkerMarketplaceRepository for the authenticated API flow.',
     );
   }
   return DemoWorkerMarketplaceRepository();

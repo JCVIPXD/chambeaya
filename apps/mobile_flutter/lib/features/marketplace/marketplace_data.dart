@@ -60,7 +60,7 @@ class Shift {
     required this.company,
     required this.schedule,
     required this.workerPayCents,
-    required this.match,
+    this.match,
     required this.urgent,
     required this.industry,
     required this.location,
@@ -83,7 +83,9 @@ class Shift {
   final String company;
   final String schedule;
   final int workerPayCents;
-  final int match;
+  /// Only demo records currently have this value. Matching v1 will populate it
+  /// from persisted profile and shift data.
+  final int? match;
   final bool urgent;
   final ShiftIndustry industry;
   final String location;
@@ -207,6 +209,7 @@ const availableShifts = [
 
 List<Shift> filterDemoShifts(List<Shift> shifts, ShiftSearchFilter filter) {
   final query = filter.query.trim().toLowerCase();
+  final matchingAvailable = shifts.any((shift) => shift.match != null);
   final results = shifts.where((shift) {
     final industrySearchLabel = switch (shift.industry) {
       ShiftIndustry.hospitality => 'hotel hospitalidad',
@@ -223,7 +226,7 @@ List<Shift> filterDemoShifts(List<Shift> shifts, ShiftSearchFilter filter) {
         (filter.industry == null || shift.industry == filter.industry) &&
         shift.workerPayCents >= filter.minimumPayCents &&
         (!filter.urgentOnly || shift.urgent) &&
-        (!filter.recommendedOnly || shift.match >= 80) &&
+        (!filter.recommendedOnly || !matchingAvailable || (shift.match ?? -1) >= 80) &&
         (filter.location == null || shift.location == filter.location) &&
         (filter.modality == null || shift.modality == filter.modality) &&
         (filter.dateScope == ShiftDateScope.any ||
@@ -238,7 +241,7 @@ List<Shift> filterDemoShifts(List<Shift> shifts, ShiftSearchFilter filter) {
       (left, right) =>
           (right.urgent ? 1 : 0).compareTo(left.urgent ? 1 : 0) != 0
           ? (right.urgent ? 1 : 0).compareTo(left.urgent ? 1 : 0)
-          : right.match.compareTo(left.match),
+          : (right.match ?? -1).compareTo(left.match ?? -1),
     );
   }
   return results;

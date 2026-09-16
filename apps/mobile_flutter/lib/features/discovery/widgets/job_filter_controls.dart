@@ -22,6 +22,7 @@ class JobFilterControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final filter = controller.state.filter;
+    final matchingAvailable = controller.shifts.any((shift) => shift.match != null);
     final locations =
         controller.shifts.map((shift) => shift.location).toSet().toList()
           ..sort();
@@ -30,11 +31,12 @@ class JobFilterControls extends StatelessWidget {
       runSpacing: 8,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        FilterChip(
-          label: const Text('Recomendados'),
-          selected: filter.recommendedOnly,
-          onSelected: controller.setRecommendedOnly,
-        ),
+        if (matchingAvailable)
+          FilterChip(
+            label: const Text('Recomendados'),
+            selected: filter.recommendedOnly,
+            onSelected: controller.setRecommendedOnly,
+          ),
         FilterChip(
           label: const Text('Urgentes'),
           selected: filter.urgentOnly,
@@ -44,7 +46,7 @@ class JobFilterControls extends StatelessWidget {
           _FilterDropdown<ShiftIndustry?>(
             label: 'Rubro',
             value: filter.industry,
-            items: const {
+            items: {
               null: 'Todos los rubros',
               ShiftIndustry.hospitality: 'Hotelería',
               ShiftIndustry.foodService: 'Alimentos y bebidas',
@@ -56,7 +58,7 @@ class JobFilterControls extends StatelessWidget {
           _FilterDropdown<int>(
             label: 'Pago mínimo',
             value: filter.minimumPayCents,
-            items: const {
+            items: {
               0: 'Cualquier pago',
               9000: 'Desde S/ 90',
               11000: 'Desde S/ 110',
@@ -97,8 +99,10 @@ class JobFilterControls extends StatelessWidget {
           _FilterDropdown<ShiftSortOrder>(
             label: 'Orden',
             value: filter.sortOrder,
-            items: const {
-              ShiftSortOrder.recommended: 'Más compatibles',
+            items: {
+              ShiftSortOrder.recommended: matchingAvailable
+                  ? 'Más compatibles'
+                  : 'Prioridad operativa',
               ShiftSortOrder.highestPay: 'Mayor pago',
             },
             onChanged: controller.setSortOrder,

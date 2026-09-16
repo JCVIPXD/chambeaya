@@ -25,16 +25,19 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
 
   static const _savedJobsKey = 'cumple_now.worker.saved_jobs';
   static const _availabilityKey = 'cumple_now.worker.availability';
+  static const _requestTimeout = Duration(seconds: 8);
 
   @override
   bool get usesLiveFeed => true;
 
   @override
   Future<List<Shift>> availableShifts() async {
-    final response = await _client.get(
-      _baseUri.resolve('/api/shifts'),
-      headers: _headers(),
-    );
+    final response = await _client
+        .get(
+          _baseUri.resolve('/api/shifts'),
+          headers: _headers(),
+        )
+        .timeout(_requestTimeout);
     if (response.statusCode != 200) {
       throw StateError('No se pudieron cargar turnos');
     }
@@ -60,10 +63,12 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
   @override
   Future<bool> workerAvailability() async {
     try {
-      final response = await _client.get(
-        _baseUri.resolve('/api/workers/availability'),
-        headers: _headers(),
-      );
+      final response = await _client
+          .get(
+            _baseUri.resolve('/api/workers/availability'),
+            headers: _headers(),
+          )
+          .timeout(_requestTimeout);
       if (response.statusCode == 200) {
         final value =
             (jsonDecode(response.body) as Map<String, dynamic>)['isAvailable'];
@@ -281,10 +286,12 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
   @override
   Future<Map<String, ApplicationState>> applicationStates() async {
     try {
-      final response = await _client.get(
-        _baseUri.resolve('/api/workers/applications'),
-        headers: _headers(),
-      );
+      final response = await _client
+          .get(
+            _baseUri.resolve('/api/workers/applications'),
+            headers: _headers(),
+          )
+          .timeout(_requestTimeout);
       if (response.statusCode == 200) {
         final values = jsonDecode(response.body) as List<dynamic>;
         final remote = <String, ApplicationState>{};
@@ -528,7 +535,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       company: json['businessName'] as String,
       schedule: json['dateLabel'] as String,
       workerPayCents: (json['workerPayCents'] as num).toInt(),
-      match: (json['matchScore'] as num?)?.toInt() ?? 90,
+      match: (json['matchScore'] as num?)?.toInt(),
       urgent: json['urgent'] == true,
       industry: _industryFromApi(json['industry'] as String?),
       location: json['location'] as String,

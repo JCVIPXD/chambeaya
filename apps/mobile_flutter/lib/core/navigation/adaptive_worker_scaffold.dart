@@ -249,7 +249,7 @@ class _DesktopSidebar extends StatelessWidget {
                 ),
                 SizedBox(height: 12),
                 Text(
-                  '90% completo',
+                  'Haz que te encuentren',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 15,
@@ -257,16 +257,8 @@ class _DesktopSidebar extends StatelessWidget {
                   ),
                 ),
                 SizedBox(height: 8),
-                LinearProgressIndicator(
-                  value: .9,
-                  minHeight: 5,
-                  borderRadius: BorderRadius.all(Radius.circular(8)),
-                  backgroundColor: Color(0x33FFFFFF),
-                  valueColor: AlwaysStoppedAnimation(AppColors.teal),
-                ),
-                SizedBox(height: 9),
                 Text(
-                  'Completa tu perfil para mejorar tus coincidencias.',
+                  'Agrega tu experiencia, distrito y especialidades para aparecer en búsquedas relevantes.',
                   style: TextStyle(
                     color: Color(0xFFD8E2F0),
                     fontSize: 10,

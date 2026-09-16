@@ -534,7 +534,11 @@ class _ResultsColumn extends StatelessWidget {
         children: [
           Expanded(
             child: Text(
-              showHeader ? 'Oportunidades para ti' : 'Mejores coincidencias',
+              showHeader
+                  ? 'Oportunidades para ti'
+                  : controller.shifts.any((shift) => shift.match != null)
+                  ? 'Mejores coincidencias'
+                  : 'Turnos disponibles',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: showHeader

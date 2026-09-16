@@ -6,6 +6,8 @@ import 'features/auth/auth_session.dart';
 import 'features/auth/auth_session_store.dart';
 import 'features/company/company_dashboard_page.dart';
 import 'features/marketplace/http_worker_marketplace_repository.dart';
+import 'features/profile/talent_invitation_repository.dart';
+import 'features/profile/talent_profile_repository.dart';
 import 'features/marketplace/marketplace_repository.dart';
 import 'features/marketplace/worker_shell.dart';
 import 'features/onboarding/onboarding_page.dart';
@@ -22,20 +24,23 @@ class CumpleNowApp extends StatefulWidget {
     super.key,
     this.sessionStore,
     this.authRepository,
-    this.useLocalApiOverride,
+    this.demoModeOverride,
   });
 
   final AuthSessionStore? sessionStore;
   final AuthRepository? authRepository;
-  final bool? useLocalApiOverride;
+
+  /// Test-only override. Production builds select demo mode exclusively through
+  /// the explicit CUMPLENOW_DEMO_MODE dart define.
+  final bool? demoModeOverride;
 
   @override
   State<CumpleNowApp> createState() => _CumpleNowAppState();
 }
 
 class _CumpleNowAppState extends State<CumpleNowApp> {
-  static const _configuredLocalApi = bool.fromEnvironment(
-    'USE_LOCAL_API',
+  static const _configuredDemoMode = bool.fromEnvironment(
+    'CUMPLENOW_DEMO_MODE',
     defaultValue: false,
   );
 
@@ -45,7 +50,8 @@ class _CumpleNowAppState extends State<CumpleNowApp> {
   AuthSession? _session;
   var _restoringSession = true;
 
-  bool get _useLocalApi => widget.useLocalApiOverride ?? _configuredLocalApi;
+  bool get _isDemoMode => widget.demoModeOverride ?? _configuredDemoMode;
+  bool get _usesLiveApi => !_isDemoMode;
 
   @override
   void initState() {
@@ -56,15 +62,20 @@ class _CumpleNowAppState extends State<CumpleNowApp> {
   }
 
   Future<void> _restoreSession() async {
-    AuthSession? restored = await _sessionStore.read();
-    if (restored != null && _useLocalApi) {
-      try {
+    AuthSession? restored;
+    try {
+      restored = await _sessionStore.read();
+      if (restored != null && _usesLiveApi) {
         restored = await _authRepository.restore(restored.token);
         await _sessionStore.write(restored);
-      } catch (_) {
-        await _sessionStore.clear();
-        restored = null;
       }
+    } catch (_) {
+      try {
+        await _sessionStore.clear();
+      } catch (_) {
+        // The application must still leave the startup state if local storage fails.
+      }
+      restored = null;
     }
     if (!mounted) return;
     setState(() {
@@ -85,7 +96,7 @@ class _CumpleNowAppState extends State<CumpleNowApp> {
 
   Future<void> _logout() async {
     final token = _session?.token;
-    if (_useLocalApi && token != null) {
+    if (_usesLiveApi && token != null) {
       try {
         await _authRepository.logout(token);
       } catch (_) {
@@ -113,8 +124,15 @@ class _CumpleNowAppState extends State<CumpleNowApp> {
     home: _restoringSession
         ? const Scaffold(
             body: Center(
-              child: CircularProgressIndicator(
-                semanticsLabel: 'Restaurando sesión',
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(
+                    semanticsLabel: 'Restaurando sesión',
+                  ),
+                  SizedBox(height: 16),
+                  Text('Preparando tu espacio...'),
+                ],
               ),
             ),
           )
@@ -122,22 +140,33 @@ class _CumpleNowAppState extends State<CumpleNowApp> {
         ? OnboardingPage(
             onComplete: (value) => setState(() => _audience = value),
           )
-        : _session == null
+        : _session == null || _session!.requiresPasswordSetup
         ? AuthPage(
             role: _audience!,
-            useLocalApi: _useLocalApi,
+            demoMode: _isDemoMode,
             repository: _authRepository,
             onAuthenticated: _authenticated,
+            initialGooglePasswordSetupSession:
+                _session?.requiresPasswordSetup == true ? _session : null,
           )
         : _audience == AppAudience.company
         ? CompanyDashboardPage(onLogout: () => _logout())
         : WorkerShell(
             onLogout: () => _logout(),
             workerName: _session?.name,
+            initialIndex: _session?.openProfileAfterSignIn == true ? 3 : 0,
             alertStore: SharedPreferencesSearchAlertStore(),
-            repository: _useLocalApi
+            repository: _usesLiveApi
                 ? HttpWorkerMarketplaceRepository(token: _session?.token)
-                : createWorkerMarketplaceRepository(useLocalApi: false),
+                : DemoWorkerMarketplaceRepository(),
+            talentProfileRepository: _usesLiveApi
+                ? HttpTalentProfileRepository(token: _session?.token)
+                : DemoTalentProfileRepository(
+                    name: _session?.name ?? 'Trabajador',
+                  ),
+            talentInvitationRepository: _usesLiveApi
+                ? HttpTalentInvitationRepository(token: _session?.token)
+                : DemoTalentInvitationRepository(),
           ),
   );
 }

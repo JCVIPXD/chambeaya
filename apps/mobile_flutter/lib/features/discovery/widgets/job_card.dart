@@ -152,7 +152,7 @@ class JobCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                if (applicationState != ApplicationState.submitted)
+                if (applicationState != ApplicationState.submitted && shift.match != null)
                   _MatchIndicator(match: shift.match),
                 if (applicationState == ApplicationState.submitted)
                   const _StatusPill(label: 'POSTULADO', color: AppColors.gold),
@@ -238,7 +238,7 @@ class _InfoRow extends StatelessWidget {
 
 class _MatchIndicator extends StatelessWidget {
   const _MatchIndicator({required this.match});
-  final int match;
+  final int? match;
 
   @override
   Widget build(BuildContext context) => Row(
@@ -248,7 +248,7 @@ class _MatchIndicator extends StatelessWidget {
         width: 32,
         height: 32,
         child: CircularProgressIndicator(
-          value: match / 100,
+          value: match! / 100,
           strokeWidth: 4,
           backgroundColor: AppColors.tealSoft,
           color: AppColors.teal,
@@ -259,7 +259,7 @@ class _MatchIndicator extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '$match%',
+            '${match!}%',
             style: const TextStyle(
               color: AppColors.navy,
               fontSize: 11,

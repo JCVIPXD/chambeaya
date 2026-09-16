@@ -4,6 +4,9 @@ import '../../core/navigation/adaptive_worker_scaffold.dart';
 import '../discovery/worker_discovery_page.dart';
 import 'marketplace_repository.dart';
 import '../profile/profile_home_page.dart';
+import '../profile/talent_invitation_repository.dart';
+import '../profile/talent_profile_repository.dart';
+import '../profile/worker_invitations_page.dart';
 import 'worker_secondary_pages.dart';
 import '../discovery/search_alert_store.dart';
 
@@ -13,18 +16,29 @@ class WorkerShell extends StatefulWidget {
     required this.repository,
     this.onLogout,
     this.workerName,
+    this.initialIndex = 0,
+    TalentProfileRepository? talentProfileRepository,
+    TalentInvitationRepository? talentInvitationRepository,
     SearchAlertStore? alertStore,
-  }) : alertStore = alertStore ?? InMemorySearchAlertStore();
+  }) : talentProfileRepository =
+           talentProfileRepository ??
+           DemoTalentProfileRepository(name: workerName ?? 'Trabajador'),
+       talentInvitationRepository =
+           talentInvitationRepository ?? DemoTalentInvitationRepository(),
+       alertStore = alertStore ?? InMemorySearchAlertStore();
   final WorkerMarketplaceRepository repository;
+  final TalentProfileRepository talentProfileRepository;
+  final TalentInvitationRepository talentInvitationRepository;
   final VoidCallback? onLogout;
   final String? workerName;
+  final int initialIndex;
   final SearchAlertStore alertStore;
   @override
   State<WorkerShell> createState() => _WorkerShellState();
 }
 
 class _WorkerShellState extends State<WorkerShell> {
-  var selected = 0;
+  late int selected = widget.initialIndex;
   var _applicationRevision = 0;
 
   @override
@@ -44,9 +58,9 @@ class _WorkerShellState extends State<WorkerShell> {
       ProfileHomePage(
         showNavigation: false,
         onLogout: widget.onLogout,
-        repository: widget.repository,
-        workerName: widget.workerName,
+        talentProfileRepository: widget.talentProfileRepository,
       ),
+      WorkerInvitationsPage(repository: widget.talentInvitationRepository),
     ];
     return AdaptiveWorkerScaffold(
       selectedIndex: selected,

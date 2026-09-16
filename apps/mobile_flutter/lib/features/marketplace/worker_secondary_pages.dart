@@ -487,7 +487,7 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
   @override
   Widget build(BuildContext context) => _SecondaryPage(
     title: 'Conversaciones',
-    subtitle: 'Comunicación directa y segura con empresas verificadas',
+    subtitle: 'Mensajes directos con las empresas de tus turnos y postulaciones',
     trailing: IconButton.filledTonal(
       tooltip: 'Actualizar mensajes',
       onPressed: () => _poll(),

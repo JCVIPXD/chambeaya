@@ -33,4 +33,9 @@ const workerDestinations = <WorkerDestination>[
     icon: Icons.person_outline_rounded,
     selectedIcon: Icons.person_rounded,
   ),
+  WorkerDestination(
+    label: 'Invitaciones',
+    icon: Icons.mail_outline_rounded,
+    selectedIcon: Icons.mail_rounded,
+  ),
 ];
