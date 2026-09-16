@@ -42,10 +42,6 @@ export type WorkerInput = {
   skills?: string[];
   status?: WorkerStatus;
   availability?: string | null;
-  cumpleScore?: number;
-  matchScore?: number;
-  completedJobs?: number;
-  verified?: boolean;
 };
 
 export type ConversationInput = {
@@ -240,7 +236,7 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async listWorkers(session: AuthSession) {
     const company = await this.companyFor(session);
-    return this.prisma.workerProfile.findMany({ where: { companyId: company.id }, orderBy: [{ status: 'asc' }, { name: 'asc' }] });
+    return this.prisma.companyWorkerContact.findMany({ where: { companyId: company.id }, orderBy: [{ status: 'asc' }, { name: 'asc' }] });
   }
 
   async getWorker(session: AuthSession, id: string) {
@@ -249,17 +245,17 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async createWorker(session: AuthSession, input: WorkerInput) {
     const company = await this.companyFor(session);
-    return this.prisma.workerProfile.create({ data: { ...input, companyId: company.id } });
+    return this.prisma.companyWorkerContact.create({ data: { ...input, companyId: company.id } });
   }
 
   async updateWorker(session: AuthSession, id: string, input: Partial<WorkerInput>) {
     const worker = await this.ownedWorker(session, id);
-    return this.prisma.workerProfile.update({ where: { id: worker.id }, data: input });
+    return this.prisma.companyWorkerContact.update({ where: { id: worker.id }, data: input });
   }
 
   async deleteWorker(session: AuthSession, id: string) {
     const worker = await this.ownedWorker(session, id);
-    await this.prisma.workerProfile.delete({ where: { id: worker.id } });
+    await this.prisma.companyWorkerContact.delete({ where: { id: worker.id } });
   }
 
   async listConversations(session: AuthSession) {
@@ -286,7 +282,7 @@ export class DatabaseBusinessService implements BusinessOperations {
     const company = await this.companyFor(session);
     await this.requireWorker(company.id, input.workerId);
     if (input.shiftId) await this.requireShift(company.id, input.shiftId);
-    const workerProfile = await this.prisma.workerProfile.findUnique({ where: { id: input.workerId } });
+    const workerProfile = await this.prisma.companyWorkerContact.findUnique({ where: { id: input.workerId } });
     const workerUser = workerProfile?.email
       ? await this.prisma.user.findFirst({ where: { email: workerProfile.email, role: 'WORKER' } })
       : null;
@@ -398,7 +394,7 @@ export class DatabaseBusinessService implements BusinessOperations {
   }
 
   private async requireWorker(companyId: string, id: string) {
-    const worker = await this.prisma.workerProfile.findFirst({ where: { id, companyId } });
+    const worker = await this.prisma.companyWorkerContact.findFirst({ where: { id, companyId } });
     if (!worker) throw new BusinessRecordNotFoundError('WORKER_NOT_FOUND');
     return worker;
   }

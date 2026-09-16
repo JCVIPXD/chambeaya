@@ -19,7 +19,8 @@ export interface DemoShift {
   checkInCredential?: string;
   industry: ShiftIndustry;
   urgent: boolean;
-  matchScore: number;
+  /** Present only for the isolated demo until matching v1 is implemented. */
+  matchScore?: number;
   description: string | null;
   responsibilities: string | null;
   requirements: string | null;
@@ -352,10 +353,10 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
   }
 
   private async ensureWorkerConversation(prisma: Prisma.TransactionClient, worker: { id: string; name: string; email: string }, shift: PublishedShift) {
-    let profile = await prisma.workerProfile.findFirst({ where: { companyId: shift.companyId, email: worker.email } });
+    let profile = await prisma.companyWorkerContact.findFirst({ where: { companyId: shift.companyId, email: worker.email } });
     if (!profile) {
-      profile = await prisma.workerProfile.create({
-        data: { companyId: shift.companyId, workerUserId: worker.id, name: worker.name, email: worker.email, role: 'Postulante', skills: [], status: 'AVAILABLE', verified: false },
+      profile = await prisma.companyWorkerContact.create({
+        data: { companyId: shift.companyId, workerUserId: worker.id, name: worker.name, email: worker.email, role: 'Postulante', skills: [], status: 'AVAILABLE' },
       });
     }
     const existing = await prisma.conversation.findFirst({ where: { companyId: shift.companyId, workerId: profile.id, shiftId: shift.id } });
@@ -530,7 +531,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       select: { email: true },
     });
     if (!worker) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
-    await this.prisma.workerProfile.updateMany({
+    await this.prisma.companyWorkerContact.updateMany({
       where: { email: worker.email },
       data: { status: isAvailable ? 'AVAILABLE' : 'UNAVAILABLE' },
     });
@@ -540,7 +541,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
   async workerAvailability(workerId: string) {
     const worker = await this.prisma.user.findFirst({ where: { id: workerId, role: 'WORKER' }, select: { id: true, email: true } });
     if (!worker) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
-    const profiles = await this.prisma.workerProfile.findMany({ where: { OR: [{ workerUserId: worker.id }, { workerUserId: null, email: worker.email }] }, select: { status: true } });
+    const profiles = await this.prisma.companyWorkerContact.findMany({ where: { OR: [{ workerUserId: worker.id }, { workerUserId: null, email: worker.email }] }, select: { status: true } });
     return { isAvailable: profiles.every((profile) => profile.status !== 'UNAVAILABLE') };
   }
 
@@ -632,7 +633,6 @@ function toMarketplaceShift(shift: PublishedShift): DemoShift {
     status: shift.status,
     industry: industryFor(shift.company.industry),
     urgent: shift.rescueActive || startsSoon,
-    matchScore: 90,
     description: shift.description,
     responsibilities: shift.responsibilities,
     requirements: shift.requirements,

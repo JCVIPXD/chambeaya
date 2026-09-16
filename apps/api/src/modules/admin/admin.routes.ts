@@ -8,6 +8,7 @@ import {
   hashPassword,
   type AuthService,
 } from "../auth/auth.service.js";
+import { PrivateDocumentStorage } from "../talent/private_document_storage.js";
 
 function bearerToken(value: string | undefined) {
   return value?.startsWith("Bearer ") ? value.slice(7).trim() : "";
@@ -33,6 +34,7 @@ const companyUpdateSchema = companyCreateSchema
 export function createAdminRouter(
   authService: AuthService = new DatabaseAuthService(),
   prisma = new PrismaClient(),
+  documents = new PrivateDocumentStorage(),
 ) {
   const router = Router();
   const guard = async (
@@ -219,11 +221,9 @@ export function createAdminRouter(
           email: true,
           identifier: true,
           createdAt: true,
-          workerProfiles: {
+          companyWorkerContacts: {
             select: {
               status: true,
-              cumpleScore: true,
-              verified: true,
               company: { select: { id: true, name: true } },
             },
           },
@@ -231,6 +231,28 @@ export function createAdminRouter(
         orderBy: { createdAt: "desc" },
       });
       response.json(workers);
+    }),
+  );
+
+  router.delete("/workers/:id", (request, response) =>
+    guard(request, response, async () => {
+      const worker = await prisma.user.findUnique({
+        where: { id: request.params.id },
+        select: { role: true },
+      });
+      if (!worker || worker.role !== "WORKER") {
+        response.status(404).json({ error: "WORKER_NOT_FOUND" });
+        return;
+      }
+      const workerDocuments = await prisma.workerDocument.findMany({
+        where: { userId: request.params.id },
+        select: { storageKey: true },
+      });
+      for (const document of workerDocuments) {
+        await documents.remove(document.storageKey);
+      }
+      await prisma.user.delete({ where: { id: request.params.id } });
+      response.status(204).send();
     }),
   );
 

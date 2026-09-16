@@ -116,17 +116,16 @@ export async function seedDemoDatabase(
     create: { companyId: company.id, plan: 'PILOT', status: 'TRIAL', trialEndsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) },
   });
 
-  const profile = await prisma.workerProfile.upsert({
+  const profile = await prisma.companyWorkerContact.upsert({
     where: { companyId_email: { companyId: company.id, email: worker.email } },
     update: {
       workerUserId: worker.id, name: worker.name, phone: '999 222 333', role: 'Anfitrión/a de eventos',
       skills: ['Atención al cliente', 'Puntualidad'], status: 'AVAILABLE', availability: 'Disponible esta semana',
-      cumpleScore: 92, matchScore: 95, completedJobs: 1, verified: true,
     },
     create: {
       companyId: company.id, workerUserId: worker.id, name: worker.name, email: worker.email, phone: '999 222 333',
       role: 'Anfitrión/a de eventos', skills: ['Atención al cliente', 'Puntualidad'], status: 'AVAILABLE',
-      availability: 'Disponible esta semana', cumpleScore: 92, matchScore: 95, completedJobs: 1, verified: true,
+      availability: 'Disponible esta semana',
     },
   });
 
