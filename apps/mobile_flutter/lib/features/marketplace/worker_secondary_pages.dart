@@ -34,7 +34,15 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
     // without requiring a full reload.
     _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted) return;
-      setState(() => _loading = _load());
+      // A block body, not `() => _loading = _load()`: an arrow-bodied
+      // closure returns the assignment's value (the `Future` `_load()`
+      // produces), and `setState` asserts its callback must return `void`.
+      // That assertion only ever throws once this timer actually fires
+      // (`flutter test`'s fake clock previously never advanced far enough
+      // in any existing test to reach it) — see CN-20260917-106/107.
+      setState(() {
+        _loading = _load();
+      });
     });
   }
 
@@ -153,12 +161,12 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Asistencia confirmada.')));
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No pudimos confirmar la asignación.')),
-        );
-      }
+    } catch (error) {
+      _handleActionError(
+        error,
+        genericMessage:
+            'No pudimos confirmar la asignación. Inténtalo otra vez.',
+      );
     }
   }
 
@@ -199,12 +207,11 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Llegada registrada correctamente.')),
       );
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No pudimos registrar el check-in.')),
-        );
-      }
+    } catch (error) {
+      _handleActionError(
+        error,
+        genericMessage: 'No pudimos registrar el check-in. Inténtalo otra vez.',
+      );
     }
   }
 
@@ -216,13 +223,46 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Salida registrada correctamente.')),
       );
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No pudimos finalizar el turno.')),
-        );
-      }
+    } catch (error) {
+      _handleActionError(
+        error,
+        genericMessage: 'No pudimos finalizar el turno. Inténtalo otra vez.',
+      );
     }
+  }
+
+  /// Maneja los errores de `confirmAssignment`/`checkIn`/`checkOut`: cuando el
+  /// servidor confirma que el turno ya no existe/está disponible (vencido,
+  /// cancelado) -código propagado ahora por [MarketplaceApiException] en vez
+  /// de perderse detrás de un `StateError` genérico-, no basta con mostrar un
+  /// mensaje que invite a reintentar contra una acción que el servidor
+  /// siempre va a rechazar: se explica el motivo real y se recarga de
+  /// inmediato (en vez de esperar el sondeo periódico de 3 s) para que la
+  /// tarjeta se retire o se marque como cerrada tan pronto como sea posible.
+  /// Cualquier otro error (de red, credencial inválida, etc.) conserva el
+  /// mensaje genérico previo.
+  void _handleActionError(Object error, {required String genericMessage}) {
+    if (!mounted) return;
+    if (error is MarketplaceApiException && error.isShiftGone) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Este turno ya no está disponible: venció, fue cancelado o ya no existe. Actualizamos tu lista.',
+          ),
+        ),
+      );
+      // A block body (not `() => _loading = _load()`) so the callback
+      // returns void instead of the Future that `_load()` produces: setState
+      // asserts (in debug builds) that its callback does not return a
+      // Future, since it must apply state synchronously.
+      setState(() {
+        _loading = _load();
+      });
+      return;
+    }
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(genericMessage)));
   }
 
   Future<void> _cancel(String shiftId) async {
@@ -286,23 +326,26 @@ class _WorkerJourney extends StatelessWidget {
     width: double.infinity,
     padding: const EdgeInsets.all(16),
     decoration: BoxDecoration(
-      color: AppColors.tealSoft,
-      border: Border.all(color: const Color(0xFFBFEFE4)),
+      color: context.palette.accentSoft,
+      border: Border.all(color: AppColors.teal.withValues(alpha: .3)),
       borderRadius: BorderRadius.circular(16),
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Tu ruta en CumpleNow',
-          style: TextStyle(color: AppColors.navy, fontWeight: FontWeight.w900),
+        Text(
+          'Tu ruta en Chambeaya',
+          style: TextStyle(
+            color: context.palette.ink,
+            fontWeight: FontWeight.w900,
+          ),
         ),
         const SizedBox(height: 4),
         Text(
           accepted == 0
               ? 'Postula y espera una selección para continuar.'
               : '$accepted turno${accepted == 1 ? '' : 's'} seleccionado${accepted == 1 ? '' : 's'} · $finished finalizado${finished == 1 ? '' : 's'}',
-          style: const TextStyle(color: AppColors.muted, fontSize: 11),
+          style: TextStyle(color: context.palette.muted, fontSize: 11),
         ),
         const SizedBox(height: 14),
         Row(
@@ -332,10 +375,10 @@ class _JourneyStep extends StatelessWidget {
       children: [
         CircleAvatar(
           radius: 11,
-          backgroundColor: active ? AppColors.teal : Colors.white,
+          backgroundColor: active ? AppColors.teal : context.palette.surface,
           child: Icon(
             active ? Icons.check_rounded : Icons.payments_outlined,
-            color: active ? Colors.white : AppColors.muted,
+            color: active ? Colors.white : context.palette.muted,
             size: 14,
           ),
         ),
@@ -344,7 +387,7 @@ class _JourneyStep extends StatelessWidget {
           label,
           textAlign: TextAlign.center,
           style: TextStyle(
-            color: active ? AppColors.navy : AppColors.muted,
+            color: active ? context.palette.ink : context.palette.muted,
             fontSize: 9,
             fontWeight: FontWeight.w800,
           ),
@@ -417,23 +460,30 @@ class _ApplicationsEmpty extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.all(28),
     decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
+      color: context.palette.surface,
+      border: Border.all(color: context.palette.border),
       borderRadius: BorderRadius.circular(16),
     ),
-    child: const Column(
+    child: Column(
       children: [
-        Icon(Icons.work_history_outlined, color: AppColors.teal, size: 44),
-        SizedBox(height: 12),
+        const Icon(
+          Icons.work_history_outlined,
+          color: AppColors.teal,
+          size: 44,
+        ),
+        const SizedBox(height: 12),
         Text(
           'Aún no tienes postulaciones',
-          style: TextStyle(color: AppColors.navy, fontWeight: FontWeight.w800),
+          style: TextStyle(
+            color: context.palette.ink,
+            fontWeight: FontWeight.w800,
+          ),
         ),
-        SizedBox(height: 6),
+        const SizedBox(height: 6),
         Text(
           'Explora oportunidades y postula al turno que mejor encaje contigo.',
           textAlign: TextAlign.center,
-          style: TextStyle(color: AppColors.muted),
+          style: TextStyle(color: context.palette.muted),
         ),
       ],
     ),
@@ -487,7 +537,8 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
   @override
   Widget build(BuildContext context) => _SecondaryPage(
     title: 'Conversaciones',
-    subtitle: 'Mensajes directos con las empresas de tus turnos y postulaciones',
+    subtitle:
+        'Mensajes directos con las empresas de tus turnos y postulaciones',
     trailing: IconButton.filledTonal(
       tooltip: 'Actualizar mensajes',
       onPressed: () => _poll(),
@@ -552,8 +603,8 @@ class _MessageState extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.all(28),
     decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
+      color: context.palette.surface,
+      border: Border.all(color: context.palette.border),
       borderRadius: BorderRadius.circular(16),
     ),
     child: Column(
@@ -569,7 +620,7 @@ class _MessageState extends StatelessWidget {
         Text(
           message,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: AppColors.muted),
+          style: TextStyle(color: context.palette.muted),
         ),
         if (onRetry != null)
           TextButton.icon(
@@ -684,7 +735,7 @@ class _ConversationSheetState extends State<_ConversationSheet> {
                 child: Row(
                   children: [
                     CircleAvatar(
-                      backgroundColor: AppColors.tealSoft,
+                      backgroundColor: context.palette.accentSoft,
                       child: Text(
                         _conversation!.company.characters.first.toUpperCase(),
                         style: const TextStyle(
@@ -704,8 +755,8 @@ class _ConversationSheetState extends State<_ConversationSheet> {
                           ),
                           Text(
                             _conversation!.subject,
-                            style: const TextStyle(
-                              color: AppColors.muted,
+                            style: TextStyle(
+                              color: context.palette.muted,
                               fontSize: 11,
                             ),
                           ),
@@ -741,14 +792,14 @@ class _ConversationSheetState extends State<_ConversationSheet> {
                         constraints: const BoxConstraints(maxWidth: 330),
                         decoration: BoxDecoration(
                           color: mine
-                              ? AppColors.tealSoft
-                              : AppColors.surfaceMuted,
+                              ? context.palette.accentSoft
+                              : context.palette.surfaceMuted,
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: Text(
                           message.body,
-                          style: const TextStyle(
-                            color: AppColors.navy,
+                          style: TextStyle(
+                            color: context.palette.ink,
                             fontSize: 12,
                           ),
                         ),
@@ -818,7 +869,7 @@ class _SecondaryPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: AppColors.background,
+    color: context.palette.background,
     child: SafeArea(
       child: Center(
         child: ConstrainedBox(
@@ -831,8 +882,8 @@ class _SecondaryPage extends StatelessWidget {
                   Expanded(
                     child: Text(
                       title,
-                      style: const TextStyle(
-                        color: AppColors.navy,
+                      style: TextStyle(
+                        color: context.palette.ink,
                         fontSize: 28,
                         fontWeight: FontWeight.w900,
                       ),
@@ -844,7 +895,7 @@ class _SecondaryPage extends StatelessWidget {
               const SizedBox(height: 6),
               Text(
                 subtitle,
-                style: const TextStyle(color: AppColors.muted, fontSize: 14),
+                style: TextStyle(color: context.palette.muted, fontSize: 14),
               ),
               const SizedBox(height: 24),
               child,
@@ -899,8 +950,8 @@ class _ApplicationCard extends StatelessWidget {
     margin: const EdgeInsets.only(bottom: 14),
     padding: const EdgeInsets.all(18),
     decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
+      color: context.palette.surface,
+      border: Border.all(color: context.palette.border),
       borderRadius: BorderRadius.circular(16),
     ),
     child: Column(
@@ -910,7 +961,7 @@ class _ApplicationCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             CircleAvatar(
-              backgroundColor: AppColors.tealSoft,
+              backgroundColor: context.palette.accentSoft,
               child: Text(
                 company.substring(0, 1),
                 style: const TextStyle(
@@ -928,8 +979,8 @@ class _ApplicationCard extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(
                     company,
-                    style: const TextStyle(
-                      color: AppColors.muted,
+                    style: TextStyle(
+                      color: context.palette.muted,
                       fontSize: 12,
                     ),
                   ),
@@ -960,16 +1011,16 @@ class _ApplicationCard extends StatelessWidget {
           children: [
             Text(
               schedule,
-              style: const TextStyle(color: AppColors.muted, fontSize: 11),
+              style: TextStyle(color: context.palette.muted, fontSize: 11),
             ),
             Text(
               location,
-              style: const TextStyle(color: AppColors.muted, fontSize: 11),
+              style: TextStyle(color: context.palette.muted, fontSize: 11),
             ),
             Text(
               'S/ ${(pay / 100).toStringAsFixed(2)}',
-              style: const TextStyle(
-                color: AppColors.navy,
+              style: TextStyle(
+                color: context.palette.ink,
                 fontSize: 11,
                 fontWeight: FontWeight.w800,
               ),
@@ -982,7 +1033,7 @@ class _ApplicationCard extends StatelessWidget {
           child: LinearProgressIndicator(
             value: progress,
             minHeight: 7,
-            backgroundColor: AppColors.border,
+            backgroundColor: context.palette.border,
             color: statusColor,
           ),
         ),
@@ -998,8 +1049,8 @@ class _ApplicationCard extends StatelessWidget {
             Expanded(
               child: Text(
                 nextStep,
-                style: const TextStyle(
-                  color: AppColors.navy,
+                style: TextStyle(
+                  color: context.palette.ink,
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                 ),
@@ -1041,7 +1092,7 @@ class _ApplicationCard extends StatelessWidget {
                 IconButton(
                   onPressed: onCancel,
                   tooltip: 'Cancelar postulación',
-                  icon: const Icon(Icons.close_rounded, color: AppColors.muted),
+                  icon: Icon(Icons.close_rounded, color: context.palette.muted),
                 ),
               if (checkedOut)
                 const Text(
@@ -1101,9 +1152,9 @@ class _ConversationTile extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 10),
     child: Material(
-      color: Colors.white,
+      color: context.palette.surface,
       shape: RoundedRectangleBorder(
-        side: const BorderSide(color: AppColors.border),
+        side: BorderSide(color: context.palette.border),
         borderRadius: BorderRadius.circular(15),
       ),
       clipBehavior: Clip.antiAlias,
@@ -1111,7 +1162,7 @@ class _ConversationTile extends StatelessWidget {
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         onTap: onTap,
         leading: CircleAvatar(
-          backgroundColor: AppColors.tealSoft,
+          backgroundColor: context.palette.accentSoft,
           child: Text(
             record.company.characters.first.toUpperCase(),
             style: const TextStyle(
@@ -1122,8 +1173,8 @@ class _ConversationTile extends StatelessWidget {
         ),
         title: Text(
           record.company,
-          style: const TextStyle(
-            color: AppColors.navy,
+          style: TextStyle(
+            color: context.palette.ink,
             fontWeight: FontWeight.w800,
           ),
         ),
@@ -1137,7 +1188,7 @@ class _ConversationTile extends StatelessWidget {
           children: [
             Text(
               _timeLabel(record.updatedAt),
-              style: const TextStyle(color: AppColors.muted, fontSize: 10),
+              style: TextStyle(color: context.palette.muted, fontSize: 10),
             ),
             if (record.messages.any(
               (message) =>

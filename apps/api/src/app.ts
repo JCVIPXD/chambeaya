@@ -76,6 +76,13 @@ export function createApp(options: {
    * `AUTH_RATE_LIMIT_MAX`).
    */
   rateLimit?: false | Partial<RateLimitOptions>;
+  /**
+   * Intervalo (ms) del refresco periódico del feed en vivo de turnos
+   * (`/api/shifts/events`), independiente de los eventos de publicación. Solo
+   * se usa para acortarlo en pruebas; en producción se deja el valor por
+   * defecto de `createMarketplaceRouter`.
+   */
+  marketplaceFeedRefreshIntervalMs?: number;
 } = {}): Express {
   const app = express();
   const authService = options.authService ?? new DatabaseAuthService();
@@ -110,7 +117,7 @@ export function createApp(options: {
   app.use(express.json());
   app.get('/', (_request, response) => {
     response.json({
-      name: 'Cumple Now API',
+      name: 'Chambeaya API',
       health: '/api/health',
       status: 'ok',
     });
@@ -118,7 +125,9 @@ export function createApp(options: {
   app.get('/api/health', (_request, response) => {
     response.json({ status: 'ok' });
   });
-  app.use('/api', createMarketplaceRouter(options.marketplaceService, shiftEvents, authService));
+  app.use('/api', createMarketplaceRouter(options.marketplaceService, shiftEvents, authService, {
+    feedRefreshIntervalMs: options.marketplaceFeedRefreshIntervalMs,
+  }));
   app.use('/api', createTalentRouter(authService, options.talentService, options.talentInvitationService));
   app.use('/api/auth', createAuthRouter(authService, { rateLimiter: authRateLimiter }));
   app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish()));

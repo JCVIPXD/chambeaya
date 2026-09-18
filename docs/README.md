@@ -1,4 +1,4 @@
-# Documentación de Cumple Now
+# Documentación de Chambeaya
 
 Este índice contiene únicamente la documentación vigente. Empieza por la guía
 que corresponda a tu objetivo y evita crear documentos nuevos en la raíz de

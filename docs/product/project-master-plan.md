@@ -1,4 +1,4 @@
-# Plan maestro de pendientes de Cumple Now
+# Plan maestro de pendientes de Chambeaya
 
 Actualizado: 16 de septiembre de 2026
 
@@ -265,7 +265,7 @@ Objetivo: preparar acceso real y documentos privados sin degradar seguridad.
 
 - **Google Sign-In web (P1, piloto local completado).** La identidad `GOOGLE` se
   verifica en backend y emite la misma sesión opaca del sistema. Para una cuenta
-  nueva, el onboarding solicita DNI y una contraseña exclusiva de Cumple Now; no
+  nueva, el onboarding solicita DNI y una contraseña exclusiva de Chambeaya; no
   recibe ni almacena la contraseña de Google. Las cuentas Google creadas antes de
   este paso deben definirla al volver a entrar. No se fusionan cuentas sólo por
   correo. Pendiente: clientes nativos Android/iOS, enlace/desvinculación de
@@ -321,7 +321,7 @@ Objetivo: cerrar primero la obligación económica y después mover dinero.
   webhook firmado, reintentos, reverso, devolución y disputa contra el ledger.
   Cierre: pruebas de webhooks duplicados y fuera de orden demuestran idempotencia.
 - **Comprobantes y marco legal (P2).** Definir con revisión legal, laboral, tributaria
-  y de protección de datos el rol de Cumple Now, contratos, comprobantes,
+  y de protección de datos el rol de Chambeaya, contratos, comprobantes,
   retenciones, reclamos y manejo de fondos antes de producción. Cierre: términos y
   flujos técnicos reflejan la modalidad realmente aprobada.
 - **Membresías empresariales (P2).** Mantener activación manual del piloto; implementar

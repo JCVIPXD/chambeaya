@@ -112,13 +112,13 @@ termina en `_test`, el mismo guardarraíl que ya usa
 ### Qué necesita
 
 - Una base PostgreSQL real, vacía o desechable, **con nombre terminado en
-  `_test`** (por ejemplo `cumplenow_e2e_test`). Puede ser:
+  `_test`** (por ejemplo `chambeaya_e2e_test`). Puede ser:
   - Un contenedor Docker (`docker run -e POSTGRES_PASSWORD=... -p 5433:5432 postgres:16-alpine`), si Docker está disponible, o
   - Un clúster PostgreSQL **efímero** creado con `initdb`/`pg_ctl` del propio
     motor nativo (sin Docker), como se hizo para validar esta suite: útil en
     estaciones donde Docker Desktop no tiene motor Linux disponible.
 - Los puertos `4400` (API) y `3400` (web) libres, o sobreescribirlos con
-  `CUMPLENOW_E2E_API_PORT` / `CUMPLENOW_E2E_WEB_PORT`.
+  `CHAMBEAYA_E2E_API_PORT` / `CHAMBEAYA_E2E_WEB_PORT`.
 - Node.js 22, `npm ci` ya ejecutado y Chromium instalado (`npm run
   test:web:install`).
 
@@ -127,13 +127,13 @@ termina en `_test`, el mismo guardarraíl que ya usa
 Desde la raíz del repositorio, con la base `_test` ya creada y accesible:
 
 ```powershell
-$env:CUMPLENOW_E2E_DATABASE_URL = "postgresql://usuario:clave@127.0.0.1:PUERTO/cumplenow_e2e_test?schema=public"
+$env:CHAMBEAYA_E2E_DATABASE_URL = "postgresql://usuario:clave@127.0.0.1:PUERTO/chambeaya_e2e_test?schema=public"
 npm run test:web:admin-real
 ```
 
 El primer proyecto de `webServer` (`apps/web/playwright.admin-real.config.ts`)
 ejecuta `prisma migrate deploy` contra esa base, siembra directamente por
-Prisma una única cuenta `ADMIN` fija (`admin.e2e@cumplenow.test`, ver
+Prisma una única cuenta `ADMIN` fija (`admin.e2e@chambeaya.test`, ver
 `apps/api/scripts/e2e-serve.ts`; el registro público rechaza el rol `ADMIN`,
 así que no puede crearse por HTTP) y arranca la API real en el puerto
 `4400`. El segundo compila el panel con `NEXT_PUBLIC_API_URL` apuntando a esa

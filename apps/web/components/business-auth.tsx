@@ -57,7 +57,7 @@ export function BusinessAuth({ onAuthenticated }: { onAuthenticated: (session: B
           <span className="auth-form-icon"><BriefcaseBusiness size={22} /></span>
           <p className="eyebrow">Panel para empresas</p>
           <h2>Inicia sesión</h2>
-          <p>Los accesos empresariales son habilitados directamente por el equipo de Cumple Now.</p>
+          <p>Los accesos empresariales son habilitados directamente por el equipo de Chambeaya.</p>
           <form onSubmit={submit}>
             <label className="field"><span>Correo empresarial</span><input name="email" required type="email" placeholder="operaciones@empresa.pe" /></label>
             <label className="field"><span>Contraseña</span><input name="password" required type="password" minLength={8} placeholder="Mínimo 8 caracteres" /></label>

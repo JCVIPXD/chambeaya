@@ -4,7 +4,7 @@ COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/package.json
 COPY apps/web/package.json ./apps/web/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
-RUN npm ci --workspace=@cumple-now/api --include-workspace-root=false
+RUN npm ci --workspace=@chambeaya/api --include-workspace-root=false
 WORKDIR /workspace/apps/api
 COPY apps/api ./
 EXPOSE 4000

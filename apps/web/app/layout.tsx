@@ -4,8 +4,8 @@ import type { ReactNode } from 'react';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Cumple Now Empresas',
-  description: 'Gestiona turnos, cobertura y operaciones de tu empresa en Cumple Now'
+  title: 'Chambeaya Empresas',
+  description: 'Gestiona turnos, cobertura y operaciones de tu empresa en Chambeaya'
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

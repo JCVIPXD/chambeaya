@@ -2,6 +2,31 @@ import 'marketplace_data.dart';
 import 'marketplace_data.dart' as data;
 import '../discovery/discovery_models.dart';
 
+/// Error tipado que conserva el código de error devuelto por la API
+/// (`{"error": "SHIFT_UNAVAILABLE"}`, etc.) en vez de perderlo detrás de un
+/// [StateError] genérico. Sin esto, un turno que venció o ya fue cubierto
+/// entre que el trabajador lo vio en la lista y tocó "Postular ahora" era
+/// indistinguible de cualquier otro fallo de red: la pantalla de
+/// descubrimiento no podía retirar la tarjeta obsoleta ni explicar por qué
+/// la postulación falló, así que ofrecía indefinidamente un botón que el
+/// servidor siempre iba a rechazar.
+class MarketplaceApiException implements Exception {
+  const MarketplaceApiException(this.code, [this.message]);
+
+  final String code;
+  final String? message;
+
+  bool get isShiftGone =>
+      code == 'SHIFT_UNAVAILABLE' ||
+      code == 'SHIFT_NOT_FOUND' ||
+      // `confirmAssignment`/`checkIn`/`checkOut` report a vencido/cancelado/
+      // inexistente turno con este código (404), no con SHIFT_UNAVAILABLE.
+      code == 'ASSIGNMENT_NOT_FOUND';
+
+  @override
+  String toString() => message ?? code;
+}
+
 class WorkerMessageRecord {
   const WorkerMessageRecord({
     required this.id,

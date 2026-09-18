@@ -10,6 +10,16 @@ export interface DemoShift {
   role: string;
   businessName: string;
   dateLabel: string;
+  /**
+   * ISO 8601. Único campo de fecha real expuesto a los clientes del
+   * marketplace (`dateLabel` es solo texto). Sin `endsAt` el cliente no puede
+   * distinguir una asignación aceptada que sigue vigente de una cuyo turno ya
+   * venció -no existe transición automática por tiempo en `ShiftStatus`-, lo
+   * que permitía que `HttpWorkerMarketplaceRepository` reofreciera
+   * indefinidamente acciones (confirmar/check-in) sobre turnos que el
+   * servidor ya rechazaba siempre (ver CN-20260916-099 ALTO-1).
+   */
+  endsAt: string;
   location: string;
   rateCents: number;
   feeCents: number;
@@ -100,10 +110,15 @@ export class DemoMarketplaceService implements MarketplaceOperations {
   constructor() {
     const firstPayment = splitPaymentCents(10000, 10);
     const secondPayment = splitPaymentCents(12000, 10);
+    // Este servicio en memoria no tiene un reloj de demostración propio: se
+    // usa una fecha muy alejada en el futuro para que `endsAt` nunca se
+    // considere vencido mientras dure el proceso, ya que ninguna de las dos
+    // demos simuladas necesita ejercer esa regla.
+    const farFutureEndsAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
     this.shifts = [
       {
         id: 'shift-la-mar', role: 'Mozo de Salón', businessName: 'Restaurante La Mar',
-        dateLabel: 'Hoy · 18:00 – 00:00', location: 'Miraflores, Lima', rateCents: 10000,
+        dateLabel: 'Hoy · 18:00 – 00:00', endsAt: farFutureEndsAt, location: 'Miraflores, Lima', rateCents: 10000,
         ...firstPayment, status: 'PUBLISHED', industry: 'HOSPITALITY', urgent: true, matchScore: 98,
         description: 'Apoya al equipo de salón durante un turno de alta demanda.',
         responsibilities: 'Preparar el salón\nAtender mesas\nCoordinar con cocina',
@@ -113,7 +128,7 @@ export class DemoMarketplaceService implements MarketplaceOperations {
       },
       {
         id: 'shift-eventos-peru', role: 'Ayudante de Cocina', businessName: 'Eventos Perú',
-        dateLabel: 'Sábado · 10:00 – 18:00', location: 'San Isidro, Lima', rateCents: 12000,
+        dateLabel: 'Sábado · 10:00 – 18:00', endsAt: farFutureEndsAt, location: 'San Isidro, Lima', rateCents: 12000,
         ...secondPayment, status: 'PUBLISHED', industry: 'EVENTS', urgent: false, matchScore: 88,
         description: 'Apoya en la preparación y servicio de alimentos para un evento.',
         responsibilities: 'Preparar insumos\nMantener el área ordenada\nApoyar durante el servicio',
@@ -626,6 +641,7 @@ function toMarketplaceShift(shift: PublishedShift): DemoShift {
     role: shift.title,
     businessName: shift.company.name,
     dateLabel: formatSchedule(shift.startsAt, shift.endsAt),
+    endsAt: shift.endsAt.toISOString(),
     location: shift.location,
     rateCents: shift.payCents,
     feeCents: 0,

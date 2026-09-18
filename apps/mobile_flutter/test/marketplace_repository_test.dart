@@ -1,10 +1,10 @@
 import 'dart:convert';
 
-import 'package:cumple_now_mobile/features/marketplace/app_capabilities.dart';
-import 'package:cumple_now_mobile/features/discovery/discovery_models.dart';
-import 'package:cumple_now_mobile/features/marketplace/marketplace_data.dart';
-import 'package:cumple_now_mobile/features/marketplace/marketplace_repository.dart';
-import 'package:cumple_now_mobile/features/marketplace/http_worker_marketplace_repository.dart';
+import 'package:chambeaya_mobile/features/marketplace/app_capabilities.dart';
+import 'package:chambeaya_mobile/features/discovery/discovery_models.dart';
+import 'package:chambeaya_mobile/features/marketplace/marketplace_data.dart';
+import 'package:chambeaya_mobile/features/marketplace/marketplace_repository.dart';
+import 'package:chambeaya_mobile/features/marketplace/http_worker_marketplace_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
@@ -229,6 +229,117 @@ void main() {
     expect(shift.checkedIn, isFalse);
     expect(shift.checkInCredential, 'CUMPLE-TEST');
   });
+
+  test(
+    'HTTP repository closes and stops reinjecting an accepted assignment '
+    'whose shift already ended without a check-in',
+    () async {
+      final pastEndsAt = DateTime.now()
+          .subtract(const Duration(hours: 2))
+          .toIso8601String();
+      final client = _JsonClient({
+        '/api/workers/applications': [
+          {
+            'id': 'application-expired',
+            'shiftId': 'shift-expired',
+            'status': 'ACCEPTED',
+            'createdAt': '2026-08-24T10:00:00Z',
+            'updatedAt': '2026-08-24T12:00:00Z',
+            'shift': {
+              'id': 'shift-expired',
+              'role': 'Turno vencido',
+              'businessName': 'Empresa de prueba',
+              'dateLabel': 'Lun 24 ago · 10:00 – 12:00',
+              'workerPayCents': 10000,
+              'status': 'ASSIGNED',
+              'industry': 'EVENTS',
+              'urgent': false,
+              'location': 'Lima',
+              'endsAt': pastEndsAt,
+            },
+            'assignment': {
+              'id': 'assignment-expired',
+              'status': 'ASSIGNED',
+              'checkInCredential': 'CUMPLE-TEST',
+              'workerConfirmedAt': '2026-08-24T10:30:00Z',
+              'checkedInAt': null,
+              'checkedOutAt': null,
+            },
+          },
+        ],
+        '/api/shifts': [],
+      });
+      final repository = HttpWorkerMarketplaceRepository(
+        client: client,
+        baseUri: Uri.parse('http://localhost:4000/api'),
+      );
+
+      final states = await repository.applicationStates();
+      final shifts = await repository.availableShifts();
+
+      // Nunca transiciona automáticamente por tiempo del lado del servidor,
+      // así que sin este chequeo el cliente seguiría ofreciendo indefinidamente
+      // "Confirmar asistencia"/"Confirmar llegada" sobre un turno que ya
+      // venció (ver CN-20260916-099 ALTO-1).
+      expect(states['shift-expired'], ApplicationState.closed);
+      expect(shifts, isEmpty);
+    },
+  );
+
+  test(
+    'HTTP repository keeps a checked-in assignment actionable past its endsAt',
+    () async {
+      final pastEndsAt = DateTime.now()
+          .subtract(const Duration(hours: 2))
+          .toIso8601String();
+      final client = _JsonClient({
+        '/api/workers/applications': [
+          {
+            'id': 'application-in-progress',
+            'shiftId': 'shift-in-progress',
+            'status': 'ACCEPTED',
+            'createdAt': '2026-08-24T10:00:00Z',
+            'updatedAt': '2026-08-24T12:00:00Z',
+            'shift': {
+              'id': 'shift-in-progress',
+              'role': 'Turno en curso',
+              'businessName': 'Empresa de prueba',
+              'dateLabel': 'Lun 24 ago · 10:00 – 12:00',
+              'workerPayCents': 10000,
+              'status': 'CHECKED_IN',
+              'industry': 'EVENTS',
+              'urgent': false,
+              'location': 'Lima',
+              'endsAt': pastEndsAt,
+            },
+            'assignment': {
+              'id': 'assignment-in-progress',
+              'status': 'ASSIGNED',
+              'checkInCredential': 'CUMPLE-TEST',
+              'workerConfirmedAt': '2026-08-24T10:30:00Z',
+              'checkedInAt': '2026-08-24T11:00:00Z',
+              'checkedOutAt': null,
+            },
+          },
+        ],
+        '/api/shifts': [],
+      });
+      final repository = HttpWorkerMarketplaceRepository(
+        client: client,
+        baseUri: Uri.parse('http://localhost:4000/api'),
+      );
+
+      final states = await repository.applicationStates();
+      final shifts = await repository.availableShifts();
+
+      // `checkOut` no tiene ventana de tiempo propia: un trabajador que ya
+      // hizo check-in debe poder seguir registrando su salida aunque el
+      // turno ya haya llegado a su `endsAt` nominal.
+      expect(states['shift-in-progress'], ApplicationState.accepted);
+      expect(shifts.single.id, 'shift-in-progress');
+      expect(shifts.single.checkedIn, isTrue);
+    },
+  );
 }
 
 class _SseClient extends http.BaseClient {

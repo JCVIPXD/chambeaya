@@ -1,28 +1,28 @@
-# Plan de mejora progresiva de Cumple Now
+# Plan de mejora progresiva de Chambeaya
 
 Actualizado: 24 de agosto de 2026
 
 ## Propósito
 
-Este documento convierte el análisis estratégico, funcional y regulatorio de Cumple Now en una ruta incremental de producto.
+Este documento convierte el análisis estratégico, funcional y regulatorio de Chambeaya en una ruta incremental de producto.
 
 El objetivo no es construir de inmediato una plataforma financiera, una empresa de intermediación laboral o una integración completa con entidades públicas. El objetivo inmediato es llegar primero a un **piloto profesional**, estable y medible, agregando complejidad únicamente cuando el uso real la justifique.
 
 ## Decisión de producto
 
-Cumple Now evolucionará como una plataforma B2B para cubrir y administrar turnos de trabajo temporales. Su valor principal será ayudar a que un turno pase de necesidad empresarial a trabajo efectivamente cubierto, completado y registrado.
+Chambeaya evolucionará como una plataforma B2B para cubrir y administrar turnos de trabajo temporales. Su valor principal será ayudar a que un turno pase de necesidad empresarial a trabajo efectivamente cubierto, completado y registrado.
 
 La primera versión profesional funcionará como plataforma tecnológica:
 
 - la empresa publica y administra sus necesidades;
 - el trabajador encuentra oportunidades y se postula;
 - la empresa selecciona y coordina;
-- Cumple Now registra el estado y la evidencia operativa;
+- Chambeaya registra el estado y la evidencia operativa;
 - la empresa conserva la responsabilidad de definir y formalizar la relación correspondiente mientras no exista una estructura legal distinta aprobada.
 
 No se cobrará al trabajador por acceder a oportunidades. La monetización futura se orientará a la empresa.
 
-El acceso también seguirá este principio: el trabajador puede crear su cuenta desde la app; la empresa no se auto-registra. Las cuentas empresariales serán revisadas y habilitadas directamente por Cumple Now, manteniendo un único inicio de sesión y reduciendo cuentas falsas durante la etapa inicial.
+El acceso también seguirá este principio: el trabajador puede crear su cuenta desde la app; la empresa no se auto-registra. Las cuentas empresariales serán revisadas y habilitadas directamente por Chambeaya, manteniendo un único inicio de sesión y reduciendo cuentas falsas durante la etapa inicial.
 
 ## Principios para avanzar
 
@@ -59,7 +59,7 @@ El acceso también seguirá este principio: el trabajador puede crear su cuenta 
 
 ### Estándar mínimo de una publicación profesional
 
-Tomando como referencia los patrones públicos de Computrabajo —búsqueda por cargo y ubicación, filtros, favoritos/alertas, CV y seguimiento de postulaciones para trabajadores; y publicación guiada, requerimientos, preguntas de filtro y gestión de candidatos para empresas— la publicación de Cumple Now debe ser útil por sí sola antes de pedir una postulación.
+Tomando como referencia los patrones públicos de Computrabajo —búsqueda por cargo y ubicación, filtros, favoritos/alertas, CV y seguimiento de postulaciones para trabajadores; y publicación guiada, requerimientos, preguntas de filtro y gestión de candidatos para empresas— la publicación de Chambeaya debe ser útil por sí sola antes de pedir una postulación.
 
 Desde esta iteración cada turno puede guardar y mostrar:
 
@@ -218,7 +218,7 @@ La membresía se diseñará desde ahora, pero se activará comercialmente despu�
 
 Primera propuesta concreta:
 
-- `PILOTO`: empresas habilitadas manualmente por Cumple Now, sin cobro automático, con límites operativos configurables.
+- `PILOTO`: empresas habilitadas manualmente por Chambeaya, sin cobro automático, con límites operativos configurables.
 - `EMPRESA PRO`: plan mensual para empresas con operación recurrente, que incluirá gestión avanzada de turnos, selección de postulantes, métricas y soporte prioritario.
 - `EMPRESA CUSTOM`: plan negociado para cadenas o empresas con varias sedes, únicamente cuando exista demanda real.
 
@@ -250,7 +250,7 @@ Hipótesis iniciales para validar:
 - plan empresarial posterior para sedes, equipos, analítica e integraciones;
 - ninguna comisión oculta al trabajador.
 
-Los rangos son hipótesis comerciales, no precios definitivos. Si Cumple Now asume planilla, seguros, reemplazos o la condición de empleador, deberá construirse una estructura de costos diferente.
+Los rangos son hipótesis comerciales, no precios definitivos. Si Chambeaya asume planilla, seguros, reemplazos o la condición de empleador, deberá construirse una estructura de costos diferente.
 
 ### Fase 6 — Pagos y cumplimiento tributario controlados
 
@@ -259,12 +259,12 @@ Esta fase requiere validación legal, laboral y tributaria previa.
 - Elegir un proveedor de servicios de pago regulado.
 - Implementar autorización, cobro, devolución y payout en sandbox.
 - Mantener conciliación entre proveedor, ledger interno y banco.
-- Facturar el servicio de Cumple Now con el tratamiento tributario aplicable.
+- Facturar el servicio de Chambeaya con el tratamiento tributario aplicable.
 - Añadir flujo de RHE y retención solo para servicios realmente independientes.
 - Añadir el flujo de planilla mediante la empresa o un aliado autorizado cuando exista subordinación.
 - Incorporar disputas y reversos antes de habilitar producción.
 
-Cumple Now no custodiará fondos directamente salvo que una evaluación regulatoria posterior lo autorice y justifique.
+Chambeaya no custodiará fondos directamente salvo que una evaluación regulatoria posterior lo autorice y justifique.
 
 ### Fase 7 — Operación y plataforma de producción
 
@@ -351,7 +351,7 @@ Estas entidades forman parte del diseño futuro, pero no todas requieren integra
 - Reconocimiento facial o huella digital propia.
 - Seguimiento permanente por GPS.
 - Matching complejo con inteligencia artificial.
-- Nómina propia de Cumple Now.
+- Nómina propia de Chambeaya.
 - Intermediación laboral sin autorización y estructura definidas.
 - Integración automática con todas las entidades públicas.
 - Expansión nacional antes de conseguir liquidez local.

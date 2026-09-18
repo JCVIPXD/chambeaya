@@ -33,7 +33,7 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm exec --workspace=@cumple-now/web -- playwright install --with-deps chromium
+      - run: npm exec --workspace=@chambeaya/web -- playwright install --with-deps chromium
       - run: npm run test:web
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
@@ -51,19 +51,19 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: cumplenow
-          POSTGRES_PASSWORD: cumplenow_test
-          POSTGRES_DB: cumplenow_test
+          POSTGRES_USER: chambeaya
+          POSTGRES_PASSWORD: chambeaya_test
+          POSTGRES_DB: chambeaya_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U cumplenow -d cumplenow_test"
+          --health-cmd "pg_isready -U chambeaya -d chambeaya_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      CUMPLENOW_INTEGRATION_TESTS: 'true'
-      DATABASE_URL: postgresql://cumplenow:cumplenow_test@127.0.0.1:5432/cumplenow_test?schema=public
+      CHAMBEAYA_INTEGRATION_TESTS: 'true'
+      DATABASE_URL: postgresql://chambeaya:chambeaya_test@127.0.0.1:5432/chambeaya_test?schema=public
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -71,5 +71,5 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm exec --workspace=@cumple-now/api -- prisma migrate deploy
-      - run: npm run test:integration --workspace=@cumple-now/api
+      - run: npm exec --workspace=@chambeaya/api -- prisma migrate deploy
+      - run: npm run test:integration --workspace=@chambeaya/api

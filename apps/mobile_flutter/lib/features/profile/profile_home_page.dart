@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 
 import '../../theme/app_theme.dart';
+import '../../theme/theme_mode_controller.dart';
 import 'talent_profile_repository.dart';
 
 class ProfileHomePage extends StatefulWidget {
@@ -11,12 +12,18 @@ class ProfileHomePage extends StatefulWidget {
     required this.talentProfileRepository,
     this.showNavigation = true,
     this.onLogout,
+    this.themeModeController,
     super.key,
   });
 
   final TalentProfileRepository talentProfileRepository;
   final bool showNavigation;
   final VoidCallback? onLogout;
+
+  /// Optional: when provided, this page shows a "Modo oscuro" toggle bound
+  /// to it. Widget tests that build `ProfileHomePage` directly can omit it,
+  /// in which case the toggle is not rendered (matching prior behavior).
+  final ThemeModeController? themeModeController;
 
   @override
   State<ProfileHomePage> createState() => _ProfileHomePageState();
@@ -176,6 +183,7 @@ class _ProfileHomePageState extends State<ProfileHomePage> {
           return _ProfileContent(
             data: data,
             onLogout: widget.onLogout,
+            themeModeController: widget.themeModeController,
             uploadingCv: _uploadingCv,
             onUploadCv: () => _uploadCv(data),
             uploadingPhoto: _uploadingPhoto,
@@ -230,10 +238,10 @@ class _ProfileFailure extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(
+          Icon(
             Icons.cloud_off_outlined,
             size: 42,
-            color: AppColors.muted,
+            color: context.palette.muted,
           ),
           const SizedBox(height: 12),
           Text(
@@ -262,6 +270,7 @@ class _ProfileContent extends StatelessWidget {
     required this.onUploadPhoto,
     required this.uploadingPhoto,
     this.onLogout,
+    this.themeModeController,
   });
   final _ProfileScreenData data;
   final VoidCallback onEdit;
@@ -270,6 +279,7 @@ class _ProfileContent extends StatelessWidget {
   final VoidCallback onUploadPhoto;
   final bool uploadingPhoto;
   final VoidCallback? onLogout;
+  final ThemeModeController? themeModeController;
 
   @override
   Widget build(BuildContext context) => CustomScrollView(
@@ -325,6 +335,10 @@ class _ProfileContent extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _TopBar(onLogout: onLogout),
+                      if (themeModeController != null) ...[
+                        const SizedBox(height: 14),
+                        _AppearanceCard(controller: themeModeController!),
+                      ],
                       const SizedBox(height: 18),
                       _ProfileHero(
                         profile: profile,
@@ -426,22 +440,22 @@ class _TopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      const Expanded(
+      Expanded(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               'Mi perfil',
               style: TextStyle(
-                color: AppColors.navy,
+                color: context.palette.ink,
                 fontSize: 24,
                 fontWeight: FontWeight.w900,
               ),
             ),
-            SizedBox(height: 3),
+            const SizedBox(height: 3),
             Text(
               'Tu carta de presentación para nuevos turnos.',
-              style: TextStyle(color: AppColors.muted),
+              style: TextStyle(color: context.palette.muted),
             ),
           ],
         ),
@@ -449,9 +463,84 @@ class _TopBar extends StatelessWidget {
       IconButton(
         tooltip: 'Cerrar sesión',
         onPressed: onLogout,
-        icon: const Icon(Icons.logout_rounded, color: AppColors.muted),
+        icon: Icon(Icons.logout_rounded, color: context.palette.muted),
       ),
     ],
+  );
+}
+
+/// Lets the worker switch the app's appearance between light and dark mode.
+/// Only rendered when a [ThemeModeController] is supplied (i.e. inside the
+/// real `WorkerShell`, not in widget tests that build `ProfileHomePage` in
+/// isolation), so it never touches the app's `MaterialApp` on its own: it
+/// only flips the controller's value, which `WorkerShell`'s own
+/// `AnimatedBuilder` listens to and applies locally via `AnimatedTheme`
+/// (`ChambeayaApp`'s `MaterialApp` keeps a constant light `theme`).
+class _AppearanceCard extends StatelessWidget {
+  const _AppearanceCard({required this.controller});
+  final ThemeModeController controller;
+
+  Future<void> _setDark(BuildContext context, bool value) async {
+    try {
+      await controller.setDark(value);
+    } catch (_) {
+      // Same reasoning as `_loadThemeMode` in `main.dart`: a `SharedPreferences`
+      // failure must not surface as an uncaught async error. The switch
+      // already reflects `controller.value` optimistically (set
+      // synchronously before the write, via `ListenableBuilder` above), so
+      // only the persisted preference may lag until the worker retries.
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No pudimos guardar tu preferencia de apariencia.'),
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: controller,
+    builder: (context, _) {
+      final dark = controller.resolveIsDark(
+        MediaQuery.platformBrightnessOf(context),
+      );
+      return Card(
+        clipBehavior: Clip.antiAlias,
+        child: SwitchListTile.adaptive(
+          value: dark,
+          onChanged: (value) => _setDark(context, value),
+          secondary: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            transitionBuilder: (child, animation) => RotationTransition(
+              turns: Tween<double>(begin: .75, end: 1).animate(animation),
+              child: FadeTransition(opacity: animation, child: child),
+            ),
+            child: Container(
+              key: ValueKey(dark),
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: context.palette.accentSoft,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                dark ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
+                color: AppColors.tealDark,
+              ),
+            ),
+          ),
+          title: const Text('Modo oscuro'),
+          subtitle: Text(
+            dark
+                ? 'Activado para todo tu panel de trabajador.'
+                : 'Actívalo si prefieres una vista con menos brillo.',
+          ),
+        ),
+      );
+    },
   );
 }
 
@@ -714,7 +803,7 @@ class _ProfileCard extends StatelessWidget {
                 width: 38,
                 height: 38,
                 decoration: BoxDecoration(
-                  color: AppColors.tealSoft,
+                  color: context.palette.accentSoft,
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(icon, color: AppColors.tealDark),
@@ -755,7 +844,7 @@ class _EmptyProfileDetail extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Icon(icon, size: 19, color: AppColors.muted),
+      Icon(icon, size: 19, color: context.palette.muted),
       const SizedBox(width: 9),
       Expanded(
         child: Text(text, style: Theme.of(context).textTheme.bodyMedium),
@@ -783,14 +872,16 @@ class _VisibilityDetail extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
           color: profile.isVisible
-              ? AppColors.tealSoft
-              : AppColors.surfaceMuted,
+              ? context.palette.accentSoft
+              : context.palette.surfaceMuted,
           borderRadius: BorderRadius.circular(9),
         ),
         child: Text(
           profile.isVisible ? 'Visible para empresas' : 'Solo visible para ti',
           style: TextStyle(
-            color: profile.isVisible ? AppColors.tealDark : AppColors.muted,
+            color: profile.isVisible
+                ? AppColors.tealDark
+                : context.palette.muted,
             fontWeight: FontWeight.w800,
             fontSize: 12,
           ),
@@ -811,7 +902,9 @@ class _SectionVisibilityBadge extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
     decoration: BoxDecoration(
-      color: visible ? AppColors.tealSoft : AppColors.surfaceMuted,
+      color: visible
+          ? context.palette.accentSoft
+          : context.palette.surfaceMuted,
       borderRadius: BorderRadius.circular(9),
     ),
     child: Text(
@@ -819,7 +912,7 @@ class _SectionVisibilityBadge extends StatelessWidget {
           ? 'Visible en tu tarjeta pública'
           : 'Oculta de tu tarjeta pública',
       style: TextStyle(
-        color: visible ? AppColors.tealDark : AppColors.muted,
+        color: visible ? AppColors.tealDark : context.palette.muted,
         fontWeight: FontWeight.w800,
         fontSize: 11,
       ),
@@ -853,7 +946,9 @@ class _WorkAreaDetail extends StatelessWidget {
             children: [
               if (profile.workRadiusKm != null)
                 Chip(label: Text('Radio: ${profile.workRadiusKm} km')),
-              ...profile.workDistricts.map((district) => Chip(label: Text(district))),
+              ...profile.workDistricts.map(
+                (district) => Chip(label: Text(district)),
+              ),
             ],
           ),
       ],
@@ -905,7 +1000,7 @@ class _ExperienceReadTile extends StatelessWidget {
       const SizedBox(height: 3),
       Text(
         _dateRangeLabel(experience.startDate, experience.endDate),
-        style: const TextStyle(color: AppColors.muted, fontSize: 12),
+        style: TextStyle(color: context.palette.muted, fontSize: 12),
       ),
       if (experience.description?.isNotEmpty == true) ...[
         const SizedBox(height: 6),
@@ -971,7 +1066,7 @@ class _CertificationReadTile extends StatelessWidget {
           const SizedBox(height: 3),
           Text(
             subtitleParts.join(' · '),
-            style: const TextStyle(color: AppColors.muted, fontSize: 12),
+            style: TextStyle(color: context.palette.muted, fontSize: 12),
           ),
         ],
       ],
@@ -1019,19 +1114,27 @@ class _PrivacyNote extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.all(16),
     decoration: BoxDecoration(
-      color: AppColors.surfaceMuted,
+      color: context.palette.surfaceMuted,
       borderRadius: BorderRadius.circular(15),
-      border: Border.all(color: AppColors.border),
+      border: Border.all(color: context.palette.border),
     ),
-    child: const Row(
+    child: Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(Icons.lock_outline_rounded, color: AppColors.muted, size: 19),
-        SizedBox(width: 10),
+        Icon(
+          Icons.lock_outline_rounded,
+          color: context.palette.muted,
+          size: 19,
+        ),
+        const SizedBox(width: 10),
         Expanded(
           child: Text(
             'Tu CV se guarda en almacenamiento privado y nunca se muestra en el directorio empresarial.',
-            style: TextStyle(color: AppColors.muted, fontSize: 12, height: 1.4),
+            style: TextStyle(
+              color: context.palette.muted,
+              fontSize: 12,
+              height: 1.4,
+            ),
           ),
         ),
       ],
@@ -1213,7 +1316,8 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       radius = int.tryParse(radiusText);
       if (radius == null || radius < 1 || radius > 200) {
         setState(
-          () => _error = 'El radio de trabajo debe ser un número entre 1 y 200 km.',
+          () => _error =
+              'El radio de trabajo debe ser un número entre 1 y 200 km.',
         );
         return;
       }
@@ -1257,8 +1361,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
   Future<void> _addOrEditExperience({int? index}) async {
     final draft = await showDialog<WorkExperienceDraft>(
       context: context,
-      builder: (_) =>
-          _ExperienceEditorDialog(initial: index == null ? null : _experiences[index]),
+      builder: (_) => _ExperienceEditorDialog(
+        initial: index == null ? null : _experiences[index],
+      ),
     );
     if (draft == null || !mounted) return;
     setState(() {
@@ -1327,9 +1432,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 4),
-            const Text(
+            Text(
               'Solo comparte información que ayude a encontrar turnos adecuados.',
-              style: TextStyle(color: AppColors.muted),
+              style: TextStyle(color: context.palette.muted),
             ),
             const SizedBox(height: 18),
             TextField(
@@ -1416,9 +1521,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
             ),
             const SizedBox(height: 6),
             if (widget.specialties.isEmpty)
-              const Text(
+              Text(
                 'No hay especialidades disponibles para esta cuenta todavía.',
-                style: TextStyle(color: AppColors.muted),
+                style: TextStyle(color: context.palette.muted),
               )
             else
               Wrap(
@@ -1551,21 +1656,21 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
               ],
             ),
             if (_experiences.isEmpty)
-              const Text(
+              Text(
                 'Aún no agregaste experiencia laboral.',
-                style: TextStyle(color: AppColors.muted),
+                style: TextStyle(color: context.palette.muted),
               )
             else
               for (var index = 0; index < _experiences.length; index++)
                 _DraftListTile(
-                  title: '${_experiences[index].role} · ${_experiences[index].employer}',
+                  title:
+                      '${_experiences[index].role} · ${_experiences[index].employer}',
                   subtitle: _dateRangeLabel(
                     _experiences[index].startDate,
                     _experiences[index].endDate,
                   ),
                   onEdit: () => _addOrEditExperience(index: index),
-                  onDelete: () =>
-                      setState(() => _experiences.removeAt(index)),
+                  onDelete: () => setState(() => _experiences.removeAt(index)),
                 ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -1589,15 +1694,15 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
                 ),
               ],
             ),
-            const Text(
-              'Certificados que declaras tú mismo; Cumple Now no los verifica.',
-              style: TextStyle(color: AppColors.muted, fontSize: 12),
+            Text(
+              'Certificados que declaras tú mismo; Chambeaya no los verifica.',
+              style: TextStyle(color: context.palette.muted, fontSize: 12),
             ),
             const SizedBox(height: 6),
             if (_certifications.isEmpty)
-              const Text(
+              Text(
                 'Aún no agregaste certificaciones.',
-                style: TextStyle(color: AppColors.muted),
+                style: TextStyle(color: context.palette.muted),
               )
             else
               for (var index = 0; index < _certifications.length; index++)
@@ -1637,16 +1742,17 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
               ],
             ),
             if (_languages.isEmpty)
-              const Text(
+              Text(
                 'Aún no agregaste idiomas.',
-                style: TextStyle(color: AppColors.muted),
+                style: TextStyle(color: context.palette.muted),
               )
             else
               for (var index = 0; index < _languages.length; index++)
                 _DraftListTile(
                   title: _languages[index].language,
                   subtitle:
-                      _languageProficiencyLabels[_languages[index].proficiency] ??
+                      _languageProficiencyLabels[_languages[index]
+                          .proficiency] ??
                       _languages[index].proficiency,
                   onEdit: () => _addOrEditLanguage(index: index),
                   onDelete: () => setState(() => _languages.removeAt(index)),
@@ -1693,8 +1799,8 @@ class _SpecialtyDetailEditor extends StatelessWidget {
     child: Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppColors.surfaceMuted,
-        border: Border.all(color: AppColors.border),
+        color: context.palette.surfaceMuted,
+        border: Border.all(color: context.palette.border),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
@@ -1796,8 +1902,8 @@ class _DraftListTile extends StatelessWidget {
     margin: const EdgeInsets.only(bottom: 8),
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
     decoration: BoxDecoration(
-      color: AppColors.surfaceMuted,
-      border: Border.all(color: AppColors.border),
+      color: context.palette.surfaceMuted,
+      border: Border.all(color: context.palette.border),
       borderRadius: BorderRadius.circular(12),
     ),
     child: Row(
@@ -1810,7 +1916,7 @@ class _DraftListTile extends StatelessWidget {
               if (subtitle.isNotEmpty)
                 Text(
                   subtitle,
-                  style: const TextStyle(color: AppColors.muted, fontSize: 12),
+                  style: TextStyle(color: context.palette.muted, fontSize: 12),
                 ),
             ],
           ),
@@ -1897,12 +2003,17 @@ class _ExperienceEditorDialogState extends State<_ExperienceEditorDialog> {
       return;
     }
     if (!_current && _endDate == null) {
-      setState(() => _error = 'Elige una fecha de fin o marca "Trabajo aquí actualmente".');
+      setState(
+        () => _error =
+            'Elige una fecha de fin o marca "Trabajo aquí actualmente".',
+      );
       return;
     }
     final endDate = _current ? null : _endDate;
     if (endDate != null && _startDate!.isAfter(endDate)) {
-      setState(() => _error = 'La fecha de inicio no puede ser posterior a la de fin.');
+      setState(
+        () => _error = 'La fecha de inicio no puede ser posterior a la de fin.',
+      );
       return;
     }
     Navigator.pop(
@@ -1941,7 +2052,9 @@ class _ExperienceEditorDialogState extends State<_ExperienceEditorDialog> {
             controller: _description,
             maxLength: 800,
             maxLines: 3,
-            decoration: const InputDecoration(labelText: 'Descripción (opcional)'),
+            decoration: const InputDecoration(
+              labelText: 'Descripción (opcional)',
+            ),
           ),
           const SizedBox(height: 10),
           OutlinedButton(
@@ -2126,10 +2239,7 @@ class _CertificationEditorDialogState
 }
 
 class _LanguageEditorDialog extends StatefulWidget {
-  const _LanguageEditorDialog({
-    this.initial,
-    required this.existingLanguages,
-  });
+  const _LanguageEditorDialog({this.initial, required this.existingLanguages});
   final LanguageDraft? initial;
   final List<String> existingLanguages;
 
@@ -2184,8 +2294,10 @@ class _LanguageEditorDialogState extends State<_LanguageEditorDialog> {
           decoration: const InputDecoration(labelText: 'Nivel'),
           items: _languageProficiencyLabels.entries
               .map(
-                (entry) =>
-                    DropdownMenuItem(value: entry.key, child: Text(entry.value)),
+                (entry) => DropdownMenuItem(
+                  value: entry.key,
+                  child: Text(entry.value),
+                ),
               )
               .toList(),
           onChanged: (value) {
@@ -2257,8 +2369,7 @@ const _monthAbbreviations = [
 String _formatMonthYear(DateTime date) =>
     '${_monthAbbreviations[date.month - 1]} ${date.year}';
 
-String _dateRangeLabel(DateTime startDate, DateTime? endDate) =>
-    endDate == null
+String _dateRangeLabel(DateTime startDate, DateTime? endDate) => endDate == null
     ? 'Desde ${_formatMonthYear(startDate)} · Actualidad'
     : '${_formatMonthYear(startDate)} – ${_formatMonthYear(endDate)}';
 

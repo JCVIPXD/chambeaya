@@ -7,6 +7,16 @@ import type { BusinessOperations } from '../src/modules/business/business.servic
 import { withSerializableRetry } from '../src/modules/business/business.service.js';
 import { MarketplaceShiftEvents } from '../src/modules/marketplace/marketplace.events.js';
 
+// Los turnos de prueba deben quedar siempre en el futuro relativo al reloj
+// real: una fecha fija (p. ej. '2026-08-23') pasa a estar en el pasado tarde o
+// temprano y empieza a chocar con la validación de "el turno no puede
+// crearse/guardarse ya vencido" sin que el escenario probado tenga relación
+// alguna con esa regla.
+const HOUR_MS = 60 * 60 * 1000;
+function futureIso(hoursFromNow: number) {
+  return new Date(Date.now() + hoursFromNow * HOUR_MS).toISOString();
+}
+
 async function businessContext(
   overrides: Partial<BusinessOperations> = {},
   marketplaceEvents?: MarketplaceShiftEvents,
@@ -56,8 +66,8 @@ describe('business CRUD routes', () => {
     const deleteShift = vi.fn(async () => undefined);
     const { app, authorization } = await businessContext({ createShift, updateShift, deleteShift });
     const valid = {
-      title: 'Mozo de salón', location: 'Miraflores', startsAt: '2026-08-23T18:00:00.000Z',
-      endsAt: '2026-08-24T00:00:00.000Z', payCents: 10000, requiredWorkers: 2,
+      title: 'Mozo de salón', location: 'Miraflores', startsAt: futureIso(48),
+      endsAt: futureIso(54), payCents: 10000, requiredWorkers: 2,
       description: 'Apoya al equipo de salón durante el servicio.',
       responsibilities: 'Preparar el salón y atender mesas.',
       requirements: 'Experiencia en atención al cliente.',
@@ -66,8 +76,25 @@ describe('business CRUD routes', () => {
     };
 
     expect((await request(app).post('/api/business/shifts').set('Authorization', authorization).send(valid)).status).toBe(201);
-    expect((await request(app).post('/api/business/shifts').set('Authorization', authorization).send({ ...valid, endsAt: valid.startsAt })).status).toBe(400);
+
+    // El código de negocio real -no una violación de esquema genérica- debe
+    // viajar directo en el campo `error`, para que un cliente (web/Flutter)
+    // pueda distinguir "fechas invertidas" de "ya venció" de cualquier otro
+    // dato inválido. Ver CN-20260916-099 MEDIO-1.
+    const invalidRange = await request(app).post('/api/business/shifts').set('Authorization', authorization).send({ ...valid, endsAt: valid.startsAt });
+    expect(invalidRange.status).toBe(400);
+    expect(invalidRange.body).toEqual({ error: 'INVALID_DATE_RANGE' });
+
+    const alreadyEnded = await request(app).post('/api/business/shifts').set('Authorization', authorization).send({ ...valid, startsAt: futureIso(-54), endsAt: futureIso(-48) });
+    expect(alreadyEnded.status).toBe(400);
+    expect(alreadyEnded.body).toEqual({ error: 'SHIFT_ALREADY_ENDED' });
+
     expect((await request(app).patch('/api/business/shifts/shift-1').set('Authorization', authorization).send({ rescueActive: true })).status).toBe(200);
+
+    const updateEnded = await request(app).patch('/api/business/shifts/shift-1').set('Authorization', authorization).send({ endsAt: futureIso(-1) });
+    expect(updateEnded.status).toBe(400);
+    expect(updateEnded.body).toEqual({ error: 'SHIFT_ALREADY_ENDED' });
+
     expect((await request(app).patch('/api/business/shifts/shift-1').set('Authorization', authorization).send({ status: 'COMPLETED' })).status).toBe(400);
     expect((await request(app).delete('/api/business/shifts/shift-1').set('Authorization', authorization)).status).toBe(204);
     expect(createShift).toHaveBeenCalledOnce();
@@ -80,8 +107,8 @@ describe('business CRUD routes', () => {
     const createShift = vi.fn(async (_session, input) => ({ id: 'shift-screening', ...input }));
     const { app, authorization } = await businessContext({ createShift });
     const base = {
-      title: 'Anfitrión de evento', location: 'Barranco', startsAt: '2026-08-24T18:00:00.000Z',
-      endsAt: '2026-08-25T00:00:00.000Z', payCents: 12000, requiredWorkers: 2,
+      title: 'Anfitrión de evento', location: 'Barranco', startsAt: futureIso(48),
+      endsAt: futureIso(54), payCents: 12000, requiredWorkers: 2,
     };
     const response = await request(app).post('/api/business/shifts').set('Authorization', authorization).send({
       ...base,
@@ -95,7 +122,7 @@ describe('business CRUD routes', () => {
     const createShift = vi.fn(async (_session, input) => ({ id: 'shift-quality', ...input }));
     const { app, authorization } = await businessContext({ createShift });
     const response = await request(app).post('/api/business/shifts').set('Authorization', authorization).send({
-      title: 'Mozo', location: 'Lima', startsAt: '2026-08-23T18:00:00.000Z', endsAt: '2026-08-24T00:00:00.000Z',
+      title: 'Mozo', location: 'Lima', startsAt: futureIso(48), endsAt: futureIso(54),
       payCents: 10000, requiredWorkers: 1, description: 'corto', responsibilities: 'ok', requirements: 'ok', modality: 'PRESENCIAL',
     });
     expect(response.status).toBe(400);
@@ -114,8 +141,8 @@ describe('business CRUD routes', () => {
       events,
     );
     const valid = {
-      title: 'Anfitrión de evento', location: 'Barranco', startsAt: '2026-08-24T18:00:00.000Z',
-      endsAt: '2026-08-25T00:00:00.000Z', payCents: 12000, requiredWorkers: 2,
+      title: 'Anfitrión de evento', location: 'Barranco', startsAt: futureIso(48),
+      endsAt: futureIso(54), payCents: 12000, requiredWorkers: 2,
     };
 
     await request(app).post('/api/business/shifts').set('Authorization', authorization).send(valid);

@@ -1,7 +1,7 @@
 import 'dart:ui' as ui;
 
-import 'package:cumple_now_mobile/features/discovery/worker_discovery_page.dart';
-import 'package:cumple_now_mobile/features/marketplace/marketplace_repository.dart';
+import 'package:chambeaya_mobile/features/discovery/worker_discovery_page.dart';
+import 'package:chambeaya_mobile/features/marketplace/marketplace_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

@@ -2,9 +2,9 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-cumplenow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cumplenow_dev}
-      POSTGRES_DB: ${POSTGRES_DB:-cumplenow}
+      POSTGRES_USER: ${POSTGRES_USER:-chambeaya}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chambeaya_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-chambeaya}
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
@@ -20,7 +20,7 @@ services:
       context: .
       dockerfile: apps/api/Dockerfile.dev
     environment:
-      DATABASE_URL: postgresql://cumplenow:cumplenow_dev@db:5432/cumplenow?schema=public
+      DATABASE_URL: ${DATABASE_URL}
       API_PORT: 4000
       NODE_ENV: development
       DOCUMENT_STORAGE_ROOT: ${DOCUMENT_STORAGE_ROOT:-/workspace/private-documents}
@@ -70,6 +70,6 @@ services:
 
 volumes:
   postgres-data:
-    name: cumplenow-stable-postgres-data
+    name: chambeaya-stable-postgres-data
   private-documents:
-    name: cumplenow-private-documents
+    name: chambeaya-private-documents

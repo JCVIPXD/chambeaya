@@ -109,12 +109,50 @@ class DiscoveryController extends ChangeNotifier {
     try {
       await repository?.applyToShift(id, answers: answers);
       onApplicationChanged?.call();
-    } catch (_) {
-      _replace(
-        applicationStates: previous,
-        errorMessage: 'No pudimos enviar la postulación. Inténtalo otra vez.',
-      );
+    } catch (error) {
+      // Un turno puede vencer (o llenarse) entre que el trabajador lo vio en
+      // la lista y tocó "Postular ahora": el feed en vivo solo se refresca
+      // por evento o cada cierto intervalo, nunca al instante. Si el
+      // servidor confirma que el turno ya no existe/está disponible, no basta
+      // con revertir el estado optimista a "no aplicado": eso dejaba la
+      // tarjeta como si nada hubiera pasado, invitando a reintentar contra un
+      // turno que el servidor siempre va a rechazar. En ese caso se retira la
+      // tarjeta de la lista visible y se explica por qué; para cualquier
+      // otro error (p. ej. de red) se conserva el comportamiento previo:
+      // revertir y permitir reintentar.
+      if (error is MarketplaceApiException && error.isShiftGone) {
+        _removeUnavailableShift(id, previous);
+      } else {
+        _replace(
+          applicationStates: previous,
+          errorMessage:
+              'No pudimos enviar la postulación. Inténtalo otra vez.',
+        );
+      }
     }
+  }
+
+  void _removeUnavailableShift(
+    String id,
+    Map<String, ApplicationState> previousApplicationStates,
+  ) {
+    final remainingShifts = _shifts
+        .where((shift) => shift.id != id)
+        .toList(growable: false);
+    _shifts = List.unmodifiable(remainingShifts);
+    final remainingStates = Map<String, ApplicationState>.from(
+      previousApplicationStates,
+    )..remove(id);
+    final selectedId = _state.selectedShiftId;
+    _replace(
+      applicationStates: remainingStates,
+      selectedShiftId: selectedId == id
+          ? remainingShifts.firstOrNull?.id
+          : selectedId,
+      replaceSelectedShiftId: true,
+      errorMessage:
+          'Este turno ya no está disponible: venció o ya fue cubierto. Actualizamos la lista.',
+    );
   }
 
   ShiftSearchFilter _filter({

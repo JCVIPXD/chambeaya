@@ -24,7 +24,7 @@ import {
   type AdminWorker,
 } from "../../lib/admin-api";
 
-const key = "cumplenow_admin_session";
+const key = "chambeaya_admin_session";
 export default function AdminPage() {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [restoringSession, setRestoringSession] = useState(true);
@@ -62,7 +62,7 @@ export default function AdminPage() {
           <div className="admin-mark">
             <Shield size={22} />
           </div>
-          <p className="eyebrow">CUMPLE NOW · CONTROL CENTRAL</p>
+          <p className="eyebrow">CHAMBEAYA · CONTROL CENTRAL</p>
           <h1>Acceso superadmin</h1>
           <p>
             Administra empresas, trabajadores e incidencias desde una sola
@@ -399,7 +399,7 @@ function AdminWorkspace({
     <main className="admin-shell">
       <header className="admin-topbar">
         <div>
-          <p className="eyebrow">CUMPLE NOW · SUPERADMIN</p>
+          <p className="eyebrow">CHAMBEAYA · SUPERADMIN</p>
           <h1>Centro de control</h1>
         </div>
         <div className="admin-actions">

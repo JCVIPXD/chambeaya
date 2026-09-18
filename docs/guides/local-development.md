@@ -1,6 +1,6 @@
 # Desarrollo local
 
-Guía única para preparar y ejecutar Cumple Now en desarrollo: API,
+Guía única para preparar y ejecutar Chambeaya en desarrollo: API,
 PostgreSQL, panel web y aplicación Flutter.
 
 ## Requisitos previos
@@ -33,9 +33,20 @@ corriendo con reinicio automático mientras el comando siga activo:
 
 Prisma aplica las migraciones pendientes automáticamente al iniciar la API.
 
+Si ya tenías el entorno levantado antes del renombrado a Chambeaya, tu `.env`
+local sigue apuntando al usuario y la base `cumplenow`, y tus datos siguen en el
+volumen `cumplenow-stable-postgres-data`, mientras que `docker-compose.yml`
+ahora declara `chambeaya-stable-postgres-data`. El primer `docker compose up`
+tras el cambio inicializa un volumen nuevo y vacío: no se pierde nada, pero la
+base que verás estará en blanco. Para conservar los datos, respáldalos con
+`pg_dump` desde el contenedor antiguo y restáuralos en el nuevo, o vuelve a
+sembrar la demo. Alinear `POSTGRES_USER`/`POSTGRES_DB` con la marca nueva solo
+funciona sobre un volumen recién creado; sobre uno ya inicializado con el
+usuario antiguo provoca fallos de autenticación.
+
 ### CV privado y Google Sign-In
 
-El CV se conserva en el volumen privado `cumplenow-private-documents`; no se
+El CV se conserva en el volumen privado `chambeaya-private-documents`; no se
 publica desde el servidor web ni debe copiarse al repositorio. En producción,
 configura una ubicación persistente en `DOCUMENT_STORAGE_ROOT` o sustituye el
 adaptador local por almacenamiento de objetos antes de abrir el servicio al
@@ -45,7 +56,7 @@ Google permanece inactivo hasta completar `GOOGLE_OAUTH_WEB_CLIENT_ID` en
 `.env` y registrar los dominios/redirect URI en Google Cloud. La API expone
 `GET /api/auth/providers` para comprobar la activación. El primer ingreso con
 Google valida primero nombre y correo verificados; solo para una cuenta nueva
-solicita después el DNI y una contraseña exclusiva de Cumple Now, y abre el
+solicita después el DNI y una contraseña exclusiva de Chambeaya, y abre el
 perfil laboral para completar CV,
 especialidades y disponibilidad.
 
@@ -105,9 +116,9 @@ no debe usarse en produccion.
 
 | Interfaz | URL | Correo | Contrasena |
 |---|---|---|---|
-| Superadmin | `http://127.0.0.1:3000/admin` | `superadmin@cumplenow.local` | `Admin2026!` |
-| Empresa | `http://127.0.0.1:3000` | `empresa.demo@cumplenow.local` | `Demo2026!` |
-| Trabajador | `http://127.0.0.1:7357` | `trabajador.demo@cumplenow.local` | `Demo2026!` |
+| Superadmin | `http://127.0.0.1:3000/admin` | `superadmin@chambeaya.local` | `Admin2026!` |
+| Empresa | `http://127.0.0.1:3000` | `empresa.demo@chambeaya.local` | `Demo2026!` |
+| Trabajador | `http://127.0.0.1:7357` | `trabajador.demo@chambeaya.local` | `Demo2026!` |
 
 La cuenta de empresa debe entrar en el panel web y la de trabajador en Flutter.
 No son intercambiables: cada panel verifica el rol de la sesion.
@@ -130,8 +141,8 @@ docker compose down
 ### Alternativa sin Docker (solo API o solo web)
 
 ```powershell
-$env:DATABASE_URL = 'postgresql://cumplenow:cumplenow_dev@127.0.0.1:5433/cumplenow?schema=public'
-npm exec --workspace=@cumple-now/api -- prisma migrate deploy
+$env:DATABASE_URL = 'postgresql://chambeaya:chambeaya_dev@127.0.0.1:5433/chambeaya?schema=public'
+npm exec --workspace=@chambeaya/api -- prisma migrate deploy
 npm run dev:api   # API en modo watch (tsx), requiere PostgreSQL accesible
 npm run dev:web   # Next.js en modo desarrollo
 ```
@@ -142,8 +153,8 @@ las cuentas en este modo, con la API detenida o encendida, ejecuta:
 
 ```powershell
 $env:NODE_ENV = 'development'
-$env:CUMPLENOW_ALLOW_DEMO_SEED = 'true'
-npm run demo:seed --workspace=@cumple-now/api
+$env:CHAMBEAYA_ALLOW_DEMO_SEED = 'true'
+npm run demo:seed --workspace=@chambeaya/api
 ```
 
 ## Aplicación Flutter (fuera de Docker)

@@ -175,7 +175,7 @@ class _FlowGuide extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Cómo funciona CumpleNow',
+          'Cómo funciona Chambeaya',
           style: TextStyle(color: AppColors.navy, fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 12),

@@ -114,6 +114,8 @@ button { cursor: pointer; }
 .primary-button:active, .secondary-button:active { transform: scale(.98); }
 .secondary-button { border: 1px solid var(--border); background: white; color: var(--navy); }
 .secondary-button:hover { border-color: var(--teal); }
+.primary-button:disabled, .secondary-button:disabled, .row-action:disabled { cursor: not-allowed; opacity: .5; }
+.primary-button:disabled:hover, .secondary-button:disabled:hover, .row-action:disabled:hover { transform: none; box-shadow: none; }
 
 .workspace { width: min(100%, 1460px); margin: 0 auto; padding: 30px 34px 54px; animation: cn-view-in var(--motion-slow) var(--ease-out) both; }
 .welcome-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
@@ -283,6 +285,11 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 .coverage-badge { display: inline-flex; padding: 6px 8px; border-radius: 999px; background: #edf1f6; color: var(--muted); font-size: 8px; font-weight: 900; }
 .coverage-badge.complete { background: var(--teal-soft); color: var(--teal-dark); }
 .coverage-badge.urgent { background: #feecef; color: var(--danger); }
+/* Distinto de .coverage-badge (que describe cupos cubiertos): señala que el
+   turno ya pasó su `endsAt` y por lo tanto ya no acepta edición ni nuevas
+   postulaciones, aunque su `status` persistido siga en "PUBLISHED"/"ASSIGNED"
+   (no hay transición automática por tiempo). Ver CN-20260916-099 MEDIO-2. */
+.expired-badge { display: inline-flex; padding: 6px 8px; border-radius: 999px; background: #feecef; color: var(--danger); font-size: 8px; font-weight: 900; }
 .row-pay strong { font-size: 11px; }
 .row-action { width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); display: grid; place-items: center; }
 .row-action:hover { background: var(--background); color: var(--navy); }

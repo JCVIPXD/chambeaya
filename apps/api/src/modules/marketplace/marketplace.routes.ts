@@ -13,11 +13,23 @@ const screeningAnswersSchema = z.object({
   })).max(3).default([]),
 });
 
+// El feed en vivo (`/api/shifts/events`) solo reemitía una foto nueva cuando
+// una empresa publicaba/editaba/cancelaba un turno (`events.publish()` desde
+// `business.routes.ts`). El paso del tiempo por sí solo -un turno cuyo
+// `endsAt` simplemente pasó- nunca disparaba una reemisión: un trabajador
+// con la pantalla de descubrimiento abierta seguía viendo un turno vencido
+// como disponible hasta el próximo cambio ajeno o hasta que la conexión SSE
+// se cortara. Este refresco periódico complementa el refresco por evento y
+// acota esa ventana de desfase a como máximo `feedRefreshIntervalMs`.
+const DEFAULT_FEED_REFRESH_INTERVAL_MS = 60_000;
+
 export function createMarketplaceRouter(
   service: MarketplaceOperations = new DatabaseMarketplaceService(),
   events: MarketplaceShiftEvents = marketplaceShiftEvents,
   authService: AuthService = new DatabaseAuthService(),
+  options: { feedRefreshIntervalMs?: number } = {},
 ) {
+  const feedRefreshIntervalMs = options.feedRefreshIntervalMs ?? DEFAULT_FEED_REFRESH_INTERVAL_MS;
   const router = Router();
   const workerId = (value: unknown) => typeof value === 'string' && value.trim() ? value : 'worker-demo';
   const authenticatedWorkerId = async (request: import('express').Request) => {
@@ -84,8 +96,14 @@ export function createMarketplaceRouter(
     const heartbeat = setInterval(() => {
       if (!response.writableEnded) response.write(': keep-alive\n\n');
     }, 15_000);
+    // Reemite la lista incluso sin ningún cambio publicado por una empresa,
+    // para que los turnos que vencieron por el simple paso del tiempo se
+    // retiren del feed de los clientes conectados sin depender de un evento
+    // ajeno ni de que la conexión SSE se reinicie.
+    const timeRefresh = setInterval(sendSnapshot, feedRefreshIntervalMs);
     request.on('close', () => {
       clearInterval(heartbeat);
+      clearInterval(timeRefresh);
       unsubscribe();
     });
     sendSnapshot();

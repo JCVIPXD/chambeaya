@@ -295,7 +295,7 @@ class _HistoryPageState extends State<HistoryPage> {
             const SizedBox(height: 8),
             const _DisabledIntegrationNotice(
               message:
-                  'CumpleNow no administra tu dinero: la empresa te paga directamente y aquí conservamos el registro.',
+                  'Chambeaya no administra tu dinero: la empresa te paga directamente y aquí conservamos el registro.',
             ),
           ],
         );

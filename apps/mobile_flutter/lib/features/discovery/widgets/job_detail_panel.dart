@@ -25,7 +25,7 @@ class JobDetailPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final applied = applicationState != ApplicationState.notApplied;
     return ColoredBox(
-      color: AppColors.surfaceMuted,
+      color: context.palette.surfaceMuted,
       child: Column(
         children: [
           Expanded(
@@ -325,72 +325,75 @@ class _Fact extends StatelessWidget {
   final String hint;
 
   @override
-  Widget build(BuildContext context) => Container(
-    width: width,
-    constraints: const BoxConstraints(minHeight: 112),
-    padding: const EdgeInsets.all(14),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
-      borderRadius: BorderRadius.circular(17),
-      boxShadow: const [
-        BoxShadow(
-          color: AppColors.shadow,
-          blurRadius: 12,
-          offset: Offset(0, 5),
-        ),
-      ],
-    ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: AppColors.tealSoft,
-                borderRadius: BorderRadius.circular(10),
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      width: width,
+      constraints: const BoxConstraints(minHeight: 112),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: palette.surface,
+        border: Border.all(color: palette.border),
+        borderRadius: BorderRadius.circular(17),
+        boxShadow: [
+          BoxShadow(
+            color: palette.shadow,
+            blurRadius: 12,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: palette.accentSoft,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: AppColors.tealDark, size: 18),
               ),
-              child: Icon(icon, color: AppColors.tealDark, size: 18),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 2,
-                style: const TextStyle(
-                  color: AppColors.muted,
-                  fontSize: 8,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: .4,
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  style: TextStyle(
+                    color: palette.muted,
+                    fontSize: 8,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: .4,
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Text(
-          value,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: AppColors.navy,
-            fontSize: 12,
-            fontWeight: FontWeight.w900,
+            ],
           ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          hint,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: AppColors.muted, fontSize: 9),
-        ),
-      ],
-    ),
-  );
+          const SizedBox(height: 10),
+          Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: palette.ink,
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            hint,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: palette.muted, fontSize: 9),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _DetailContent extends StatelessWidget {
@@ -422,73 +425,72 @@ class _AboutCard extends StatelessWidget {
   final Shift shift;
 
   @override
-  Widget build(BuildContext context) => _SurfaceCard(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const _SectionTitle(
-          icon: Icons.description_outlined,
-          title: 'Sobre este trabajo',
-        ),
-        const SizedBox(height: 12),
-        Text(
-          shift.description?.trim().isNotEmpty == true
-              ? shift.description!.trim()
-              : 'Buscamos una persona responsable y orientada al servicio para apoyar al equipo durante este turno. El horario, las tareas y el pago ya están confirmados.',
-          style: const TextStyle(
-            color: AppColors.muted,
-            height: 1.5,
-            fontSize: 12,
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return _SurfaceCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SectionTitle(
+            icon: Icons.description_outlined,
+            title: 'Sobre este trabajo',
           ),
-        ),
-        const SizedBox(height: 17),
-        const Text(
-          'Lo que harás',
-          style: TextStyle(
-            color: AppColors.navy,
-            fontSize: 12,
-            fontWeight: FontWeight.w900,
+          const SizedBox(height: 12),
+          Text(
+            shift.description?.trim().isNotEmpty == true
+                ? shift.description!.trim()
+                : 'Buscamos una persona responsable y orientada al servicio para apoyar al equipo durante este turno. El horario, las tareas y el pago ya están confirmados.',
+            style: TextStyle(color: palette.muted, height: 1.5, fontSize: 12),
           ),
-        ),
-        const SizedBox(height: 9),
-        ..._linesOrFallback(
-          shift.responsibilities,
-          _tasksFor(shift.industry),
-        ).map((task) => _TaskRow(label: task)),
-        if (shift.requirements?.trim().isNotEmpty == true) ...[
           const SizedBox(height: 17),
-          const Text(
-            'Requisitos',
+          Text(
+            'Lo que harás',
             style: TextStyle(
-              color: AppColors.navy,
+              color: palette.ink,
               fontSize: 12,
               fontWeight: FontWeight.w900,
             ),
           ),
           const SizedBox(height: 9),
           ..._linesOrFallback(
-            shift.requirements,
-            const <String>[],
-          ).map((requirement) => _TaskRow(label: requirement)),
-        ],
-        if (shift.screeningQuestions.isNotEmpty) ...[
-          const SizedBox(height: 17),
-          const Text(
-            'Preguntas antes de postular',
-            style: TextStyle(
-              color: AppColors.navy,
-              fontSize: 12,
-              fontWeight: FontWeight.w900,
+            shift.responsibilities,
+            _tasksFor(shift.industry),
+          ).map((task) => _TaskRow(label: task)),
+          if (shift.requirements?.trim().isNotEmpty == true) ...[
+            const SizedBox(height: 17),
+            Text(
+              'Requisitos',
+              style: TextStyle(
+                color: palette.ink,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
             ),
-          ),
-          const SizedBox(height: 9),
-          ...shift.screeningQuestions.map(
-            (question) => _TaskRow(label: question),
-          ),
+            const SizedBox(height: 9),
+            ..._linesOrFallback(
+              shift.requirements,
+              const <String>[],
+            ).map((requirement) => _TaskRow(label: requirement)),
+          ],
+          if (shift.screeningQuestions.isNotEmpty) ...[
+            const SizedBox(height: 17),
+            Text(
+              'Preguntas antes de postular',
+              style: TextStyle(
+                color: palette.ink,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 9),
+            ...shift.screeningQuestions.map(
+              (question) => _TaskRow(label: question),
+            ),
+          ],
         ],
-      ],
-    ),
-  );
+      ),
+    );
+  }
 
   static List<String> _tasksFor(ShiftIndustry industry) {
     if (industry == ShiftIndustry.foodService ||
@@ -569,22 +571,25 @@ class _SurfaceCard extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(18),
-    decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
-      borderRadius: BorderRadius.circular(19),
-      boxShadow: const [
-        BoxShadow(
-          color: AppColors.shadow,
-          blurRadius: 12,
-          offset: Offset(0, 5),
-        ),
-      ],
-    ),
-    child: child,
-  );
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: palette.surface,
+        border: Border.all(color: palette.border),
+        borderRadius: BorderRadius.circular(19),
+        boxShadow: [
+          BoxShadow(
+            color: palette.shadow,
+            blurRadius: 12,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
 }
 
 class _SectionTitle extends StatelessWidget {
@@ -599,7 +604,7 @@ class _SectionTitle extends StatelessWidget {
         width: 35,
         height: 35,
         decoration: BoxDecoration(
-          color: AppColors.tealSoft,
+          color: context.palette.accentSoft,
           borderRadius: BorderRadius.circular(10),
         ),
         child: Icon(icon, color: AppColors.tealDark, size: 19),
@@ -608,8 +613,8 @@ class _SectionTitle extends StatelessWidget {
       Expanded(
         child: Text(
           title,
-          style: const TextStyle(
-            color: AppColors.navy,
+          style: TextStyle(
+            color: context.palette.ink,
             fontSize: 15,
             fontWeight: FontWeight.w900,
           ),
@@ -632,8 +637,8 @@ class _TaskRow extends StatelessWidget {
         Container(
           width: 20,
           height: 20,
-          decoration: const BoxDecoration(
-            color: AppColors.tealSoft,
+          decoration: BoxDecoration(
+            color: context.palette.accentSoft,
             shape: BoxShape.circle,
           ),
           child: const Icon(
@@ -646,8 +651,8 @@ class _TaskRow extends StatelessWidget {
         Expanded(
           child: Text(
             label,
-            style: const TextStyle(
-              color: AppColors.navy,
+            style: TextStyle(
+              color: context.palette.ink,
               fontSize: 11,
               height: 1.4,
             ),
@@ -680,8 +685,8 @@ class _TrustRow extends StatelessWidget {
           children: [
             Text(
               title,
-              style: const TextStyle(
-                color: AppColors.navy,
+              style: TextStyle(
+                color: context.palette.ink,
                 fontSize: 11,
                 fontWeight: FontWeight.w900,
               ),
@@ -689,8 +694,8 @@ class _TrustRow extends StatelessWidget {
             const SizedBox(height: 2),
             Text(
               subtitle,
-              style: const TextStyle(
-                color: AppColors.muted,
+              style: TextStyle(
+                color: context.palette.muted,
                 fontSize: 9,
                 height: 1.35,
               ),
@@ -713,22 +718,23 @@ class _ApplyBar extends StatelessWidget {
       final compact =
           constraints.maxWidth < 520 ||
           MediaQuery.textScalerOf(context).scale(1) > 1.3;
-      final message = const Column(
+      final palette = context.palette;
+      final message = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             'Postulación segura',
             style: TextStyle(
-              color: AppColors.navy,
+              color: palette.ink,
               fontSize: 11,
               fontWeight: FontWeight.w900,
             ),
           ),
-          SizedBox(height: 2),
+          const SizedBox(height: 2),
           Text(
             'Tus datos se comparten solo al postular',
             maxLines: 2,
-            style: TextStyle(color: AppColors.muted, fontSize: 9),
+            style: TextStyle(color: palette.muted, fontSize: 9),
           ),
         ],
       );
@@ -745,14 +751,14 @@ class _ApplyBar extends StatelessWidget {
       );
       return Container(
         padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          border: Border(top: BorderSide(color: AppColors.border)),
+        decoration: BoxDecoration(
+          color: palette.surface,
+          border: Border(top: BorderSide(color: palette.border)),
           boxShadow: [
             BoxShadow(
-              color: AppColors.shadow,
+              color: palette.shadow,
               blurRadius: 18,
-              offset: Offset(0, -5),
+              offset: const Offset(0, -5),
             ),
           ],
         ),

@@ -52,16 +52,16 @@ describe('CORS por entorno (resolveCorsOptions vía createApp)', () => {
 
   it('permite solo los orígenes listados en producción cuando CORS_ALLOWED_ORIGINS está definida', async () => {
     process.env.NODE_ENV = 'production';
-    process.env.CORS_ALLOWED_ORIGINS = 'https://piloto.cumplenow.pe, https://admin.cumplenow.pe';
+    process.env.CORS_ALLOWED_ORIGINS = 'https://piloto.chambeaya.pe, https://admin.chambeaya.pe';
 
     const app = createApp({ authService: new LocalAuthService() });
 
-    const allowed = await request(app).get('/api/health').set('Origin', 'https://piloto.cumplenow.pe');
+    const allowed = await request(app).get('/api/health').set('Origin', 'https://piloto.chambeaya.pe');
     expect(allowed.status).toBe(200);
-    expect(allowed.headers['access-control-allow-origin']).toBe('https://piloto.cumplenow.pe');
+    expect(allowed.headers['access-control-allow-origin']).toBe('https://piloto.chambeaya.pe');
 
-    const otherAllowed = await request(app).get('/api/health').set('Origin', 'https://admin.cumplenow.pe');
-    expect(otherAllowed.headers['access-control-allow-origin']).toBe('https://admin.cumplenow.pe');
+    const otherAllowed = await request(app).get('/api/health').set('Origin', 'https://admin.chambeaya.pe');
+    expect(otherAllowed.headers['access-control-allow-origin']).toBe('https://admin.chambeaya.pe');
 
     const rejected = await request(app).get('/api/health').set('Origin', 'https://otro-origen.example');
     expect(rejected.status).toBe(200);

@@ -184,8 +184,8 @@ class _InvitationCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 14),
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: AppColors.border),
+        color: context.palette.surface,
+        border: Border.all(color: context.palette.border),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Column(
@@ -195,7 +195,7 @@ class _InvitationCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               CircleAvatar(
-                backgroundColor: AppColors.tealSoft,
+                backgroundColor: context.palette.accentSoft,
                 child: Text(
                   invitation.companyName.isEmpty
                       ? '?'
@@ -221,8 +221,8 @@ class _InvitationCard extends StatelessWidget {
                       const SizedBox(height: 3),
                       Text(
                         shift.title,
-                        style: const TextStyle(
-                          color: AppColors.muted,
+                        style: TextStyle(
+                          color: context.palette.muted,
                           fontSize: 12,
                         ),
                       ),
@@ -253,7 +253,7 @@ class _InvitationCard extends StatelessWidget {
             // text, never interpreted as markup.
             Text(
               message,
-              style: const TextStyle(color: AppColors.navy, fontSize: 13),
+              style: TextStyle(color: context.palette.ink, fontSize: 13),
             ),
           ],
           const SizedBox(height: 10),
@@ -261,7 +261,7 @@ class _InvitationCard extends StatelessWidget {
             invitation.status == 'PENDING'
                 ? 'Vence el ${_formatDate(invitation.expiresAt)}'
                 : 'Recibida el ${_formatDate(invitation.createdAt)}',
-            style: const TextStyle(color: AppColors.muted, fontSize: 11),
+            style: TextStyle(color: context.palette.muted, fontSize: 11),
           ),
           if (onAccept != null || onDecline != null) ...[
             const SizedBox(height: 14),
@@ -309,8 +309,8 @@ class _InvitationsMessage extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.all(28),
     decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
+      color: context.palette.surface,
+      border: Border.all(color: context.palette.border),
       borderRadius: BorderRadius.circular(16),
     ),
     child: Column(
@@ -326,7 +326,7 @@ class _InvitationsMessage extends StatelessWidget {
         Text(
           message,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: AppColors.muted),
+          style: TextStyle(color: context.palette.muted),
         ),
         if (onRetry != null)
           TextButton.icon(
@@ -347,7 +347,7 @@ class _InvitationsScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: AppColors.background,
+    color: context.palette.background,
     child: SafeArea(
       child: Center(
         child: ConstrainedBox(
@@ -357,11 +357,11 @@ class _InvitationsScaffold extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  const Expanded(
+                  Expanded(
                     child: Text(
                       'Invitaciones',
                       style: TextStyle(
-                        color: AppColors.navy,
+                        color: context.palette.ink,
                         fontSize: 28,
                         fontWeight: FontWeight.w900,
                       ),
@@ -375,9 +375,9 @@ class _InvitationsScaffold extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 6),
-              const Text(
+              Text(
                 'Empresas que te invitaron directamente desde el directorio de talento',
-                style: TextStyle(color: AppColors.muted, fontSize: 14),
+                style: TextStyle(color: context.palette.muted, fontSize: 14),
               ),
               const SizedBox(height: 24),
               child,

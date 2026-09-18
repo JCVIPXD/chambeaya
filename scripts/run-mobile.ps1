@@ -24,7 +24,7 @@ if ($Device -in @('web-server', 'chrome')) {
   $flutterArgs += @('--web-hostname', 'localhost', '--web-port', $Port)
 }
 if ($Demo) {
-  $flutterArgs += '--dart-define=CUMPLENOW_DEMO_MODE=true'
+  $flutterArgs += '--dart-define=CHAMBEAYA_DEMO_MODE=true'
 } else {
   if ([string]::IsNullOrWhiteSpace($GoogleWebClientId)) {
     $environmentFile = Join-Path $PSScriptRoot '..\.env'

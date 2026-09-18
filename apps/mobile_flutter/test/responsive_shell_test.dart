@@ -1,5 +1,5 @@
-import 'package:cumple_now_mobile/core/navigation/adaptive_worker_scaffold.dart';
-import 'package:cumple_now_mobile/core/responsive/app_breakpoints.dart';
+import 'package:chambeaya_mobile/core/navigation/adaptive_worker_scaffold.dart';
+import 'package:chambeaya_mobile/core/responsive/app_breakpoints.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -57,7 +57,7 @@ void main() {
       ),
     );
 
-    expect(find.text('CUMPLE NOW'), findsOneWidget);
+    expect(find.text('CHAMBEAYA'), findsOneWidget);
     expect(find.text('Postulaciones'), findsOneWidget);
   });
 }

@@ -10,9 +10,9 @@ abstract interface class AuthSessionStore {
 }
 
 class SharedPreferencesAuthSessionStore implements AuthSessionStore {
-  static const _tokenKey = 'cumple_now.session.token';
-  static const _audienceKey = 'cumple_now.session.audience';
-  static const _nameKey = 'cumple_now.session.name';
+  static const _tokenKey = 'chambeaya.session.token';
+  static const _audienceKey = 'chambeaya.session.audience';
+  static const _nameKey = 'chambeaya.session.name';
 
   @override
   Future<AuthSession?> read() async {

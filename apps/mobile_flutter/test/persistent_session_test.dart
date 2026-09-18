@@ -1,7 +1,7 @@
-import 'package:cumple_now_mobile/features/auth/auth_session.dart';
-import 'package:cumple_now_mobile/features/auth/auth_session_store.dart';
-import 'package:cumple_now_mobile/features/onboarding/onboarding_page.dart';
-import 'package:cumple_now_mobile/main.dart';
+import 'package:chambeaya_mobile/features/auth/auth_session.dart';
+import 'package:chambeaya_mobile/features/auth/auth_session_store.dart';
+import 'package:chambeaya_mobile/features/onboarding/onboarding_page.dart';
+import 'package:chambeaya_mobile/main.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -57,7 +57,7 @@ void main() {
     );
 
     await tester.pumpWidget(
-      CumpleNowApp(sessionStore: store, demoModeOverride: true),
+      ChambeayaApp(sessionStore: store, demoModeOverride: true),
     );
     await tester.pumpAndSettle();
 

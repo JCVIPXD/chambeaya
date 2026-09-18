@@ -185,7 +185,7 @@ class HttpTalentInvitationRepository implements TalentInvitationRepository {
   }
 }
 
-/// Client-only demo repository (`CUMPLENOW_DEMO_MODE=true`, no server). It
+/// Client-only demo repository (`CHAMBEAYA_DEMO_MODE=true`, no server). It
 /// seeds a single `PENDING` invitation so the screen is not permanently
 /// empty during a walkthrough, and lets it actually be accepted or declined
 /// in memory, consistent with the rest of the demo repositories in this app.

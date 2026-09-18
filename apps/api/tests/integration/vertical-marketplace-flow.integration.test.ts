@@ -10,7 +10,7 @@ import { DatabaseMarketplaceService } from '../../src/modules/marketplace/market
 const integrationDatabaseUrl = process.env.DATABASE_URL;
 
 function requireTestDatabase() {
-  if (process.env.CUMPLENOW_INTEGRATION_TESTS !== 'true') {
+  if (process.env.CHAMBEAYA_INTEGRATION_TESTS !== 'true') {
     throw new Error('INTEGRATION_TESTS_REQUIRE_EXPLICIT_OPT_IN');
   }
   if (!integrationDatabaseUrl) throw new Error('INTEGRATION_TESTS_REQUIRE_DATABASE_URL');
@@ -47,7 +47,7 @@ describe('vertical marketplace flow with PostgreSQL', () => {
     const salt = 'integration-test-salt';
     await prisma.user.create({
       data: {
-        email: 'empresa.integration@cumplenow.test',
+        email: 'empresa.integration@chambeaya.test',
         passwordHash: hashPassword('Empresa123', salt),
         salt,
         role: 'BUSINESS',
@@ -65,7 +65,7 @@ describe('vertical marketplace flow with PostgreSQL', () => {
   it('persists publication, application, acceptance, coverage and state through real HTTP routes', async () => {
     const businessLogin = await request(app)
       .post('/api/auth/login')
-      .send({ email: 'empresa.integration@cumplenow.test', password: 'Empresa123' });
+      .send({ email: 'empresa.integration@chambeaya.test', password: 'Empresa123' });
     expect(businessLogin.status).toBe(200);
     businessToken = businessLogin.body.token;
 
@@ -74,7 +74,7 @@ describe('vertical marketplace flow with PostgreSQL', () => {
       .send({
         role: 'WORKER',
         name: 'Trabajadora de integración',
-        email: 'trabajadora.integration@cumplenow.test',
+        email: 'trabajadora.integration@chambeaya.test',
         password: 'Trabajador123',
         dniOrRuc: '12345678',
     });
@@ -121,7 +121,7 @@ describe('vertical marketplace flow with PostgreSQL', () => {
       .set('Authorization', `Bearer ${businessToken}`);
     expect(pendingForBusiness.status).toBe(200);
     expect(pendingForBusiness.body).toEqual([
-      expect.objectContaining({ id: applicationId, status: 'PENDING', worker: expect.objectContaining({ email: 'trabajadora.integration@cumplenow.test' }) }),
+      expect.objectContaining({ id: applicationId, status: 'PENDING', worker: expect.objectContaining({ email: 'trabajadora.integration@chambeaya.test' }) }),
     ]);
 
     const accepted = await request(app)

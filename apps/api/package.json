@@ -1,12 +1,12 @@
 {
-  "name": "@cumple-now/api",
+  "name": "@chambeaya/api",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration/**",
-    "test:integration": "vitest run tests/integration",
+    "test:integration": "vitest run --config vitest.integration.config.mts tests/integration",
     "demo:seed": "tsx prisma/seed.ts",
     "demo:smoke": "tsx scripts/demo-smoke.ts"
   },

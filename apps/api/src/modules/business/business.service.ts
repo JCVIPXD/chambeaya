@@ -132,7 +132,14 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async updateShift(session: AuthSession, id: string, input: Partial<ShiftInput>) {
     const shift = await this.ownedShift(session, id);
-    if (isTerminalShift(shift.status) || shift.status === 'CHECKED_IN') throw new BusinessValidationError('SHIFT_NOT_EDITABLE');
+    // Un turno cuyo `endsAt` ya pasó queda cerrado para edición aunque el
+    // estado persistido siga en 'PUBLISHED'/'ASSIGNED' (no hay transición
+    // automática por tiempo). Sin este chequeo, una empresa podía seguir
+    // editando -e incluso re-publicando con fechas nuevas- un turno que el
+    // resto del sistema ya trata como vencido.
+    if (isTerminalShift(shift.status) || shift.status === 'CHECKED_IN' || shift.endsAt <= new Date()) {
+      throw new BusinessValidationError('SHIFT_NOT_EDITABLE');
+    }
     const requiredWorkers = input.requiredWorkers ?? shift.requiredWorkers;
     const confirmedWorkers = shift.confirmedWorkers;
     const startsAt = input.startsAt ?? shift.startsAt;

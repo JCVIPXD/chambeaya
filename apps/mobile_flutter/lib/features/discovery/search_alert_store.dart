@@ -25,7 +25,7 @@ class InMemorySearchAlertStore implements SearchAlertStore {
 }
 
 class SharedPreferencesSearchAlertStore implements SearchAlertStore {
-  static const _key = 'cumple_now.worker.search_alert';
+  static const _key = 'chambeaya.worker.search_alert';
 
   @override
   Future<ShiftSearchFilter?> read() async {

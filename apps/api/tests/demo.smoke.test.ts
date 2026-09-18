@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { assertDemoSmokeAllowed, runDemoSmoke } from '../src/demo/demo.smoke.js';
 
-const environment = { NODE_ENV: 'development', CUMPLENOW_DEMO_SMOKE: 'true' };
+const environment = { NODE_ENV: 'development', CHAMBEAYA_DEMO_SMOKE: 'true' };
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -11,9 +11,9 @@ function json(value: unknown, status = 200) {
 function fakeDemoApi() {
   const calls: Array<{ path: string; method: string; authorization?: string }> = [];
   const sessions = {
-    'business-token': { token: 'business-token', userId: 'business-1', role: 'BUSINESS', email: 'empresa.demo@cumplenow.local' },
-    'worker-token': { token: 'worker-token', userId: 'worker-1', role: 'WORKER', email: 'trabajador.demo@cumplenow.local' },
-    'admin-token': { token: 'admin-token', userId: 'admin-1', role: 'ADMIN', email: 'superadmin@cumplenow.local' },
+    'business-token': { token: 'business-token', userId: 'business-1', role: 'BUSINESS', email: 'empresa.demo@chambeaya.local' },
+    'worker-token': { token: 'worker-token', userId: 'worker-1', role: 'WORKER', email: 'trabajador.demo@chambeaya.local' },
+    'admin-token': { token: 'admin-token', userId: 'admin-1', role: 'ADMIN', email: 'superadmin@chambeaya.local' },
   } as const;
 
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -56,7 +56,7 @@ function fakeDemoApi() {
 
 describe('demo smoke runner', () => {
   it('fails closed outside explicit local development', () => {
-    expect(() => assertDemoSmokeAllowed({ NODE_ENV: 'production', CUMPLENOW_DEMO_SMOKE: 'true' })).toThrow('DEMO_SMOKE_REQUIRES_LOCAL_DEVELOPMENT');
+    expect(() => assertDemoSmokeAllowed({ NODE_ENV: 'production', CHAMBEAYA_DEMO_SMOKE: 'true' })).toThrow('DEMO_SMOKE_REQUIRES_LOCAL_DEVELOPMENT');
     expect(() => assertDemoSmokeAllowed({ NODE_ENV: 'development' })).toThrow('DEMO_SMOKE_REQUIRES_EXPLICIT_OPT_IN');
   });
 
@@ -84,9 +84,9 @@ describe('demo smoke runner', () => {
       }
       if (path !== '/auth/login') return json({ error: 'UNEXPECTED_REQUEST' }, 500);
       const email = JSON.parse(String(init?.body)).email;
-      if (email === 'superadmin@cumplenow.local') return json({ error: 'INVALID_CREDENTIALS' }, 401);
+      if (email === 'superadmin@chambeaya.local') return json({ error: 'INVALID_CREDENTIALS' }, 401);
       await new Promise((resolve) => setTimeout(resolve, 10));
-      return json(email === 'empresa.demo@cumplenow.local'
+      return json(email === 'empresa.demo@chambeaya.local'
         ? { token: 'delayed-business', userId: 'business-1', role: 'BUSINESS', email }
         : { token: 'delayed-worker', userId: 'worker-1', role: 'WORKER', email });
     }) as typeof fetch;
@@ -114,10 +114,10 @@ describe('demo smoke runner', () => {
       }
       if (path !== '/auth/login') return json({ error: 'UNEXPECTED_REQUEST' }, 500);
       const email = JSON.parse(String(init?.body)).email;
-      if (email === 'empresa.demo@cumplenow.local') {
+      if (email === 'empresa.demo@chambeaya.local') {
         return issue({ token: 'mismatch-business', userId: 'business-1', role: 'BUSINESS', email });
       }
-      if (email === 'trabajador.demo@cumplenow.local') {
+      if (email === 'trabajador.demo@chambeaya.local') {
         return issue({ token: 'mismatch-worker', userId: 'worker-1', role: 'BUSINESS', email });
       }
       return issue({ token: 'mismatch-admin', userId: 'admin-1', role: 'ADMIN', email });

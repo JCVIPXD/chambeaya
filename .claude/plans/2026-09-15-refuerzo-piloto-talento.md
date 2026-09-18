@@ -51,9 +51,9 @@ Los Alcances 4, 5 y 6 son el contenido real del Bloque 1 y llevan al Hito A. El 
   - `apps/api/tests/app.test.ts` o un archivo nuevo `apps/api/tests/rate_limit.test.ts`.
   - `.env.example`, `.env.production.example`, `docs/reference/api.md`, `docs/guides/local-development.md` si cambia el arranque local.
 - Validaciones requeridas:
-  - `npm.cmd run build --workspace=@cumple-now/api` — exit 0.
-  - `npm.cmd run test --workspace=@cumple-now/api` — todas aprobadas; declarar el nuevo total de archivos/pruebas.
-  - `npm.cmd run build --workspace=@cumple-now/web` — exit 0 (verifica que el panel no se rompe si cambia el origen permitido).
+  - `npm.cmd run build --workspace=@chambeaya/api` — exit 0.
+  - `npm.cmd run test --workspace=@chambeaya/api` — todas aprobadas; declarar el nuevo total de archivos/pruebas.
+  - `npm.cmd run build --workspace=@chambeaya/web` — exit 0 (verifica que el panel no se rompe si cambia el origen permitido).
   - Comprobación manual o automatizada de que el panel web local sigue pudiendo llamar a la API con la configuración por defecto de desarrollo.
 - Riesgos o dependencias:
   - Riesgo principal: un CORS mal configurado rompe el panel web y la app Flutter en desarrollo. Mitigación: fallback permisivo explícito fuera de producción, declarado en el código y en la documentación.
@@ -75,9 +75,9 @@ Los Alcances 4, 5 y 6 son el contenido real del Bloque 1 y llevan al Hito A. El 
   - `apps/web/app/admin/page.tsx` (los dos botones y los dos decrementos).
   - Sólo lectura: `apps/api/src/modules/auth/auth.service.ts`, `apps/web/lib/admin-api.ts`.
 - Validaciones requeridas:
-  - `npm.cmd run build --workspace=@cumple-now/api` — exit 0.
-  - `npm.cmd run test --workspace=@cumple-now/api` — todas aprobadas; declarar el nuevo total.
-  - `npm.cmd run build --workspace=@cumple-now/web` — exit 0.
+  - `npm.cmd run build --workspace=@chambeaya/api` — exit 0.
+  - `npm.cmd run test --workspace=@chambeaya/api` — todas aprobadas; declarar el nuevo total.
+  - `npm.cmd run build --workspace=@chambeaya/web` — exit 0.
 - Riesgos o dependencias:
   - Muy bajo. Ningún cambio de contrato. Independiente de los demás alcances; se coloca temprano por ser barato y cerrar deuda declarada.
   - **Fuera de alcance a propósito:** el doble `FakePrisma` seguirá sin reproducir `P2002`/constraints reales de PostgreSQL. Ese residual **no** se cierra con más dobles; se cierra con la prueba de integración sobre PostgreSQL que el plan maestro ya lista como cobertura pendiente. Debe seguir declarándose como riesgo hasta entonces.
@@ -100,7 +100,7 @@ Los Alcances 4, 5 y 6 son el contenido real del Bloque 1 y llevan al Hito A. El 
   - `apps/web/app/globals.css` si la separación de secciones requiere estilos.
   - `docs/product/project-master-plan.md` sólo si se marca el sub-ítem como completado; esa actualización la hace el auditor, no el implementador.
 - Validaciones requeridas:
-  - `npm.cmd run build --workspace=@cumple-now/web` — exit 0.
+  - `npm.cmd run build --workspace=@chambeaya/web` — exit 0.
   - Búsqueda verificable en el repositorio de que ya no quedan en la vista de talento toasts que simulen invitación o filtros (el implementador debe declarar el comando usado y su salida).
   - Si existe suite de pruebas de interfaz aplicable, ejecutarla; si no, declararlo, sin presentarlo como aprobado.
 - Riesgos o dependencias:
@@ -128,9 +128,9 @@ Los Alcances 4, 5 y 6 son el contenido real del Bloque 1 y llevan al Hito A. El 
   - `apps/web/lib/business-api.ts` (`talent.search`), `apps/web/app/page.tsx` (controles de distrito y texto).
   - `docs/reference/api.md`.
 - Validaciones requeridas:
-  - `npm.cmd run build --workspace=@cumple-now/api` — exit 0.
-  - `npm.cmd run test --workspace=@cumple-now/api` — todas aprobadas; declarar el nuevo total.
-  - `npm.cmd run build --workspace=@cumple-now/web` — exit 0.
+  - `npm.cmd run build --workspace=@chambeaya/api` — exit 0.
+  - `npm.cmd run test --workspace=@chambeaya/api` — todas aprobadas; declarar el nuevo total.
+  - `npm.cmd run build --workspace=@chambeaya/web` — exit 0.
   - Si se añade migración: declarar si se aplicó sobre PostgreSQL real o si queda `NO_EJECUTADA` con su riesgo.
 - Riesgos o dependencias:
   - Depende del Alcance 3 (la interfaz de la sección de talento debe estar ya saneada y separada; si no, se toca la misma zona dos veces).
@@ -159,9 +159,9 @@ Los Alcances 4, 5 y 6 son el contenido real del Bloque 1 y llevan al Hito A. El 
   - App Flutter, para que el trabajador vea y responda invitaciones: `apps/mobile_flutter/lib/features/...`. **Si el SDK de Flutter sigue bloqueado, dividir este alcance en dos entradas** (servidor + web primero; Flutter después), en vez de entregar Flutter sin validar.
   - `docs/reference/api.md`.
 - Validaciones requeridas:
-  - `npm.cmd run build --workspace=@cumple-now/api` — exit 0.
-  - `npm.cmd run test --workspace=@cumple-now/api` — todas aprobadas, incluidas las pruebas de aislamiento por empresa y por trabajador, de duplicado y de vencimiento.
-  - `npm.cmd run build --workspace=@cumple-now/web` — exit 0.
+  - `npm.cmd run build --workspace=@chambeaya/api` — exit 0.
+  - `npm.cmd run test --workspace=@chambeaya/api` — todas aprobadas, incluidas las pruebas de aislamiento por empresa y por trabajador, de duplicado y de vencimiento.
+  - `npm.cmd run build --workspace=@chambeaya/web` — exit 0.
   - Aplicación de la migración sobre PostgreSQL: declarar si se ejecutó o queda `NO_EJECUTADA` con su riesgo.
   - `flutter test` / `flutter analyze` si se toca Flutter; si el SDK sigue bloqueado, declarar `NO_EJECUTADA` con el riesgo, sin presentarlo como aprobado.
 - Riesgos o dependencias:
@@ -189,8 +189,8 @@ Los Alcances 4, 5 y 6 son el contenido real del Bloque 1 y llevan al Hito A. El 
   - `apps/mobile_flutter/test/`.
   - `docs/reference/api.md`, `docs/product/talent-profile-rollout.md`.
 - Validaciones requeridas:
-  - `npm.cmd run build --workspace=@cumple-now/api` — exit 0.
-  - `npm.cmd run test --workspace=@cumple-now/api` — todas aprobadas.
+  - `npm.cmd run build --workspace=@chambeaya/api` — exit 0.
+  - `npm.cmd run test --workspace=@chambeaya/api` — todas aprobadas.
   - `flutter test` y `flutter analyze` — **requeridas**. Si el SDK local sigue bloqueado (ver `CN-20260912-054`/`055`), este alcance debe apoyarse en el workflow `.github/workflows/flutter-tests.yml` y **no puede declararse cerrado sólo con validación de API**; la falta de validación Flutter se declara como riesgo bloqueante de este alcance en particular, no como riesgo aceptado.
   - Aplicación de la migración sobre PostgreSQL: declarar resultado o `NO_EJECUTADA` con riesgo.
 - Riesgos o dependencias:

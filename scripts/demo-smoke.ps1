@@ -10,7 +10,7 @@ try {
   }
 
   Write-Host 'Verificando contratos de empresa, trabajador y superadmin…' -ForegroundColor Cyan
-  docker compose exec -T -e CUMPLENOW_DEMO_SMOKE=true api npm run demo:smoke
+  docker compose exec -T -e CHAMBEAYA_DEMO_SMOKE=true api npm run demo:smoke
   if ($LASTEXITCODE -ne 0) {
     throw 'El smoke de demostración falló. Revisa que la API local esté saludable y vuelve a ejecutar el comando.'
   }

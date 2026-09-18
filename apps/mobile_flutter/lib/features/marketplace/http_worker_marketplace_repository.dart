@@ -23,8 +23,8 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
   final Map<String, ApplicationState> _localApplicationStates = {};
   final Map<String, Shift> _applicationShiftCache = {};
 
-  static const _savedJobsKey = 'cumple_now.worker.saved_jobs';
-  static const _availabilityKey = 'cumple_now.worker.availability';
+  static const _savedJobsKey = 'chambeaya.worker.saved_jobs';
+  static const _availabilityKey = 'chambeaya.worker.availability';
   static const _requestTimeout = Duration(seconds: 8);
 
   @override
@@ -50,6 +50,14 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
     // copy with the cached application copy so assignment-only fields (such
     // as the check-in credential and confirmation state) are not lost.
     for (final cached in _applicationShiftCache.values) {
+      // Defense in depth: `applicationStates()` is the primary place that
+      // prunes an expired-and-not-checked-in assignment from this cache (see
+      // its `closed` computation), but this method can be called on its own
+      // (e.g. from the discovery feed). Never let a stale cached copy
+      // reintroduce a shift the server no longer considers available: once a
+      // worker checked in, `checkOut` has no time limit of its own, so that
+      // case must keep being reinjected regardless of `endsAt`.
+      if (!cached.checkedIn && cached.isExpired) continue;
       final index = shifts.indexWhere((shift) => shift.id == cached.id);
       if (index >= 0) {
         shifts[index] = cached;
@@ -305,9 +313,30 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
           final assignmentStatus = assignment is Map
               ? assignment['status'] as String?
               : null;
+          final checkedInAt = assignment is Map
+              ? assignment['checkedInAt']
+              : null;
+          final shiftEndsAt = shift is Map
+              ? DateTime.tryParse(shift['endsAt'] as String? ?? '')
+              : null;
+          // No existe transición automática por tiempo: una asignación
+          // ACCEPTED cuyo turno venció sin que el trabajador llegara a hacer
+          // check-in se queda en `status: 'ASSIGNED'` para siempre del lado
+          // del servidor. Sin este chequeo, la pantalla la sigue mostrando
+          // como accionable ("Confirmar asistencia"/"Confirmar llegada")
+          // indefinidamente, aunque ambas acciones siempre fallan contra el
+          // servidor (`endsAt` ya pasó) — ver CN-20260916-099 ALTO-1. Una vez
+          // que el trabajador ya hizo check-in, `checkOut` no tiene límite de
+          // tiempo propio, así que esa asignación debe seguir accionable más
+          // allá de `endsAt`.
+          final expiredBeforeCheckIn =
+              checkedInAt == null &&
+              shiftEndsAt != null &&
+              !shiftEndsAt.isAfter(DateTime.now());
           final closed =
               const {'COMPLETED', 'CANCELLED'}.contains(shiftStatus) ||
-              const {'COMPLETED', 'CANCELLED'}.contains(assignmentStatus);
+              const {'COMPLETED', 'CANCELLED'}.contains(assignmentStatus) ||
+              expiredBeforeCheckIn;
           remote[shiftId] = switch (status) {
             'ACCEPTED' =>
               closed ? ApplicationState.closed : ApplicationState.accepted,
@@ -369,7 +398,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       }),
     );
     if (response.statusCode != 201 && response.statusCode != 200) {
-      throw StateError('No pudimos enviar la postulación');
+      throw MarketplaceApiException(_errorCodeFrom(response.body));
     }
     _localApplicationStates[shiftId] = ApplicationState.submitted;
   }
@@ -381,7 +410,11 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       headers: _headers(),
     );
     if (response.statusCode != 200) {
-      throw StateError('No pudimos confirmar la asignación');
+      // Un turno vencido, cancelado o inexistente responde 404
+      // ASSIGNMENT_NOT_FOUND aquí: conservar el código real (en vez de un
+      // StateError genérico) es lo que permite a la pantalla explicar el
+      // motivo en vez de ofrecer un botón que siempre va a fallar.
+      throw MarketplaceApiException(_errorCodeFrom(response.body));
     }
   }
 
@@ -393,7 +426,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       body: jsonEncode({'credential': credential}),
     );
     if (response.statusCode != 200) {
-      throw StateError('No pudimos validar el check-in');
+      throw MarketplaceApiException(_errorCodeFrom(response.body));
     }
   }
 
@@ -404,7 +437,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       headers: _headers(),
     );
     if (response.statusCode != 200) {
-      throw StateError('No pudimos cerrar el turno');
+      throw MarketplaceApiException(_errorCodeFrom(response.body));
     }
   }
 
@@ -479,6 +512,21 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
     if (token case final value? when value.isNotEmpty)
       'Authorization': 'Bearer $value',
   };
+
+  /// Extrae el código de error (`{"error": "SHIFT_UNAVAILABLE"}`) del cuerpo
+  /// de una respuesta fallida. Si el cuerpo no es JSON o no trae ese campo,
+  /// se conserva un código genérico en vez de fallar al parsear.
+  String _errorCodeFrom(String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['error'] is String) {
+        return decoded['error'] as String;
+      }
+    } catch (_) {
+      // El cuerpo no es JSON válido; se usa el código genérico de abajo.
+    }
+    return 'UNKNOWN_ERROR';
+  }
 
   WorkerConversationRecord _conversationFromJson(
     Map<String, dynamic> json, {
@@ -558,6 +606,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       modality: json['modality'] as String? ?? 'PRESENCIAL',
       companyVerified: json['companyVerified'] == true,
       paymentProtected: json['paymentProtected'] == true,
+      endsAt: DateTime.tryParse(json['endsAt'] as String? ?? ''),
     );
   }
 

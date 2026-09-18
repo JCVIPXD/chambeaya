@@ -1,7 +1,7 @@
-import 'package:cumple_now_mobile/features/auth/auth_page.dart';
-import 'package:cumple_now_mobile/features/auth/auth_repository.dart';
-import 'package:cumple_now_mobile/features/auth/auth_session.dart';
-import 'package:cumple_now_mobile/features/onboarding/onboarding_page.dart';
+import 'package:chambeaya_mobile/features/auth/auth_page.dart';
+import 'package:chambeaya_mobile/features/auth/auth_repository.dart';
+import 'package:chambeaya_mobile/features/auth/auth_session.dart';
+import 'package:chambeaya_mobile/features/onboarding/onboarding_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

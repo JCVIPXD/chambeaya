@@ -20,7 +20,7 @@ import { hashPassword } from "../src/modules/auth/auth.service.js";
  * desarrollo o producción.
  */
 function requireE2eTestDatabase() {
-  if (process.env.CUMPLENOW_E2E_REAL_TESTS !== "true") {
+  if (process.env.CHAMBEAYA_E2E_REAL_TESTS !== "true") {
     throw new Error("E2E_REAL_TESTS_REQUIRE_EXPLICIT_OPT_IN");
   }
   const databaseUrl = process.env.DATABASE_URL;
@@ -40,7 +40,7 @@ function requireE2eTestDatabase() {
  * deben cambiarse también allí.
  */
 export const e2eAdminAccount = {
-  email: "admin.e2e@cumplenow.test",
+  email: "admin.e2e@chambeaya.test",
   password: "AdminE2E-2026!",
   name: "Admin E2E Playwright",
   identifier: "90000099",

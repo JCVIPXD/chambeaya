@@ -1,4 +1,4 @@
-package com.example.cumple_now_mobile
+package com.chambeaya.mobile
 
 import io.flutter.embedding.android.FlutterActivity
 

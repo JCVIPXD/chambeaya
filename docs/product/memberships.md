@@ -1,4 +1,4 @@
-# Membresías futuras de CumpleNow
+# Membresías futuras de Chambeaya
 
 ## Propósito
 
@@ -8,7 +8,7 @@ seleccionar, registrar asistencia y reportar pagos.
 
 Durante el piloto:
 
-- el trabajador usa CumpleNow sin costo;
+- el trabajador usa Chambeaya sin costo;
 - la empresa opera con el plan **Piloto** sin tarjeta ni cobro automático;
 - el plan `PILOT/TRIAL` solo sirve para identificar el periodo de validación;
 - ningún turno, postulación o pago directo se bloquea por suscripción;
@@ -38,7 +38,7 @@ no por intentar cubrir un turno. El trabajador no paga membresía ni comisión.
    permitiendo publicar, seleccionar, confirmar asistencia y reportar pagos.
    Ningún plan compra visibilidad artificial ni prioridad que perjudique al
    trabajador.
-4. **La cuota reemplaza la comisión por dinero.** CumpleNow no custodia fondos
+4. **La cuota reemplaza la comisión por dinero.** Chambeaya no custodia fondos
    ni descuenta del pago del trabajador. La empresa paga por la herramienta y
    conserva el pago directo acordado con su equipo.
 

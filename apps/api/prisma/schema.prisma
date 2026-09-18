@@ -144,7 +144,7 @@ model User {
   email         String              @unique
   passwordHash  String
   salt          String
-  /// Whether the user has chosen a password that can be used in Cumple Now.
+  /// Whether the user has chosen a password that can be used in Chambeaya.
   /// Google-created accounts from before the local-password onboarding remain
   /// false until their owner creates one after authenticating with Google.
   localPasswordConfigured Boolean @default(true)

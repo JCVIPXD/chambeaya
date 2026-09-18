@@ -2,7 +2,7 @@ import { demoPresentation } from './demo.seed.js';
 
 type SmokeEnvironment = {
   NODE_ENV?: string;
-  CUMPLENOW_DEMO_SMOKE?: string;
+  CHAMBEAYA_DEMO_SMOKE?: string;
 };
 
 type Session = { token: string; userId: string; role: string; email: string };
@@ -11,7 +11,7 @@ type LoginAccount = { email: string; password: string; role: string };
 
 export function assertDemoSmokeAllowed(environment: SmokeEnvironment = process.env) {
   if (environment.NODE_ENV !== 'development') throw new Error('DEMO_SMOKE_REQUIRES_LOCAL_DEVELOPMENT');
-  if (environment.CUMPLENOW_DEMO_SMOKE !== 'true') throw new Error('DEMO_SMOKE_REQUIRES_EXPLICIT_OPT_IN');
+  if (environment.CHAMBEAYA_DEMO_SMOKE !== 'true') throw new Error('DEMO_SMOKE_REQUIRES_EXPLICIT_OPT_IN');
 }
 
 function record(value: unknown, code: string): Json {

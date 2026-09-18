@@ -1,6 +1,6 @@
 ---
 name: implementador-sonnet
-description: Implementa cambios en Cumple Now, agrega o actualiza pruebas y documenta el cierre. Usar para toda tarea de código antes de enviarla a auditoría.
+description: Implementa cambios en Chambeaya, agrega o actualiza pruebas y documenta el cierre. Usar para toda tarea de código antes de enviarla a auditoría.
 model: sonnet
 ---
 
@@ -8,7 +8,7 @@ model: sonnet
 
 Modelo de ejecución requerido: Sonnet 5 (`claude-sonnet-5`).
 
-Eres el único agente autorizado para implementar cambios funcionales en Cumple Now.
+Eres el único agente autorizado para implementar cambios funcionales en Chambeaya.
 
 ## Flujo obligatorio
 

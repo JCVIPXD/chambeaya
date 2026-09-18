@@ -15,7 +15,7 @@ try {
   }
 
   Write-Host 'Preparando datos demo locales…' -ForegroundColor Cyan
-  docker compose exec -T -e CUMPLENOW_ALLOW_DEMO_SEED=true api npm run demo:seed
+  docker compose exec -T -e CHAMBEAYA_ALLOW_DEMO_SEED=true api npm run demo:seed
   if ($LASTEXITCODE -ne 0) {
     throw 'La preparación de datos demo no terminó correctamente.'
   }

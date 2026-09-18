@@ -167,7 +167,7 @@ class _AuthPageState extends State<AuthPage> {
     if (!_isValidPassword(_password.text)) {
       setState(
         () => _error =
-            'Crea una contraseña de Cumple Now con 8 caracteres, una mayúscula y un número.',
+            'Crea una contraseña de Chambeaya con 8 caracteres, una mayúscula y un número.',
       );
       return;
     }
@@ -468,7 +468,7 @@ class _AuthPageState extends State<AuthPage> {
               const SizedBox(height: 4),
               Text(
                 _isCompletingGoogleProfile
-                    ? 'Tu cuenta de Google ya fue verificada. Confirma tu DNI y crea una contraseña exclusiva para Cumple Now.'
+                    ? 'Tu cuenta de Google ya fue verificada. Confirma tu DNI y crea una contraseña exclusiva para Chambeaya.'
                     : _isCompletingGooglePassword
                     ? 'Tu cuenta de Google fue verificada. Crea una contraseña exclusiva para ingresar también con tu correo.'
                     : _isRegistering
@@ -541,7 +541,7 @@ class _AuthPageState extends State<AuthPage> {
                       obscureText: true,
                       autofillHints: const [AutofillHints.newPassword],
                       decoration: InputDecoration(
-                        labelText: 'Contraseña de Cumple Now',
+                        labelText: 'Contraseña de Chambeaya',
                         helperText:
                             'Nueva y exclusiva: no uses tu contraseña de Google.',
                         contentPadding: fieldContentPadding,
@@ -717,7 +717,7 @@ class _AuthPageState extends State<AuthPage> {
             ],
             if (_canRegister && !_isRegistering && !_isInGoogleOnboarding)
               const Text(
-                'Las cuentas empresariales se habilitan directamente con Cumple Now.',
+                'Las cuentas empresariales se habilitan directamente con Chambeaya.',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: AppColors.muted, fontSize: 12),
               ),

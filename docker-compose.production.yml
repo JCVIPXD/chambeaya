@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - cumplenow-production-db:/var/lib/postgresql/data
+      - chambeaya-production-db:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -38,7 +38,7 @@ services:
     ports:
       - "${API_HOST_PORT:-4000}:4000"
     volumes:
-      - cumplenow-production-private-documents:/private-documents
+      - chambeaya-production-private-documents:/private-documents
     depends_on:
       db:
         condition: service_healthy
@@ -72,5 +72,5 @@ services:
       start_period: 20s
 
 volumes:
-  cumplenow-production-db:
-  cumplenow-production-private-documents:
+  chambeaya-production-db:
+  chambeaya-production-private-documents:

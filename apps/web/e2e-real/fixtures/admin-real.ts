@@ -8,11 +8,11 @@ import type { APIRequestContext } from '@playwright/test';
  * rol ADMIN, así que no puede crearse por HTTP).
  */
 export const adminAccount = {
-  email: 'admin.e2e@cumplenow.test',
+  email: 'admin.e2e@chambeaya.test',
   password: 'AdminE2E-2026!',
 };
 
-const apiPort = Number(process.env.CUMPLENOW_E2E_API_PORT ?? 4400);
+const apiPort = Number(process.env.CHAMBEAYA_E2E_API_PORT ?? 4400);
 export const apiOrigin = `http://127.0.0.1:${apiPort}`;
 
 export type TestWorker = {
@@ -33,7 +33,7 @@ async function registerWorker(api: APIRequestContext): Promise<TestWorker> {
   const unique = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const worker: TestWorker = {
     name: `Trabajador E2E ${unique}`,
-    email: `trabajador.e2e.${unique}@cumplenow.test`,
+    email: `trabajador.e2e.${unique}@chambeaya.test`,
     password: 'TrabajadorE2E-2026!',
     identifier: String(10000000 + Math.floor(Math.random() * 89999999)),
   };

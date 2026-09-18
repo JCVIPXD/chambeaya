@@ -77,6 +77,7 @@ class Shift {
     this.modality = 'PRESENCIAL',
     this.companyVerified = false,
     this.paymentProtected = false,
+    this.endsAt,
   });
   final String id;
   final String title;
@@ -102,6 +103,19 @@ class Shift {
   final String modality;
   final bool companyVerified;
   final bool paymentProtected;
+  /// Null for demo-only records (in-memory demo shifts never expire). The
+  /// live API always sends it: it is the only real date the marketplace
+  /// exposes to clients, and the sole authority for whether an accepted
+  /// assignment is still actionable (there is no automatic time-based status
+  /// transition on the server).
+  final DateTime? endsAt;
+
+  /// Whether the shift's `endsAt` has already passed. Does not by itself mean
+  /// the card should stop being actionable: a worker who already checked in
+  /// may still check out after the shift's nominal end time (the server does
+  /// not gate `checkOut` on `endsAt`), so callers must combine this with
+  /// [checkedIn] where that distinction matters.
+  bool get isExpired => endsAt != null && !endsAt!.isAfter(DateTime.now());
 
   Shift copyWith({
     ShiftState? state,
@@ -132,6 +146,7 @@ class Shift {
     modality: modality,
     companyVerified: companyVerified,
     paymentProtected: paymentProtected,
+    endsAt: endsAt,
   );
 }
 

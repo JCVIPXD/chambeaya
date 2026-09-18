@@ -1,6 +1,6 @@
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:4000/api';
 
-export const businessSessionKey = 'cumplenow_business_session';
+export const businessSessionKey = 'chambeaya_business_session';
 
 export type BusinessSession = {
   token: string;

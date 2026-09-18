@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:cumple_now_mobile/features/profile/talent_invitation_repository.dart';
+import 'package:chambeaya_mobile/features/profile/talent_invitation_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 

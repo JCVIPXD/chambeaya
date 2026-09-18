@@ -7,8 +7,8 @@ Engine y Docker Compose v2.
 ## Primera instalación
 
 ```bash
-git clone <url-del-repositorio> cumplenow
-cd cumplenow
+git clone <url-del-repositorio> chambeaya
+cd chambeaya
 cp .env.production.example .env.production
 nano .env.production
 chmod +x scripts/deploy-hosting.sh
@@ -23,7 +23,7 @@ API al puerto `API_HOST_PORT` (la ruta de salud es `/api/health`).
 El script valida variables, construye las imágenes, ejecuta las migraciones de
 Prisma, deja los tres servicios reiniciándose automáticamente y espera sus
 healthchecks. La base de datos queda en el volumen Docker
-`cumplenow-production-db`; no se expone directamente a Internet.
+`chambeaya-production-db`; no se expone directamente a Internet.
 
 ### CORS, límite de intentos y proxy inverso
 
@@ -70,16 +70,49 @@ git pull
 Para revisar el estado o los logs:
 
 ```bash
-docker compose -p cumplenow-production -f docker-compose.production.yml ps
-docker compose -p cumplenow-production -f docker-compose.production.yml logs --tail=200
+docker compose -p chambeaya-production -f docker-compose.production.yml ps
+docker compose -p chambeaya-production -f docker-compose.production.yml logs --tail=200
 ```
 
 Antes de actualizar una instancia con datos reales, respalda PostgreSQL. Para
 detener la aplicación sin borrar el volumen:
 
 ```bash
+docker compose -p chambeaya-production -f docker-compose.production.yml down
+```
+
+### Instancias creadas antes del renombrado a Chambeaya
+
+Una instancia desplegada cuando el proyecto se llamaba Cumple Now usa el nombre
+de proyecto de Compose `cumplenow-production` y los volúmenes
+`cumplenow-production-db` y `cumplenow-production-private-documents`. El
+renombrado cambió los tres nombres, así que un `git pull` seguido de
+`./scripts/deploy-hosting.sh` **no actualiza esa instancia**: crea una pila
+nueva con volúmenes vacíos y deja la anterior en marcha con los datos. No se
+borra nada, pero la aplicación nueva arrancaría sin base de datos y los puertos
+publicados entrarían en conflicto.
+
+Antes de actualizar una instancia así, respalda PostgreSQL y elige una vía:
+
+```bash
+# 1. Comprobar qué hay desplegado y con qué volúmenes.
+docker compose -p cumplenow-production -f docker-compose.production.yml ps
+docker volume ls | grep -i cumplenow
+
+# 2. Respaldo obligatorio antes de tocar nada.
+docker compose -p cumplenow-production -f docker-compose.production.yml \
+  exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > respaldo-previo.sql
+
+# 3. Detener la pila antigua (sin borrar sus volúmenes).
 docker compose -p cumplenow-production -f docker-compose.production.yml down
 ```
+
+Después, o bien restauras `respaldo-previo.sql` sobre la pila nueva ya
+levantada con `./scripts/deploy-hosting.sh`, o bien copias el contenido del
+volumen antiguo al nuevo antes de levantarla. Si además cambias `POSTGRES_USER`
+o `POSTGRES_DB` en `.env.production` para alinearlos con la marca nueva, hazlo
+en el mismo paso que la restauración: cambiarlos sobre un volumen ya
+inicializado con el usuario antiguo provoca fallos de autenticación.
 
 El script no incluye certificados TLS ni un proxy inverso: esa capa debe
 configurarse en el proveedor (Caddy, Nginx o el balanceador administrado) y es

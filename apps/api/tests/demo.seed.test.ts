@@ -177,7 +177,7 @@ class InMemoryDemoDatabase {
   };
 }
 
-const localEnvironment = { NODE_ENV: 'development', CUMPLENOW_ALLOW_DEMO_SEED: 'true' };
+const localEnvironment = { NODE_ENV: 'development', CHAMBEAYA_ALLOW_DEMO_SEED: 'true' };
 
 describe('demo seed safety guard', () => {
   it('allows only an explicit local development opt-in', () => {
@@ -186,10 +186,10 @@ describe('demo seed safety guard', () => {
 
   it.each([
     [{ NODE_ENV: 'development' }, 'DEMO_SEED_REQUIRES_EXPLICIT_OPT_IN'],
-    [{ CUMPLENOW_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
-    [{ NODE_ENV: 'Production', CUMPLENOW_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
-    [{ NODE_ENV: 'staging', CUMPLENOW_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
-    [{ NODE_ENV: 'production', CUMPLENOW_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
+    [{ CHAMBEAYA_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
+    [{ NODE_ENV: 'Production', CHAMBEAYA_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
+    [{ NODE_ENV: 'staging', CHAMBEAYA_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
+    [{ NODE_ENV: 'production', CHAMBEAYA_ALLOW_DEMO_SEED: 'true' }, 'DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT'],
   ])('fails closed for %#', (environment, error) => {
     expect(() => assertDemoSeedAllowed(environment)).toThrow(error);
   });
@@ -234,7 +234,7 @@ describe('seedDemoDatabase', () => {
 
     expect(company).toMatchObject({ id: first.companyId, ownerId: first.businessId });
     expect(subscription).toMatchObject({ companyId: company.id });
-    expect(profile).toMatchObject({ companyId: company.id, workerUserId: first.workerId, email: 'trabajador.demo@cumplenow.local' });
+    expect(profile).toMatchObject({ companyId: company.id, workerUserId: first.workerId, email: 'trabajador.demo@chambeaya.local' });
     expect(flow).toMatchObject({ companyId: company.id, status: 'PUBLISHED', confirmedWorkers: 0 });
     expect(pendingApplication).toMatchObject({ workerId: first.workerId, status: 'PENDING' });
     expect(historyApplication).toMatchObject({ workerId: first.workerId, status: 'ACCEPTED' });

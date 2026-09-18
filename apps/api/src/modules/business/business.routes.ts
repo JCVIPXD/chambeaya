@@ -9,6 +9,7 @@ import {
   BusinessValidationError,
   DatabaseBusinessService,
   type BusinessOperations,
+  type ShiftInput,
 } from './business.service.js';
 
 const nullableText = z.string().trim().max(240).nullable().optional();
@@ -36,8 +37,32 @@ const shiftFields = {
   notes: z.string().trim().max(2000).nullable().optional(),
   rescueActive: z.boolean().optional(),
 };
-const shiftSchema = z.object(shiftFields).strict().refine((value) => value.endsAt > value.startsAt, { message: 'INVALID_DATE_RANGE', path: ['endsAt'] });
-const shiftUpdateSchema = z.object(shiftFields).partial().refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE').refine((value) => !value.startsAt || !value.endsAt || value.endsAt > value.startsAt, { message: 'INVALID_DATE_RANGE', path: ['endsAt'] });
+const shiftSchema = z.object(shiftFields).strict();
+const shiftUpdateSchema = z.object(shiftFields).partial()
+  .refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
+
+// Un turno no puede publicarse ni guardarse ya vencido, ni con `endsAt` que no
+// sea posterior a `startsAt`: sin esta validación, una empresa puede
+// crear/editar un turno con fechas invertidas o en el pasado. El filtro de
+// fecha en `listAvailableShifts`/`applyToShift` lo ocultaría del trabajador de
+// todas formas, pero el turno quedaría visible en el panel de la empresa como
+// "PUBLISHED"/"activo" para siempre (no existe una transición automática por
+// tiempo, ver `ShiftStatus` en `schema.prisma`).
+//
+// Se implementa como un chequeo explícito -no como `.refine()` de Zod- para
+// que el código de negocio (`SHIFT_ALREADY_ENDED`/`INVALID_DATE_RANGE`) viaje
+// directo en el campo `error` de la respuesta, igual que `SHIFT_NOT_EDITABLE`,
+// en vez de quedar anidado en `issues[]` como una violación de esquema
+// genérica e indistinguible de cualquier otro campo inválido (hallazgo
+// MEDIO-1 de CN-20260916-099).
+function assertShiftDatesValid(input: Partial<Pick<ShiftInput, 'startsAt' | 'endsAt'>>) {
+  if (input.startsAt !== undefined && input.endsAt !== undefined && input.endsAt <= input.startsAt) {
+    throw new BusinessValidationError('INVALID_DATE_RANGE');
+  }
+  if (input.endsAt !== undefined && input.endsAt <= new Date()) {
+    throw new BusinessValidationError('SHIFT_ALREADY_ENDED');
+  }
+}
 
 const workerFields = {
   name: z.string().trim().min(2).max(120),
@@ -162,13 +187,17 @@ export function createBusinessRouter(
 
   router.get('/shifts', route(authService, async (_request, response, session) => { response.json(await operations.listShifts(session)); }));
   router.post('/shifts', route(authService, async (request, response, session) => {
-    const shift = await operations.createShift(session, shiftSchema.parse(request.body));
+    const input = shiftSchema.parse(request.body);
+    assertShiftDatesValid(input);
+    const shift = await operations.createShift(session, input);
     onShiftsChanged();
     response.status(201).json(shift);
   }));
   router.get('/shifts/:id', route(authService, async (request, response, session) => { response.json(await operations.getShift(session, param(request, 'id'))); }));
   router.patch('/shifts/:id', route(authService, async (request, response, session) => {
-    const shift = await operations.updateShift(session, param(request, 'id'), shiftUpdateSchema.parse(request.body));
+    const input = shiftUpdateSchema.parse(request.body);
+    assertShiftDatesValid(input);
+    const shift = await operations.updateShift(session, param(request, 'id'), input);
     onShiftsChanged();
     response.json(shift);
   }));

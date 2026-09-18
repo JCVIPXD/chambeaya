@@ -1,4 +1,4 @@
-# Demostración para clientes — Cumple Now
+# Demostración para clientes — Chambeaya
 
 Esta versión presenta el flujo profesional para trabajadores en Android, iOS y navegador. Los datos de empleos, postulaciones y conversaciones son ficticios y están diseñados para una demostración segura.
 
@@ -47,9 +47,9 @@ terminar; no acepta producción ni una API local indisponible.
 
 Para los paneles persistentes locales preparados con `npm run demo:seed`:
 
-- Empresa: `empresa.demo@cumplenow.local` / `Demo2026!`
-- Trabajador: `trabajador.demo@cumplenow.local` / `Demo2026!`
-- Superadmin: `superadmin@cumplenow.local` / `Admin2026!`
+- Empresa: `empresa.demo@chambeaya.local` / `Demo2026!`
+- Trabajador: `trabajador.demo@chambeaya.local` / `Demo2026!`
+- Superadmin: `superadmin@chambeaya.local` / `Admin2026!`
 
 Todos estos datos son ficticios. También puede usarse cualquier correo válido, contraseña de ocho o más caracteres y DNI de ocho dígitos.
 
@@ -62,7 +62,8 @@ Todos estos datos son ficticios. También puede usarse cualquier correo válido,
 5. En Trabajador, confirma la recepción y abre el historial/billetera; el turno `Apoyo de salón` ya muestra un pago histórico liberado.
 6. En Trabajador, abre `Invitaciones`: el modo demo siembra una invitación pendiente de `Restaurante La Mar` que puede aceptarse o rechazarse. Contra la API real, esa pantalla lista las invitaciones creadas desde `Talento disponible` del panel Empresa y responde llamando al servidor; la tarjeta solo cambia de estado con la respuesta real.
 7. Abre Superadmin para mostrar el resumen, la empresa y el trabajador con el mismo escenario.
-8. Si necesitas repetir desde el comienzo, ejecuta de nuevo `npm run demo:smoke` y recarga los paneles.
+8. Como cierre del recorrido de Trabajador, entra a `Perfil` y activa el interruptor `Modo oscuro`: el panel de trabajador completo (inicio, postulaciones, mensajes, perfil e invitaciones, junto con sus diálogos y hojas modales) cambia a la paleta oscura con una transición corta, y la preferencia se recuerda al volver a abrir la aplicación. Puedes activarlo en cualquier punto del recorrido: cambiar de tema conserva tus postulaciones, turnos guardados y el resto del estado del panel. El resto de la aplicación no cambia de apariencia.
+9. Si necesitas repetir desde el comienzo, ejecuta de nuevo `npm run demo:smoke` y recarga los paneles.
 
 ## Vistas adaptables
 
@@ -92,3 +93,8 @@ En Android Emulator, inicia Flutter con `--dart-define=API_BASE_URL=http://10.0.
 - Cámara, GPS, foto de DNI y reconocimiento facial permanecen desactivados.
 - La validación DNI/rostro es una idea preparada para integrar cuando se contrate un proveedor autorizado.
 - Los mensajes, estados y empleos del modo demostración no son persistentes.
+- El `Modo oscuro` está limitado al panel de trabajador. La bienvenida, el
+  inicio de sesión y el panel Empresa de la aplicación móvil siguen siempre en
+  claro, incluso si el dispositivo tiene el modo oscuro del sistema activado,
+  porque todavía no tienen colores oscuros propios. Los paneles web (Empresa y
+  Superadmin) tampoco están incluidos.

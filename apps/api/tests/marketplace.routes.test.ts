@@ -1,3 +1,6 @@
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -107,5 +110,62 @@ describe('marketplace application routes', () => {
       .set('Authorization', `Bearer ${session.token}`)
       .send({ answers: Array.from({ length: 4 }, (_, index) => ({ question: `Pregunta válida número ${index}`, answer: 'Sí' })) });
     expect(invalid.status).toBe(400);
+  });
+
+  it('refreshes the live shift feed on a timer, not only when a business publishes a change', async () => {
+    // Antes de este cierre, `/api/shifts/events` solo reemitía una foto nueva
+    // cuando `events.publish()` se disparaba desde el panel de la empresa. Un
+    // turno que simplemente vencía por el paso del tiempo nunca generaba una
+    // reemisión, así que un trabajador con la pantalla de descubrimiento
+    // abierta seguía viéndolo como disponible indefinidamente. Esta prueba
+    // demuestra que ahora el feed se reemite solo, sin ningún evento externo.
+    let snapshot = 0;
+    const listAvailableShifts = vi.fn(async () => {
+      snapshot += 1;
+      return [{ id: `shift-snapshot-${snapshot}` }];
+    });
+    const app = createApp({
+      marketplaceService: { listAvailableShifts } as unknown as MarketplaceOperations,
+      marketplaceFeedRefreshIntervalMs: 20,
+    });
+    const server = app.listen(0);
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    const receivedSnapshots = await new Promise<number>((resolve) => {
+      let payload = '';
+      let settled = false;
+      const clientRequest = http.get({ port, path: '/api/shifts/events' }, (response) => {
+        response.on('data', (chunk: Buffer) => {
+          payload += chunk.toString('utf8');
+          const shiftEvents = payload.split('event: shifts').length - 1;
+          if (shiftEvents >= 3 && !settled) {
+            settled = true;
+            clientRequest.destroy();
+            resolve(shiftEvents);
+          }
+        });
+      });
+      clientRequest.on('error', () => {
+        if (!settled) {
+          settled = true;
+          resolve(payload.split('event: shifts').length - 1);
+        }
+      });
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          clientRequest.destroy();
+          resolve(payload.split('event: shifts').length - 1);
+        }
+      }, 1000);
+    });
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    // Ningún `events.publish()` fue llamado en esta prueba: las reemisiones
+    // observadas solo pueden venir del refresco periódico por tiempo.
+    expect(receivedSnapshots).toBeGreaterThanOrEqual(3);
+    expect(listAvailableShifts.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 });

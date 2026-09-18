@@ -1,5 +1,5 @@
-import 'package:cumple_now_mobile/features/marketplace/marketplace_data.dart';
-import 'package:cumple_now_mobile/core/formatters/currency_formatter.dart';
+import 'package:chambeaya_mobile/features/marketplace/marketplace_data.dart';
+import 'package:chambeaya_mobile/core/formatters/currency_formatter.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

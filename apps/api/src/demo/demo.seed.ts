@@ -5,9 +5,9 @@ import type { PrismaClient } from '@prisma/client';
 import { hashPassword } from '../modules/auth/auth.service.js';
 
 const demoEmails = {
-  business: 'empresa.demo@cumplenow.local',
-  worker: 'trabajador.demo@cumplenow.local',
-  admin: 'superadmin@cumplenow.local',
+  business: 'empresa.demo@chambeaya.local',
+  worker: 'trabajador.demo@chambeaya.local',
+  admin: 'superadmin@chambeaya.local',
 } as const;
 
 const demoPasswords = {
@@ -33,7 +33,7 @@ export const demoPresentation = {
 
 type SeedEnvironment = {
   NODE_ENV?: string;
-  CUMPLENOW_ALLOW_DEMO_SEED?: string;
+  CHAMBEAYA_ALLOW_DEMO_SEED?: string;
 };
 
 /** Prevents an explicit local convenience command from becoming a production mutation. */
@@ -41,7 +41,7 @@ export function assertDemoSeedAllowed(environment: SeedEnvironment = process.env
   if (environment.NODE_ENV !== 'development') {
     throw new Error('DEMO_SEED_REQUIRES_LOCAL_DEVELOPMENT');
   }
-  if (environment.CUMPLENOW_ALLOW_DEMO_SEED !== 'true') {
+  if (environment.CHAMBEAYA_ALLOW_DEMO_SEED !== 'true') {
     throw new Error('DEMO_SEED_REQUIRES_EXPLICIT_OPT_IN');
   }
 }
@@ -77,7 +77,7 @@ export async function seedDemoDatabase(
     upsertDemoUser(prisma, {
       email: demoEmails.business,
       password: demoPasswords.business,
-      name: 'Empresa CumpleNow Nueva',
+      name: 'Empresa Chambeaya Nueva',
       identifier: '20555555551',
       role: 'BUSINESS',
     }),
@@ -101,11 +101,11 @@ export async function seedDemoDatabase(
   const company = await prisma.company.upsert({
     where: { ownerId: business.id },
     update: {
-      name: 'Empresa CumpleNow Nueva', legalName: 'CumpleNow Demo S.A.C.', ruc: '20555555551',
+      name: 'Empresa Chambeaya Nueva', legalName: 'Chambeaya Demo S.A.C.', ruc: '20555555551',
       industry: 'Hospitalidad', phone: '999 000 111', address: 'Av. Demo 123', district: 'Miraflores',
     },
     create: {
-      ownerId: business.id, name: 'Empresa CumpleNow Nueva', legalName: 'CumpleNow Demo S.A.C.', ruc: '20555555551',
+      ownerId: business.id, name: 'Empresa Chambeaya Nueva', legalName: 'Chambeaya Demo S.A.C.', ruc: '20555555551',
       industry: 'Hospitalidad', phone: '999 000 111', address: 'Av. Demo 123', district: 'Miraflores',
     },
   });
@@ -214,8 +214,8 @@ export async function seedDemoDatabase(
   });
   await prisma.payment.upsert({
     where: { assignmentId: historyAssignment.id },
-    update: { companyId: company.id, shiftId: historyShift.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa CumpleNow Nueva', amountCents: 10000, workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
-    create: { companyId: company.id, shiftId: historyShift.id, assignmentId: historyAssignment.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa CumpleNow Nueva', amountCents: 10000, workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
+    update: { companyId: company.id, shiftId: historyShift.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa Chambeaya Nueva', amountCents: 10000, workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
+    create: { companyId: company.id, shiftId: historyShift.id, assignmentId: historyAssignment.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa Chambeaya Nueva', amountCents: 10000, workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
   });
 
   return { companyId: company.id, businessId: business.id, workerId: worker.id, adminId: admin.id, flowShiftId: flowShift.id, historyShiftId: historyShift.id };

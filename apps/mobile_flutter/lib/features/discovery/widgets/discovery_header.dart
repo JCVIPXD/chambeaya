@@ -115,14 +115,14 @@ class DiscoveryHeader extends StatelessWidget {
           height: 52,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: context.palette.surface,
             shape: BoxShape.circle,
             border: Border.all(color: AppColors.teal, width: 3),
           ),
           child: Text(
             _initials,
             style: TextStyle(
-              color: AppColors.navy,
+              color: context.palette.ink,
               fontWeight: FontWeight.w900,
             ),
           ),

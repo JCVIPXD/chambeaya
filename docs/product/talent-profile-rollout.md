@@ -6,7 +6,7 @@ Este plan convierte el perfil del trabajador en una fuente de datos real sin act
 
 El perfil profesional global queda separado del contacto histórico que una empresa puede conservar. El trabajador autenticado actualiza titular, presentación, distrito, visibilidad y hasta doce especialidades del catálogo. La disponibilidad combina días, franjas horarias y una nota opcional; cada especialidad puede indicar nivel y años de experiencia. Las empresas consultan perfiles visibles en `GET /api/business/talent`, con filtros por especialidad, distrito, disponibilidad y texto libre (`query`, hasta 100 caracteres, coincidencia parcial insensible a mayúsculas sobre nombre, titular y distrito). Todos los filtros se resuelven en el servidor y se combinan entre sí.
 
-La búsqueda está conectada al panel empresarial con paginación. El contacto histórico se denomina `CompanyWorkerContact`; no puede guardar reputación, compatibilidad, trabajos completados ni verificación global. La aplicación móvil usa API por defecto y la demo exige `CUMPLENOW_DEMO_MODE=true`.
+La búsqueda está conectada al panel empresarial con paginación. El contacto histórico se denomina `CompanyWorkerContact`; no puede guardar reputación, compatibilidad, trabajos completados ni verificación global. La aplicación móvil usa API por defecto y la demo exige `CHAMBEAYA_DEMO_MODE=true`.
 
 La completitud se deriva de campos reales; no es reputación. `matchScore` no se envía en el flujo real hasta contar con matching v1. Los datos ficticios de perfil móvil fueron retirados.
 
@@ -41,7 +41,7 @@ La lista empresarial solo muestra nombre, titular, distrito, disponibilidad, esp
 
 ## Google Sign-In web — habilitado para piloto local
 
-Con `GOOGLE_OAUTH_WEB_CLIENT_ID` configurado, `GET /api/auth/providers` informa si el proveedor está habilitado y `POST /api/auth/google` verifica el ID token contra el cliente web configurado. La identidad externa se persiste con proveedor y `sub`; se reutilizan nombre y correo que entrega Google, pero en el primer acceso se exige el DNI y una contraseña nueva exclusiva de Cumple Now antes de los datos profesionales. La contraseña de Google nunca llega a Cumple Now. Las cuentas Google creadas antes de esta regla quedan marcadas para crear su contraseña local al restablecer su sesión. No se fusionan cuentas automáticamente por correo.
+Con `GOOGLE_OAUTH_WEB_CLIENT_ID` configurado, `GET /api/auth/providers` informa si el proveedor está habilitado y `POST /api/auth/google` verifica el ID token contra el cliente web configurado. La identidad externa se persiste con proveedor y `sub`; se reutilizan nombre y correo que entrega Google, pero en el primer acceso se exige el DNI y una contraseña nueva exclusiva de Chambeaya antes de los datos profesionales. La contraseña de Google nunca llega a Chambeaya. Las cuentas Google creadas antes de esta regla quedan marcadas para crear su contraseña local al restablecer su sesión. No se fusionan cuentas automáticamente por correo.
 
 Este alcance cubre la aplicación web de Flutter en desarrollo/piloto. Antes de producción pública faltan clientes Android/iOS, recuperación mediante correo verificado, cambio de contraseña con revocación de sesiones, rate limiting, protección antifuerza bruta y una revisión de seguridad de OAuth.
 

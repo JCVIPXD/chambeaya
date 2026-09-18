@@ -162,6 +162,17 @@ const initialConversations: Conversation[] = [];
 const initialMessages: Record<string, ChatMessage[]> = {};
 const initialTransactions: Transaction[] = [];
 
+// El servidor no transiciona automáticamente un turno por tiempo (ver
+// `ShiftStatus` en `schema.prisma`): un turno cuyo `endsAt` ya pasó puede
+// seguir en `status: "PUBLISHED"`/`"ASSIGNED"` para siempre si la empresa no
+// lo cancela. Sin este chequeo, los contadores "activos" del panel lo
+// contaban como si todavía aceptara postulaciones, aunque el resto del
+// sistema (búsqueda del trabajador, postulación, aceptación) ya lo trata
+// como cerrado.
+function isShiftExpired(shift: Pick<Shift, "endsAt">) {
+  return new Date(shift.endsAt).getTime() <= Date.now();
+}
+
 function coverageClass(coverage: Coverage) {
   if (coverage === "Completo") return "complete";
   if (coverage === "Falta 1") return "urgent";
@@ -906,8 +917,20 @@ export default function HomePage() {
           ? "Turno actualizado correctamente."
           : "Turno publicado. Ya puedes asignar talento.",
       );
-    } catch {
-      showToast("No pudimos guardar el turno. Revisa las fechas y datos.");
+    } catch (error) {
+      // `SHIFT_ALREADY_ENDED` (el `endsAt` enviado ya pasó) y
+      // `SHIFT_NOT_EDITABLE` (el turno persistido ya venció, sin importar qué
+      // se edite) son ambos previsibles con `isShiftExpired`/el `min` del
+      // campo "Fin", pero pueden seguir ocurriendo por una condición de
+      // carrera de UI (el reloj avanzó entre que se abrió el formulario y se
+      // envió). El mensaje debe explicar el motivo real, no uno genérico. Ver
+      // CN-20260916-099 MEDIO-2.
+      const code = error instanceof ApiError ? error.code : null;
+      showToast(
+        code === "SHIFT_ALREADY_ENDED" || code === "SHIFT_NOT_EDITABLE"
+          ? "Este turno ya venció: no se puede guardar con una fecha de fin en el pasado."
+          : "No pudimos guardar el turno. Revisa las fechas y datos.",
+      );
     } finally {
       setSaving(false);
     }
@@ -1591,7 +1614,7 @@ export default function HomePage() {
               <MiniStat
                 label="Publicados"
                 value={String(shifts.length)}
-                detail={`${shifts.filter((shift) => shift.status === "PUBLISHED").length} activos`}
+                detail={`${shifts.filter((shift) => shift.status === "PUBLISHED" && !isShiftExpired(shift)).length} activos`}
                 icon={CalendarDays}
               />
               <MiniStat
@@ -1679,11 +1702,20 @@ export default function HomePage() {
                     >
                       {selectedShift.coverage}
                     </span>
+                    {isShiftExpired(selectedShift) && (
+                      <span className="expired-badge">Vencido</span>
+                    )}
                     <span className="inline-actions">
                       <button
                         className="row-action"
                         type="button"
                         aria-label="Editar turno"
+                        disabled={isShiftExpired(selectedShift)}
+                        title={
+                          isShiftExpired(selectedShift)
+                            ? "Este turno ya venció y no se puede editar."
+                            : undefined
+                        }
                         onClick={() => {
                           setEditingShift(selectedShift);
                           setPublishOpen(true);
@@ -1767,12 +1799,21 @@ export default function HomePage() {
                   <button
                     className="secondary-button full-action"
                     type="button"
+                    disabled={isShiftExpired(selectedShift)}
+                    title={
+                      isShiftExpired(selectedShift)
+                        ? "Este turno ya venció y no se puede editar."
+                        : undefined
+                    }
                     onClick={() => {
                       setEditingShift(selectedShift);
                       setPublishOpen(true);
                     }}
                   >
-                    <FileText size={16} /> Editar información
+                    <FileText size={16} />{" "}
+                    {isShiftExpired(selectedShift)
+                      ? "Turno vencido: no se puede editar"
+                      : "Editar información"}
                   </button>
                 </aside>
               )}
@@ -2442,7 +2483,7 @@ export default function HomePage() {
                     <span>
                       <strong>Pago directo a trabajadores</strong>
                       <small>
-                        CumpleNow no custodia fondos; registra la referencia del pago.
+                        Chambeaya no custodia fondos; registra la referencia del pago.
                       </small>
                     </span>
                   </div>
@@ -2699,7 +2740,7 @@ function MembershipView({
           <small>
             {status === "TRIAL"
               ? `Vigente hasta el ${trialEnd}`
-              : "Periodo administrado por CumpleNow"}
+              : "Periodo administrado por Chambeaya"}
           </small>
         </div>
       </section>
@@ -2896,7 +2937,9 @@ function Overview({
           value={String(
             shifts.filter(
               (shift) =>
-                shift.status !== "CANCELLED" && shift.status !== "COMPLETED",
+                shift.status !== "CANCELLED" &&
+                shift.status !== "COMPLETED" &&
+                !isShiftExpired(shift),
             ).length,
           )}
           trend={`${shifts.length} registrados`}
@@ -3331,6 +3374,9 @@ function ShiftRow({ shift, onSelect }: { shift: Shift; onSelect: () => void }) {
         <span className={`coverage-badge ${coverageClass(shift.coverage)}`}>
           {shift.coverage}
         </span>
+        {isShiftExpired(shift) && (
+          <span className="expired-badge">Vencido</span>
+        )}
       </span>
       <span className="row-pay">
         <strong>S/ {shift.pay}</strong>
@@ -3375,6 +3421,9 @@ function ManagedShift({
         <span className={`coverage-badge ${coverageClass(shift.coverage)}`}>
           {shift.coverage}
         </span>
+        {isShiftExpired(shift) && (
+          <span className="expired-badge">Vencido</span>
+        )}
         <small>
           {shift.confirmed}/{shift.required} confirmados
         </small>
@@ -3560,6 +3609,11 @@ function PublishModal({
         .toISOString()
         .slice(0, 16)
       : "";
+  // El servidor rechaza un turno cuyo `endsAt` ya pasó (creación y edición).
+  // `min` no reemplaza esa validación -el navegador la puede ignorar o el
+  // reloj local puede estar mal- pero evita el caso común de que el
+  // formulario ofrezca sin aviso una fecha que el servidor va a rechazar.
+  const minEndsAt = localDateTime(new Date().toISOString());
   const formRef = useRef<HTMLFormElement>(null);
   const fillExample = () => {
     if (
@@ -3761,6 +3815,7 @@ function PublishModal({
                 name="endsAt"
                 type="datetime-local"
                 required
+                min={minEndsAt}
                 defaultValue={localDateTime(shift?.endsAt)}
               />
             </label>

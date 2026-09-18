@@ -1,4 +1,4 @@
-# Cumple Now
+# Chambeaya
 
 Plataforma de empleos temporales con una aplicación Flutter para trabajadores,
 un panel web para empresas y administración, y una API Node.js con PostgreSQL.
@@ -48,9 +48,9 @@ La prueba integrada del ciclo de turnos requiere una base aislada cuyo nombre
 termine en `_test` y confirmación explícita:
 
 ```powershell
-$env:CUMPLENOW_INTEGRATION_TESTS = 'true'
-$env:DATABASE_URL = 'postgresql://usuario:clave@host:5432/cumplenow_test?schema=public'
-npm run test:integration --workspace=@cumple-now/api
+$env:CHAMBEAYA_INTEGRATION_TESTS = 'true'
+$env:DATABASE_URL = 'postgresql://usuario:clave@host:5432/chambeaya_test?schema=public'
+npm run test:integration --workspace=@chambeaya/api
 ```
 
 ## Documentación
@@ -63,7 +63,7 @@ separados en `docs/archive/` para no confundirse con la fuente de verdad actual.
 ## Alcance actual
 
 Los trabajadores pueden registrarse; las cuentas empresariales se provisionan
-por Cumple Now. Los turnos, postulaciones, selección y asistencia operan contra
-la API por defecto; la demo requiere `CUMPLENOW_DEMO_MODE=true`. Los pagos
+por Chambeaya. Los turnos, postulaciones, selección y asistencia operan contra
+la API por defecto; la demo requiere `CHAMBEAYA_DEMO_MODE=true`. Los pagos
 reales, retiros, cámara, ubicación, foto de DNI y reconocimiento facial siguen
 intencionalmente desactivados.

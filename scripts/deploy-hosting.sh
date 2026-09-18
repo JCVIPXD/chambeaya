@@ -4,7 +4,7 @@ set -Eeuo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.production.yml"
 ENV_FILE="$PROJECT_DIR/.env.production"
-PROJECT_NAME="cumplenow-production"
+PROJECT_NAME="chambeaya-production"
 WAIT_SECONDS=180
 NO_BUILD=0
 
@@ -52,7 +52,7 @@ for variable in "${required_vars[@]}"; do
 done
 
 password="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$ENV_FILE" | head -n 1)"
-if [[ "$password" == "cumplenow_dev" || "$password" == "cambia-esta-clave-por-una-larga-y-aleatoria" || ${#password} -lt 16 ]]; then
+if [[ "$password" == "chambeaya_dev" || "$password" == "cambia-esta-clave-por-una-larga-y-aleatoria" || ${#password} -lt 16 ]]; then
   echo "POSTGRES_PASSWORD debe tener al menos 16 caracteres y no ser la de ejemplo." >&2
   exit 1
 fi
@@ -78,7 +78,7 @@ compose=(docker compose --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" --
 echo "Validando configuración de producción..."
 "${compose[@]}" config >/dev/null
 
-echo "Construyendo y levantando Cumple Now..."
+echo "Construyendo y levantando Chambeaya..."
 if [[ "$NO_BUILD" -eq 1 ]]; then
   "${compose[@]}" up -d
 else

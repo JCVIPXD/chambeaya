@@ -224,3 +224,29 @@ describe('DemoMarketplaceService', () => {
     ]);
   });
 });
+
+describe('DatabaseMarketplaceService rejects new applications for shifts that are no longer open', () => {
+  // `applyToShift` busca el turno con `where: { id, status: 'PUBLISHED', endsAt: { gt: new Date() } }`
+  // (`marketplace.service.ts`). Un turno `CANCELLED` y un turno vencido
+  // producen exactamente la misma consulta vacía (Prisma no distingue el
+  // motivo), así que ambos casos comparten esta prueba: lo relevante es que
+  // el filtro se envía con la forma correcta y que la ausencia de resultado
+  // se traduce en `409 SHIFT_UNAVAILABLE`, nunca en una postulación creada.
+  it('sends the PUBLISHED + not-yet-ended filter and rejects with 409 when nothing matches', async () => {
+    const findFirst = vi.fn(async () => null);
+    const prisma = {
+      user: { findFirst: vi.fn(async () => ({ id: 'worker-a', name: 'Ana', email: 'ana@example.com' })) },
+      shift: { findFirst },
+    };
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.applyToShift('worker-a', 'shift-cancelled')).rejects.toMatchObject({
+      code: 'SHIFT_UNAVAILABLE',
+      statusCode: 409,
+    });
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { id: 'shift-cancelled', status: 'PUBLISHED', endsAt: { gt: expect.any(Date) } },
+      include: { company: true },
+    });
+  });
+});

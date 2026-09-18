@@ -12,7 +12,7 @@ El API obtiene el propietario desde la sesión. No acepta un `companyId` enviado
 
 ## Superadmin: cuentas empresariales
 
-Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar el alta de empresas que ya entregaron sus datos a CumpleNow:
+Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar el alta de empresas que ya entregaron sus datos a Chambeaya:
 
 - `GET /api/admin/overview`: métricas operativas.
 - `GET /api/admin/companies`: listado con propietario y suscripción.
@@ -54,18 +54,45 @@ Ejemplo de creación:
 }
 ```
 
-Estados: `PUBLISHED`, `ASSIGNED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`.
+Estados: `PUBLISHED`, `ASSIGNED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`. No existe ninguna transición automática por tiempo: un turno cuyo `endsAt` ya pasó conserva su último estado persistido (típicamente `PUBLISHED` o `ASSIGNED`) hasta que la empresa lo cancele; la fecha, no el estado, es lo que determina si sigue operativo.
 
 El estado y `confirmedWorkers` son derivados por el servidor. No se aceptan en los formularios de creación o edición. Un turno con actividad no se puede borrar y, una vez iniciado el check-in, tampoco se puede editar ni cancelar destruyendo su historial.
+
+`POST` y `PATCH` rechazan con `400` un `endsAt` que ya pasó (además del rechazo existente cuando `endsAt` no es posterior a `startsAt`): un turno no puede publicarse ni guardarse ya vencido. Ambas reglas viajan directo en el campo `error` de la respuesta -no anidadas en `issues[]` como una violación de esquema genérica-, igual que `SHIFT_NOT_EDITABLE`:
+
+```json
+{ "error": "SHIFT_ALREADY_ENDED" }
+```
+```json
+{ "error": "INVALID_DATE_RANGE" }
+```
+
+`SHIFT_ALREADY_ENDED` señala que el `endsAt` enviado ya pasó; `INVALID_DATE_RANGE`, que `endsAt` no es posterior a `startsAt`. Un cliente puede distinguir cualquiera de las dos entre sí y de cualquier otro dato inválido (que sí llega como `{ "error": "INVALID_INPUT", "issues": [...] }`, la violación de esquema genérica de Zod) leyendo solo el campo `error`.
+
+Es válido crear o editar un turno cuyo `startsAt` ya pasó mientras su `endsAt` siga en el futuro: un turno en curso todavía admite cobertura, y el resto del sistema (búsqueda, postulación, aceptación, check-in) filtra siempre por `endsAt`, nunca por `startsAt`. La hora de referencia es siempre la del servidor.
+
+`PATCH` además responde `400 SHIFT_NOT_EDITABLE` para **cualquier** edición, incluida una que no toque fechas, sobre un turno cuyo `endsAt` ya pasó; es el mismo código que ya se usaba para un turno terminal o con check-in en curso. Cancelar (`POST /api/business/shifts/:id/cancel`) sigue permitido sobre un turno vencido que nunca se cubrió, para poder cerrar el registro.
+
+El panel web deshabilita el botón "Editar" y muestra una insignia "Vencido" cuando `isShiftExpired` (cliente) detecta que el turno ya pasó su `endsAt`; si de todas formas la petición llega al servidor (p. ej. por una condición de carrera de UI) y falla con `SHIFT_ALREADY_ENDED`/`SHIFT_NOT_EDITABLE`, el mensaje se lo explica al operador en vez de mostrar un error genérico.
 
 Cada creación, edición o eliminación de un turno notifica inmediatamente al feed del marketplace. Solo los turnos `PUBLISHED` que todavía no finalizaron aparecen para trabajadores.
 
 `screeningQuestions` es opcional y acepta hasta tres preguntas de 10 a 240 caracteres. No debe utilizarse para solicitar DNI, información de salud ni otros datos sensibles.
 
+### Postulaciones y decisión de la empresa
+
+- `GET /api/business/shifts/:id/applications`: postulaciones del turno, con el mismo `nextAction` que ve el trabajador.
+- `GET /api/business/applications/pending`: total y turnos con postulaciones `PENDING` de la empresa.
+- `PATCH /api/business/shifts/:id/applications/:applicationId`: decide una postulación `PENDING`. Cuerpo `{ "decision": "ACCEPTED" | "REJECTED", "reason"?: "…" }` (`reason` obligatorio si `decision` es `REJECTED`, opcional en `ACCEPTED`).
+
+Aceptar crea la asignación (`ShiftAssignment`) dentro de una transacción `Serializable` con reintento automático ante conflicto de serialización: si dos aceptaciones para el último cupo disponible llegan a la vez, la base de datos garantiza que solo una lea y reserve ese cupo; la otra recibe `400 SHIFT_FULL` en la misma respuesta, sin sobrecupo ni asignación duplicada. `400 SHIFT_NOT_ASSIGNABLE` rechaza decidir sobre un turno terminal, con check-in en curso o cuyo `endsAt` ya pasó (un turno vencido no puede ganar una nueva asignación aunque la postulación sea anterior a su vencimiento). `400 APPLICATION_ALREADY_DECIDED` cubre una segunda decisión sobre la misma postulación.
+
 ## Marketplace para trabajadores
 
 - `GET /api/shifts`: devuelve los turnos publicados desde PostgreSQL.
 - `GET /api/shifts/events`: stream público de Server-Sent Events (SSE).
+
+Cada turno del marketplace (en este endpoint, en el feed SSE y en el `shift` embebido de `GET /api/workers/applications`) incluye `endsAt` (ISO 8601): es el único dato de fecha real que se expone a los clientes -`dateLabel` es solo texto formateado- y la única forma de que un cliente sepa si una asignación aceptada ya venció, dado que no existe transición automática por tiempo. Flutter lo usa para dejar de ofrecer "Confirmar asistencia"/"Confirmar llegada" sobre un turno cuyo `endsAt` ya pasó sin que el trabajador llegara a hacer check-in (una vez hecho el check-in, `checkOut` no tiene ventana de tiempo propia y sigue siendo válido más allá de `endsAt`).
 - `POST /api/shifts/:id/applications`: crea una postulación autenticada. Si el turno tiene preguntas de filtro, recibe todas las respuestas en `answers`.
 
 ```json
@@ -84,16 +111,20 @@ La pregunta debe coincidir con la publicada y cada respuesta admite hasta 1000 c
 Rutas operativas autenticadas del trabajador:
 
 - `GET /api/workers/applications`: incluye asignación persistida y `nextAction` con actor, código y texto explicativo.
-- `POST /api/shifts/:id/confirm`: confirma la asignación antes del ingreso.
-- `POST /api/shifts/:id/check-in`: exige confirmación y la credencial temporal vigente.
-- `POST /api/shifts/:id/check-out`: exige check-in y completa solo la asignación del trabajador. El turno completo se cierra cuando terminan todos sus cupos.
+- `POST /api/shifts/:id/confirm`: confirma la asignación antes del ingreso. Responde `404 ASSIGNMENT_NOT_FOUND` si la asignación no existe o su turno ya venció (`shift.endsAt` ya pasó).
+- `POST /api/shifts/:id/check-in`: exige confirmación y la credencial temporal vigente. Responde `409 SHIFT_UNAVAILABLE` si el turno ya venció o quedó en un estado terminal.
+- `POST /api/shifts/:id/check-out`: exige check-in y completa solo la asignación del trabajador. El turno completo se cierra cuando terminan todos sus cupos. No tiene ninguna ventana de tiempo propia: sigue siendo válido aunque el turno ya haya pasado su `endsAt` nominal.
 - `POST /api/shifts/:id/cancel`: permite cancelar antes del check-in y conserva motivo, actor y fecha.
+
+La app Flutter (`HttpWorkerMarketplaceRepository`) propaga el código real de `confirm`/`check-in`/`check-out` mediante `MarketplaceApiException` en vez de un error genérico: si el código indica que el turno ya no existe o está disponible (`ASSIGNMENT_NOT_FOUND`, `SHIFT_UNAVAILABLE`, `SHIFT_NOT_FOUND`), la pantalla de postulaciones (`WorkerApplicationsPage`) explica el motivo y recarga de inmediato en vez de dejar un botón que siempre va a fallar.
 
 La empresa recibe el mismo `nextAction` al consultar `/api/business/shifts/:id/applications`, evitando que web y Flutter calculen reglas contradictorias.
 
 El endpoint histórico `PUT /api/shifts/:id/accept` solo se conserva para la demostración en memoria. En modo persistente responde `410 DIRECT_ASSIGNMENT_DISABLED`; toda asignación real debe originarse en una postulación revisada por la empresa.
 
 El stream envía eventos `shifts` con una fotografía completa de las oportunidades vigentes. Flutter mantiene la conexión abierta, actualiza la lista sin recargar y vuelve a conectarse automáticamente si se interrumpe la red.
+
+La reemisión ocurre por dos vías independientes: inmediatamente después de que una empresa publica, edita, cancela o decide una postulación (`onShiftsChanged`), y además cada 60 segundos por defecto (configurable solo para pruebas mediante la opción interna `marketplaceFeedRefreshIntervalMs` de `createApp`), para que un turno que simplemente venció por el paso del tiempo -sin que ninguna empresa haya tocado nada- también se retire del feed de los clientes ya conectados en un plazo acotado.
 
 ```text
 event: shifts
@@ -166,8 +197,8 @@ Errores propios de estas rutas: `403 BUSINESS_ACCOUNT_REQUIRED` / `403 WORKER_AC
 ## Acceso con Google
 
 - `GET /api/auth/providers`: informa si Google está configurado.
-- `POST /api/auth/google`: recibe `{ "idToken": "…" }` y verifica la identidad. Para una cuenta nueva responde `202` con un `profileSetupToken` temporal; el cliente solicita entonces DNI y una contraseña nueva de Cumple Now, y usa `POST /api/auth/google/complete` con `{ "profileSetupToken", "dni", "password" }`. Así el ID token de Google se valida una sola vez. La contraseña de Google nunca se recibe ni se almacena.
-- `POST /api/auth/password`: requiere sesión Bearer y permite que una cuenta Google creada antes de este paso defina una vez su contraseña exclusiva de Cumple Now. Recibe `{ "password": "…" }`. La sesión expone `requiresPasswordSetup: true` hasta que lo haga; Flutter bloquea el acceso al panel hasta completar ese paso.
+- `POST /api/auth/google`: recibe `{ "idToken": "…" }` y verifica la identidad. Para una cuenta nueva responde `202` con un `profileSetupToken` temporal; el cliente solicita entonces DNI y una contraseña nueva de Chambeaya, y usa `POST /api/auth/google/complete` con `{ "profileSetupToken", "dni", "password" }`. Así el ID token de Google se valida una sola vez. La contraseña de Google nunca se recibe ni se almacena.
+- `POST /api/auth/password`: requiere sesión Bearer y permite que una cuenta Google creada antes de este paso defina una vez su contraseña exclusiva de Chambeaya. Recibe `{ "password": "…" }`. La sesión expone `requiresPasswordSetup: true` hasta que lo haga; Flutter bloquea el acceso al panel hasta completar ese paso.
 
 Las cuentas por correo existentes no se fusionan automáticamente con Google. Sin credenciales configuradas, el proveedor responde como no disponible. El cambio y recuperación de contraseña requerirán una sesión autenticada o un mecanismo de recuperación de correo verificado antes de abrirse al público.
 

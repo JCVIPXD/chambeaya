@@ -130,7 +130,7 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
 
   @override
   Widget build(BuildContext context) => Material(
-    color: AppColors.background,
+    color: context.palette.background,
     child: FutureBuilder<_DiscoveryBootstrap>(
       future: _loading,
       builder: (context, snapshot) {
@@ -279,7 +279,7 @@ class _DiscoveryContent extends StatelessWidget {
                     workerName: workerName,
                   ),
                 ),
-                const VerticalDivider(width: 1, color: AppColors.border),
+                VerticalDivider(width: 1, color: context.palette.border),
                 Expanded(child: _Detail(controller: controller)),
               ],
             ),
@@ -330,99 +330,99 @@ class _TopBar extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => Container(
-    height: 86,
-    padding: const EdgeInsets.symmetric(horizontal: 28),
-    color: Colors.white,
-    child: Row(
-      children: [
-        const Expanded(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Oportunidades para ti',
-                style: TextStyle(
-                  color: AppColors.navy,
-                  fontSize: 21,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              SizedBox(height: 3),
-              Text(
-                'Turnos seleccionados según tu perfil y disponibilidad',
-                style: TextStyle(color: AppColors.muted, fontSize: 11),
-              ),
-            ],
-          ),
-        ),
-        SizedBox(
-          width: 390,
-          child: JobSearchBar(
-            onChanged: onQueryChanged,
-            onOpenFilters: onOpenFilters,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Tooltip(
-          message: isAvailable
-              ? 'Disponible para nuevos turnos'
-              : 'No disponible para nuevos turnos',
-          child: Switch.adaptive(
-            value: isAvailable,
-            onChanged: availabilitySaving ? null : onAvailabilityChanged,
-          ),
-        ),
-        IconButton(
-          tooltip: 'Notificaciones',
-          onPressed: () {},
-          icon: Badge(
-            smallSize: 7,
-            backgroundColor: AppColors.gold,
-            child: const Icon(
-              Icons.notifications_none_rounded,
-              color: AppColors.navy,
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Container(
-          padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
-          decoration: BoxDecoration(
-            color: AppColors.surfaceMuted,
-            border: Border.all(color: AppColors.border),
-            borderRadius: BorderRadius.circular(24),
-          ),
-          child: Row(
-            children: [
-              CircleAvatar(
-                radius: 17,
-                backgroundColor: AppColors.navySoft,
-                child: Text(
-                  _initials,
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return Container(
+      height: 86,
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      color: palette.surface,
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Oportunidades para ti',
                   style: TextStyle(
-                    color: AppColors.navy,
-                    fontSize: 11,
+                    color: palette.ink,
+                    fontSize: 21,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
-              ),
-              SizedBox(width: 8),
-              Text(
-                _displayName,
-                style: TextStyle(
-                  color: AppColors.navy,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
+                const SizedBox(height: 3),
+                Text(
+                  'Turnos seleccionados según tu perfil y disponibilidad',
+                  style: TextStyle(color: palette.muted, fontSize: 11),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
-    ),
-  );
+          SizedBox(
+            width: 390,
+            child: JobSearchBar(
+              onChanged: onQueryChanged,
+              onOpenFilters: onOpenFilters,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Tooltip(
+            message: isAvailable
+                ? 'Disponible para nuevos turnos'
+                : 'No disponible para nuevos turnos',
+            child: Switch.adaptive(
+              value: isAvailable,
+              onChanged: availabilitySaving ? null : onAvailabilityChanged,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Notificaciones',
+            onPressed: () {},
+            icon: Badge(
+              smallSize: 7,
+              backgroundColor: AppColors.gold,
+              child: Icon(Icons.notifications_none_rounded, color: palette.ink),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
+            decoration: BoxDecoration(
+              color: palette.surfaceMuted,
+              border: Border.all(color: palette.border),
+              borderRadius: BorderRadius.circular(24),
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 17,
+                  backgroundColor: palette.accentSoft,
+                  child: Text(
+                    _initials,
+                    style: TextStyle(
+                      color: palette.ink,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _displayName,
+                  style: TextStyle(
+                    color: palette.ink,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ResultsColumn extends StatelessWidget {
@@ -479,7 +479,7 @@ class _ResultsColumn extends StatelessWidget {
         const SizedBox(height: 12),
       ],
       if (!showHeader) ...[
-        const Row(
+        Row(
           children: [
             Expanded(
               child: Column(
@@ -488,20 +488,23 @@ class _ResultsColumn extends StatelessWidget {
                   Text(
                     'Explora turnos',
                     style: TextStyle(
-                      color: AppColors.navy,
+                      color: context.palette.ink,
                       fontSize: 16,
                       fontWeight: FontWeight.w900,
                     ),
                   ),
-                  SizedBox(height: 2),
+                  const SizedBox(height: 2),
                   Text(
                     'Actualizados para ti',
-                    style: TextStyle(color: AppColors.muted, fontSize: 10),
+                    style: TextStyle(
+                      color: context.palette.muted,
+                      fontSize: 10,
+                    ),
                   ),
                 ],
               ),
             ),
-            _LiveBadge(),
+            const _LiveBadge(),
           ],
         ),
         const SizedBox(height: 14),
@@ -543,8 +546,8 @@ class _ResultsColumn extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: showHeader
                   ? Theme.of(context).textTheme.titleLarge
-                  : const TextStyle(
-                      color: AppColors.navy,
+                  : TextStyle(
+                      color: context.palette.ink,
                       fontSize: 12,
                       fontWeight: FontWeight.w800,
                     ),
@@ -566,7 +569,7 @@ class _ResultsColumn extends StatelessWidget {
             child: Text(
               '${shifts.length} resultados',
               key: ValueKey(shifts.length),
-              style: const TextStyle(color: AppColors.muted, fontSize: 12),
+              style: TextStyle(color: context.palette.muted, fontSize: 12),
             ),
           ),
         ],
@@ -653,7 +656,7 @@ class _LiveBadge extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
     decoration: BoxDecoration(
-      color: AppColors.tealSoft,
+      color: context.palette.accentSoft,
       borderRadius: BorderRadius.circular(20),
     ),
     child: const Row(
@@ -839,8 +842,8 @@ class _InlineState extends StatelessWidget {
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.all(24),
     decoration: BoxDecoration(
-      color: Colors.white,
-      border: Border.all(color: AppColors.border),
+      color: context.palette.surface,
+      border: Border.all(color: context.palette.border),
       borderRadius: BorderRadius.circular(16),
     ),
     child: Column(
@@ -856,7 +859,7 @@ class _InlineState extends StatelessWidget {
         Text(
           message,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: AppColors.muted),
+          style: TextStyle(color: context.palette.muted),
         ),
         if (action != null)
           TextButton.icon(

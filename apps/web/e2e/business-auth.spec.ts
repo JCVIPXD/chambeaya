@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { account, company, expect, session, test } from './fixtures/business-api';
 
-const sessionKey = 'cumplenow_business_session';
+const sessionKey = 'chambeaya_business_session';
 
 async function login(page: Page, password = account.password) {
   await page.goto('/');
