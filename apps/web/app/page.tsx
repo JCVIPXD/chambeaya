@@ -2645,17 +2645,19 @@ function MembershipView({
   onToast: (message: string) => void;
 }) {
   const plan = subscription?.plan ?? "PILOT";
-  const status = subscription?.status ?? "TRIAL";
+  const status = subscription?.status ?? "INACTIVE";
   const statusLabel =
-    status === "TRIAL"
-      ? "Piloto activo"
-      : status === "ACTIVE"
-        ? "Activo"
-        : status === "PAUSED"
-          ? "Pausado"
-          : status === "EXPIRED"
-            ? "Finalizado"
-            : "Cancelado";
+    status === "INACTIVE"
+      ? "Sin plan activo"
+      : status === "TRIAL"
+        ? "Piloto activo"
+        : status === "ACTIVE"
+          ? "Activo"
+          : status === "PAUSED"
+            ? "Pausado"
+            : status === "EXPIRED"
+              ? "Finalizado"
+              : "Cancelado";
   const trialEnd = subscription?.trialEndsAt
     ? new Intl.DateTimeFormat("es-PE", {
       day: "numeric",

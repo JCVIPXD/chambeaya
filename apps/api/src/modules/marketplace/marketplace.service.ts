@@ -1,7 +1,14 @@
 import { PrismaClient, type Company, type Prisma, type Shift } from '@prisma/client';
 
 import { filterShifts, type ShiftIndustry, type ShiftSearchFilter } from './shift_search.js';
-import { deriveShiftStatus, nextOperationalAction, type OperationalAction } from '../operations/shift-state.js';
+import {
+  checkInWindowViolation,
+  deriveShiftStatus,
+  nextOperationalAction,
+  resolveAssignmentLifecycle,
+  type OperationalAction,
+  type OperationalAssignmentStatus,
+} from '../operations/shift-state.js';
 
 export type DemoShiftStatus = 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
 
@@ -57,7 +64,7 @@ export interface WorkerApplication {
   shift: DemoShift;
   assignment?: {
     id: string;
-    status: 'ASSIGNED' | 'CANCELLED' | 'COMPLETED';
+    status: OperationalAssignmentStatus;
     checkInCredential: string | null;
     workerConfirmedAt: string | null;
     checkedInAt: string | null;
@@ -88,7 +95,18 @@ export interface MarketplaceOperations {
 
 export class MarketplaceError extends Error {
   constructor(
-    public readonly code: 'SHIFT_NOT_FOUND' | 'SHIFT_UNAVAILABLE' | 'ASSIGNMENT_NOT_FOUND' | 'INVALID_CHECK_IN' | 'CANCELLATION_NOT_ALLOWED' | 'INVALID_SCREENING_ANSWERS' | 'DIRECT_ASSIGNMENT_DISABLED' | 'PAYMENT_NOT_FOUND' | 'PAYMENT_NOT_REPORTABLE',
+    public readonly code:
+      | 'SHIFT_NOT_FOUND'
+      | 'SHIFT_UNAVAILABLE'
+      | 'ASSIGNMENT_NOT_FOUND'
+      | 'INVALID_CHECK_IN'
+      | 'CHECK_IN_TOO_EARLY'
+      | 'ASSIGNMENT_NOT_ACTIONABLE'
+      | 'CANCELLATION_NOT_ALLOWED'
+      | 'INVALID_SCREENING_ANSWERS'
+      | 'DIRECT_ASSIGNMENT_DISABLED'
+      | 'PAYMENT_NOT_FOUND'
+      | 'PAYMENT_NOT_REPORTABLE',
     public readonly statusCode: number,
   ) {
     super(code);
@@ -422,22 +440,81 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
     });
   }
 
+  /**
+   * Resuelve el ciclo de vida de una asignación puntual (`NO_SHOW`/`ABANDONED`,
+   * ver `shift-state.ts`) y, si cambió, lo persiste junto con el estado
+   * agregado del turno para que ese cupo quede libre para reasignación. Se
+   * invoca solo desde puntos que ya tocan una asignación individual
+   * (`checkIn`, `checkOut`) — nunca desde listados/polling masivo.
+   */
+  private async resolveAndPersistLifecycle(assignment: {
+    id: string;
+    shiftId: string;
+    status: string;
+    checkedInAt: Date | null;
+    checkedOutAt: Date | null;
+    shift: { status: string; startsAt: Date; endsAt: Date; requiredWorkers: number };
+  }) {
+    const lifecycle = resolveAssignmentLifecycle(assignment as never, assignment.shift);
+    if (!lifecycle.changed) return lifecycle.status;
+    await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      await tx.shiftAssignment.update({ where: { id: assignment.id }, data: { status: lifecycle.status as never } });
+      // Rastro de auditoría de la transición automática (ver MEDIO-1 de
+      // CN-20260918-002). No existe un `ShiftEventType` dedicado a
+      // `NO_SHOW`/`ABANDONED`; se reutiliza `CANCELLED` (el precedente más
+      // cercano) con actor `SYSTEM`, igual que en `business.service.ts`.
+      await tx.shiftEvent.create({
+        data: {
+          shiftId: assignment.shiftId,
+          actorId: null,
+          actorRole: 'SYSTEM',
+          type: 'CANCELLED',
+          detail: lifecycle.status === 'NO_SHOW'
+            ? `Asignación ${assignment.id} marcada NO_SHOW automáticamente: sin check-in dentro de la ventana`
+            : `Asignación ${assignment.id} marcada ABANDONED automáticamente: check-in sin check-out tras el margen de tolerancia`,
+        },
+      });
+      const assignments = await tx.shiftAssignment.findMany({ where: { shiftId: assignment.shiftId } });
+      const nextShiftStatus = deriveShiftStatus(assignment.shift.status as never, assignment.shift.requiredWorkers, assignments as never, assignment.shift);
+      const confirmedWorkers = assignments.filter((candidate) => candidate.status === 'ASSIGNED').length;
+      await tx.shift.update({ where: { id: assignment.shiftId }, data: { status: nextShiftStatus as never, confirmedWorkers } });
+    }, { isolationLevel: 'Serializable' }));
+    return lifecycle.status;
+  }
+
   async checkIn(workerId: string, shiftId: string, credential: string) {
     const assignment = await this.prisma.shiftAssignment.findFirst({
-      where: { workerId, shiftId, status: 'ASSIGNED' },
+      where: { workerId, shiftId },
       include: { shift: true },
     });
-    if (!assignment) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+    if (!assignment || ['CANCELLED', 'COMPLETED'].includes(assignment.status)) {
+      throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+    }
+    const lifecycleStatus = await this.resolveAndPersistLifecycle(assignment);
+    if (lifecycleStatus !== 'ASSIGNED') throw new MarketplaceError('ASSIGNMENT_NOT_ACTIONABLE', 409);
+    // Guard directo contra `endsAt`, independiente de la ventana relativa a
+    // `startsAt` (`checkInWindowViolation`/`resolveAndPersistLifecycle`): en
+    // un turno más corto que `CHECK_IN_LATE_LIMIT_MS` la ventana por tardanza
+    // puede seguir "abierta" después de que el turno ya terminó, porque
+    // `shiftSchema` no impone una duración mínima. Sin este guard se podía
+    // aceptar un check-in después de `endsAt` (ver MEDIO-3 de
+    // CN-20260918-002); es el mismo guard que existía antes de introducir la
+    // ventana de tiempo, restaurado para que ambos sean consistentes entre sí.
     if (!assignment.workerConfirmedAt || assignment.shift.endsAt <= new Date() || ['COMPLETED', 'CANCELLED'].includes(assignment.shift.status)) {
       throw new MarketplaceError('SHIFT_UNAVAILABLE', 409);
     }
-    if (!assignment.checkInCredential || credential.trim() !== assignment.checkInCredential) throw new MarketplaceError('INVALID_CHECK_IN', 400);
     if (assignment.checkedInAt) return { shiftId, checkedInAt: assignment.checkedInAt.toISOString() };
+    // La tardanza más allá de la ventana ya la captura `resolveAndPersistLifecycle`
+    // arriba (la asignación pasa a `NO_SHOW` y este método ya retornó
+    // `ASSIGNMENT_NOT_ACTIONABLE`): a este punto solo puede quedar la
+    // violación por llegar demasiado temprano.
+    if (checkInWindowViolation(assignment.shift) === 'TOO_EARLY') throw new MarketplaceError('CHECK_IN_TOO_EARLY', 409);
+    if (!assignment.checkInCredential || credential.trim() !== assignment.checkInCredential) throw new MarketplaceError('INVALID_CHECK_IN', 400);
     const checkedInAt = new Date();
     await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
       await tx.shiftAssignment.update({ where: { id: assignment.id }, data: { checkedInAt } });
       const assignments = await tx.shiftAssignment.findMany({ where: { shiftId } });
-      const status = deriveShiftStatus(assignment.shift.status, assignment.shift.requiredWorkers, assignments);
+      const status = deriveShiftStatus(assignment.shift.status, assignment.shift.requiredWorkers, assignments, assignment.shift);
       await tx.shift.update({ where: { id: shiftId }, data: { status } });
       await tx.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'WORKER', type: 'CHECKED_IN' } });
     }, { isolationLevel: 'Serializable' }));
@@ -446,10 +523,14 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
 
   async checkOut(workerId: string, shiftId: string) {
     const assignment = await this.prisma.shiftAssignment.findFirst({
-      where: { workerId, shiftId, status: 'ASSIGNED' },
+      where: { workerId, shiftId },
       include: { shift: { include: { company: true } } },
     });
-    if (!assignment) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+    if (!assignment || ['CANCELLED', 'COMPLETED'].includes(assignment.status)) {
+      throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+    }
+    const lifecycleStatus = await this.resolveAndPersistLifecycle(assignment);
+    if (lifecycleStatus !== 'ASSIGNED') throw new MarketplaceError('ASSIGNMENT_NOT_ACTIONABLE', 409);
     if (!assignment.checkedInAt) throw new MarketplaceError('SHIFT_UNAVAILABLE', 409);
     const checkedOutAt = new Date();
     await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
@@ -458,7 +539,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
         data: { checkedOutAt, completedAt: checkedOutAt, status: 'COMPLETED' },
       });
       const assignments = await tx.shiftAssignment.findMany({ where: { shiftId } });
-      const status = deriveShiftStatus(assignment.shift.status, assignment.shift.requiredWorkers, assignments);
+      const status = deriveShiftStatus(assignment.shift.status, assignment.shift.requiredWorkers, assignments, assignment.shift);
       await tx.shift.update({ where: { id: shiftId }, data: { status } });
       await tx.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'WORKER', type: 'CHECKED_OUT' } });
       await tx.payment.upsert({
@@ -510,7 +591,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       if (assignmentId) {
         const assignments = await tx.shiftAssignment.findMany({ where: { shiftId } });
         const activeCount = assignments.filter((assignment) => assignment.status === 'ASSIGNED').length;
-        const status = deriveShiftStatus(application.shift.status, application.shift.requiredWorkers, assignments);
+        const status = deriveShiftStatus(application.shift.status, application.shift.requiredWorkers, assignments, application.shift);
         await tx.shift.update({
           where: { id: shiftId },
           data: { confirmedWorkers: activeCount, status },
@@ -669,7 +750,7 @@ function toWorkerApplication(application: {
   shift: PublishedShift;
   assignment?: {
     id: string;
-    status: 'ASSIGNED' | 'CANCELLED' | 'COMPLETED';
+    status: OperationalAssignmentStatus;
     checkInCredential: string | null;
     workerConfirmedAt: Date | null;
     checkedInAt: Date | null;

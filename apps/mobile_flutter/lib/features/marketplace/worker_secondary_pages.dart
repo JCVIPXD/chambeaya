@@ -243,6 +243,40 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
   /// mensaje genérico previo.
   void _handleActionError(Object error, {required String genericMessage}) {
     if (!mounted) return;
+    // `CHECK_IN_TOO_EARLY`: la ventana de check-in (30 min antes de que
+    // empiece el turno) todavía no abrió. No es "el turno ya no existe" -no
+    // se fuerza recarga, el trabajador puede reintentar más tarde- así que
+    // amerita un mensaje propio en vez de caer en el genérico "Inténtalo
+    // otra vez" (ver MEDIO-2 de CN-20260918-002).
+    if (error is MarketplaceApiException && error.code == 'CHECK_IN_TOO_EARLY') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Todavía no puedes registrar tu llegada: la ventana de check-in abre 30 minutos antes del inicio del turno.',
+          ),
+        ),
+      );
+      return;
+    }
+    // `ASSIGNMENT_NOT_ACTIONABLE`: el servidor ya resolvió esta asignación
+    // como `NO_SHOW`/`ABANDONED` (ventana de check-in cerrada por tardanza, o
+    // check-in sin check-out ya vencido). A diferencia de `CHECK_IN_TOO_EARLY`
+    // esto sí es un cierre permanente para esta asignación, así que se
+    // recarga de inmediato igual que en el caso "el turno ya no existe".
+    if (error is MarketplaceApiException &&
+        error.code == 'ASSIGNMENT_NOT_ACTIONABLE') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Ya no puedes hacer esto: la ventana de tu turno se cerró (llegada fuera de tiempo o salida pendiente vencida). Actualizamos tu lista.',
+          ),
+        ),
+      );
+      setState(() {
+        _loading = _load();
+      });
+      return;
+    }
     if (error is MarketplaceApiException && error.isShiftGone) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(

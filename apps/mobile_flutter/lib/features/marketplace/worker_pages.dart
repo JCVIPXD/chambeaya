@@ -683,7 +683,7 @@ class _PaymentTile extends StatelessWidget {
               label: _paymentStatusLabel(payment.status),
               color: payment.status == 'Liberado'
                   ? AppColors.teal
-                  : payment.status == 'Reversed'
+                  : payment.status == 'Revertido'
                   ? Colors.redAccent
                   : AppColors.gold,
             ),
@@ -711,7 +711,7 @@ class _PaymentTile extends StatelessWidget {
 
 String _paymentStatusLabel(String status) => switch (status) {
   'Liberado' => 'Pago reportado',
-  'Reversed' => 'Incidencia de pago',
+  'Revertido' => 'Incidencia de pago',
   _ => 'Pendiente de pago',
 };
 

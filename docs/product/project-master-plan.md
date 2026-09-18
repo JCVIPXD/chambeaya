@@ -239,10 +239,33 @@ Objetivo: construir confianza con datos derivados de trabajos reales.
 
 Objetivo: hacer confiable el recorrido desde la selección hasta el cierre.
 
-- **Endurecer asistencia (P0).** Definir ventanas de check-in/out, expiración y
+- **Endurecer asistencia (P0, parcial).** Definir ventanas de check-in/out, expiración y
   rotación de credenciales, tardanza, no-show, cierre manual controlado y prevención
   de reutilización. Mantener GPS y biometría fuera de este alcance inicial. Cierre:
   toda asignación cerrada conserva evidencia temporal y actor.
+  Cubierto por `CN-20260918-001` y su corrección `CN-20260918-003`: ventana de
+  check-in (30 min antes / 60 min después de `startsAt`, con un guard directo contra
+  `endsAt` para que un turno más corto que esa ventana nunca acepte un check-in tras
+  su propio fin), credencial aleatoria por asignación en vez de derivada de `shiftId`,
+  estados `NO_SHOW`/`ABANDONED` resueltos al tocar la asignación (cada transición
+  automática deja un `ShiftEvent` con actor `SYSTEM`, cumpliendo el criterio de cierre
+  de este bloque), cierre manual de una asignación `ABANDONED` **o `NO_SHOW`** por
+  parte de la empresa (`POST /api/business/shifts/:id/assignments/:assignmentId/resolve`,
+  incluida la vía para que un trabajador marcado `NO_SHOW` que sí trabajó el turno
+  cobre igual, vía `outcome: "COMPLETED"`), y cierre del turno como `CANCELLED` -en vez
+  de reabrir a un `PUBLISHED` fantasma e inalcanzable- cuando su única asignación
+  activa queda cancelada/no-show/abandonada después de que `endsAt` ya pasó.
+  Sigue pendiente: expiración y rotación de credenciales (la credencial no caduca y el
+  propio trabajador la recibe del API, así que no prueba presencia); una ventana
+  propia de check-out (hoy sigue siendo válido en cualquier momento tras el check-in,
+  hasta que el margen de 60 minutos tras `endsAt` marca la asignación `ABANDONED`);
+  **una interfaz para el cierre manual** (`resolve` existe solo como endpoint HTTP: ni
+  el panel web ni Flutter ofrecen un control que lo invoque, así que en la práctica la
+  ruta de cobro de un `NO_SHOW`/`ABANDONED` exige llamar a la API a mano); y el
+  **cierre de turnos multi-cupo parcialmente cubiertos** (si una asignación completó y
+  otra quedó `NO_SHOW`/`ABANDONED`/`CANCELLED`, el turno se queda en `CHECKED_IN`
+  aunque `endsAt` haya pasado, y solo sale de ahí pagando la asignación pendiente;
+  es comportamiento previo a estos estados, detallado en `docs/reference/api.md`).
 - **Aprobación y corrección de horas (P0).** Guardar horas propuestas, aprobación
   empresarial, disputa y correcciones como eventos inmutables; impedir que editar un
   turno reescriba el historial. Cierre: el importe u obligación se calcula únicamente
@@ -328,6 +351,25 @@ Objetivo: cerrar primero la obligación económica y después mover dinero.
   límites, facturación y cobro recurrente solo después de medir uso y validar precio.
   Cierre: los permisos se derivan del plan y no rompen el flujo base gratuito del
   trabajador.
+  Cubierto parcialmente por `CN-20260918-005`: `GET /api/business/subscription` dejó de
+  crear una fila `PILOT/TRIAL` real en la primera consulta y devuelve un objeto
+  sintético `PILOT/INACTIVE` mientras nadie active nada, de modo que el producto ya no
+  sugiere que Chambeaya inscribió sola a la empresa.
+  Sigue pendiente: **no existe todavía ningún endpoint ni pantalla de activación de
+  plan**, así que hoy ninguna empresa puede pasar de `INACTIVE` a `TRIAL`/`ACTIVE` por
+  el producto (solo `demo.seed.ts` siembra una fila real); y **no hay limpieza de las
+  filas `TRIAL` fantasma** que la versión anterior ya creó en cualquier base donde
+  corrió — esas empresas siguen viendo "Piloto activo" indistinguible de una activación
+  real hasta que exista esa tarea de una sola vez.
+- **Reencuadre de pagos sin pasarela (P2, parcial).** El objetivo declarado -que nada
+  en la capa interna suene a que Chambeaya custodia o retiene dinero- se atacó en
+  `CN-20260918-005` por comportamiento y documentación, no por renombrado: se eliminó
+  la suscripción fantasma (arriba) y se unificó el mapeo interno de pagos de Flutter a
+  español. Sigue pendiente y explícitamente diferido: el modelo `WalletMovement`, la
+  ruta `/api/workers/wallet` y los estados `RELEASED`/`REVERSED` conservan nombres que
+  evocan custodia, y su reencuadre real depende de la decisión de modelo económico que
+  todavía no se tomó. Mitigación vigente: la sección "Wallet del trabajador (reporte de
+  pagos, no custodia)" de `docs/reference/api.md`.
 
 ### Bloque 7 — Administración, analítica y crecimiento
 

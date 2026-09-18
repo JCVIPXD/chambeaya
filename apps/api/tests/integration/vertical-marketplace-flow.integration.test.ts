@@ -83,7 +83,12 @@ describe('vertical marketplace flow with PostgreSQL', () => {
     const workerUserId = workerRegistration.body.userId;
     expect(workerUserId).toEqual(expect.any(String));
 
-    const start = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    // El check-in real (segunda prueba de este archivo) exige estar dentro
+    // de la ventana de tolerancia alrededor de `startsAt` (ver
+    // `CHECK_IN_EARLY_TOLERANCE_MS`/`CHECK_IN_LATE_LIMIT_MS` en
+    // `shift-state.ts`, 30 y 60 minutos respectivamente): `startsAt` debe
+    // quedar cerca de "ahora", no a 48 horas vista como antes de esa regla.
+    const start = new Date(Date.now() + 10 * 60 * 1000);
     const end = new Date(start.getTime() + 8 * 60 * 60 * 1000);
     const createdShift = await request(app)
       .post('/api/business/shifts')

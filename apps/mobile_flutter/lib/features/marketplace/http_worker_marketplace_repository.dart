@@ -254,7 +254,7 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
         status: movement['status'] == 'RELEASED'
             ? 'Liberado'
             : movement['status'] == 'REVERSED'
-            ? 'Reversed'
+            ? 'Revertido'
             : 'Pendiente',
         reference: movement['reference'] as String?,
         receiptConfirmed: movement['receiptConfirmed'] == true,
@@ -333,9 +333,20 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
               checkedInAt == null &&
               shiftEndsAt != null &&
               !shiftEndsAt.isAfter(DateTime.now());
+          // `NO_SHOW`/`ABANDONED` (ver `shift-state.ts` en la API) son estados
+          // de asignación que el servidor resuelve "al tocar" la asignación,
+          // nunca disparados por este cliente: una vez alcanzados, el
+          // servidor rechaza `confirm`/`check-in`/`check-out` con 409, así
+          // que deben tratarse como cerrados igual que `COMPLETED`/`CANCELLED`
+          // para no seguir ofreciendo una acción que siempre va a fallar.
           final closed =
               const {'COMPLETED', 'CANCELLED'}.contains(shiftStatus) ||
-              const {'COMPLETED', 'CANCELLED'}.contains(assignmentStatus) ||
+              const {
+                'COMPLETED',
+                'CANCELLED',
+                'NO_SHOW',
+                'ABANDONED',
+              }.contains(assignmentStatus) ||
               expiredBeforeCheckIn;
           remote[shiftId] = switch (status) {
             'ACCEPTED' =>

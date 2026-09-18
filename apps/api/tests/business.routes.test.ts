@@ -185,4 +185,30 @@ describe('business CRUD routes', () => {
     expect((await request(app).patch('/api/business/payments/payment-1').set('Authorization', authorization).send({ status: 'PROCESSED' })).status).toBe(200);
     expect((await request(app).delete('/api/business/payments/payment-1').set('Authorization', authorization)).status).toBe(204);
   });
+
+  it('resolves an abandoned assignment manually with a validated outcome', async () => {
+    const resolveAssignment = vi.fn(async (_session, shiftId, assignmentId, outcome, reason) => ({ id: assignmentId, shiftId, status: outcome, reason }));
+    const { app, authorization } = await businessContext({ resolveAssignment });
+
+    const missingOutcome = await request(app)
+      .post('/api/business/shifts/shift-1/assignments/assignment-1/resolve')
+      .set('Authorization', authorization)
+      .send({});
+    expect(missingOutcome.status).toBe(400);
+    expect(resolveAssignment).not.toHaveBeenCalled();
+
+    const response = await request(app)
+      .post('/api/business/shifts/shift-1/assignments/assignment-1/resolve')
+      .set('Authorization', authorization)
+      .send({ outcome: 'COMPLETED', reason: 'El cliente confirmó que sí trabajó' });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ id: 'assignment-1', shiftId: 'shift-1', status: 'COMPLETED' });
+    expect(resolveAssignment).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'BUSINESS' }),
+      'shift-1',
+      'assignment-1',
+      'COMPLETED',
+      'El cliente confirmó que sí trabajó',
+    );
+  });
 });

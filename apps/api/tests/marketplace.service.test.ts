@@ -1,6 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DatabaseMarketplaceService, DemoMarketplaceService, splitPaymentCents, validateScreeningAnswers } from '../src/modules/marketplace/marketplace.service.js';
+import {
+  CHECK_IN_EARLY_TOLERANCE_MS,
+  CHECK_IN_LATE_LIMIT_MS,
+  CHECK_OUT_ABANDONED_GRACE_MS,
+} from '../src/modules/operations/shift-state.js';
 
 describe('DemoMarketplaceService', () => {
   it('assigns a published shift and generates a development check-in credential', () => {
@@ -248,5 +253,159 @@ describe('DatabaseMarketplaceService rejects new applications for shifts that ar
       where: { id: 'shift-cancelled', status: 'PUBLISHED', endsAt: { gt: expect.any(Date) } },
       include: { company: true },
     });
+  });
+});
+
+// Modela el subconjunto de Prisma que `checkIn`/`checkOut` tocan, con estado
+// mutable en memoria: cada `update` muta el fixture y el siguiente `findMany`
+// dentro de la misma llamada ya ve el cambio, igual que en una transacción
+// real de una sola conexión. `$transaction` simplemente invoca el callback
+// con el mismo cliente: no hace falta aislamiento real para estas pruebas.
+function fakeAssignmentPrisma(assignment: Record<string, unknown>, shift: Record<string, unknown>) {
+  const state = { assignment: { ...assignment }, shift: { ...shift } };
+  const shiftAssignment = {
+    findFirst: vi.fn(async () => ({ ...state.assignment, shift: { ...state.shift } })),
+    update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+      Object.assign(state.assignment, data);
+      return { ...state.assignment };
+    }),
+    findMany: vi.fn(async () => [{ ...state.assignment }]),
+  };
+  const shiftModel = {
+    update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+      Object.assign(state.shift, data);
+      return { ...state.shift };
+    }),
+  };
+  const shiftEvent = { create: vi.fn(async () => undefined) };
+  const payment = { upsert: vi.fn(async () => undefined) };
+  const prisma: Record<string, unknown> = { shiftAssignment, shift: shiftModel, shiftEvent, payment };
+  prisma.$transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma));
+  return { prisma, state, shiftAssignment, shiftModel, shiftEvent, payment };
+}
+
+describe('DatabaseMarketplaceService.checkIn time window and lifecycle', () => {
+  const baseShift = {
+    id: 'shift-1', companyId: 'company-1', title: 'Mozo', payCents: 10000,
+    requiredWorkers: 1, status: 'ASSIGNED',
+    startsAt: new Date('2026-09-18T18:00:00.000Z'),
+    endsAt: new Date('2026-09-19T00:00:00.000Z'),
+    company: { name: 'Restaurante Demo' },
+  };
+  const baseAssignment = {
+    id: 'assignment-1', shiftId: 'shift-1', workerId: 'worker-1', status: 'ASSIGNED',
+    checkInCredential: 'CUMPLE-ABC123', workerConfirmedAt: new Date('2026-09-18T10:00:00.000Z'),
+    checkedInAt: null, checkedOutAt: null,
+  };
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('rejects a check-in attempted before the tolerance window opens', async () => {
+    const { prisma } = fakeAssignmentPrisma(baseAssignment, baseShift);
+    vi.useFakeTimers().setSystemTime(new Date(baseShift.startsAt.getTime() - CHECK_IN_EARLY_TOLERANCE_MS - 1000));
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).rejects.toMatchObject({ code: 'CHECK_IN_TOO_EARLY', statusCode: 409 });
+  });
+
+  it('accepts a check-in inside the tolerance window', async () => {
+    const { prisma, state } = fakeAssignmentPrisma(baseAssignment, baseShift);
+    vi.useFakeTimers().setSystemTime(baseShift.startsAt);
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).resolves.toMatchObject({ shiftId: 'shift-1' });
+    expect(state.assignment.checkedInAt).toBeInstanceOf(Date);
+  });
+
+  it('flags a never-checked-in assignment as NO_SHOW once the window closes, reopens the shift for reassignment, and rejects the check-in', async () => {
+    const { prisma, state } = fakeAssignmentPrisma(baseAssignment, baseShift);
+    vi.useFakeTimers().setSystemTime(new Date(baseShift.startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1000));
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
+    expect(state.assignment.status).toBe('NO_SHOW');
+    expect(state.shift.status).toBe('PUBLISHED');
+    expect(state.shift.confirmedWorkers).toBe(0);
+  });
+
+  it('rejects a check-in on an assignment already resolved as NO_SHOW, without touching it again', async () => {
+    const { prisma, state, shiftAssignment } = fakeAssignmentPrisma({ ...baseAssignment, status: 'NO_SHOW' }, baseShift);
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+    expect(state.assignment.status).toBe('NO_SHOW');
+  });
+
+  it('rejects a check-in once endsAt has passed even inside the startsAt-relative late window, on a shift shorter than CHECK_IN_LATE_LIMIT_MS (MEDIO-3 of CN-20260918-002)', async () => {
+    // Turno de 30 minutos: su ventana de check-in (hasta startsAt + 60 min)
+    // sigue "abierta" según `checkInWindowViolation`, pero `endsAt` (a los 30
+    // min) ya pasó. Sin el guard restaurado, esto aceptaría un check-in
+    // después de que el turno terminara.
+    const shortShift = { ...baseShift, endsAt: new Date(baseShift.startsAt.getTime() + 30 * 60 * 1000) };
+    const { prisma, shiftAssignment } = fakeAssignmentPrisma(baseAssignment, shortShift);
+    vi.useFakeTimers().setSystemTime(new Date(baseShift.startsAt.getTime() + 45 * 60 * 1000));
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).rejects.toMatchObject({ code: 'SHIFT_UNAVAILABLE', statusCode: 409 });
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('DatabaseMarketplaceService.checkOut time window and lifecycle', () => {
+  const baseShift = {
+    id: 'shift-1', companyId: 'company-1', title: 'Mozo', payCents: 10000,
+    requiredWorkers: 1, status: 'CHECKED_IN',
+    startsAt: new Date('2026-09-18T18:00:00.000Z'),
+    endsAt: new Date('2026-09-19T00:00:00.000Z'),
+    company: { name: 'Restaurante Demo' },
+  };
+  const checkedInAssignment = {
+    id: 'assignment-1', shiftId: 'shift-1', workerId: 'worker-1', status: 'ASSIGNED',
+    checkInCredential: 'CUMPLE-ABC123', workerConfirmedAt: new Date('2026-09-18T10:00:00.000Z'),
+    checkedInAt: new Date('2026-09-18T18:05:00.000Z'), checkedOutAt: null,
+  };
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('completes the check-out and creates a payment before the abandonment grace period elapses', async () => {
+    const { prisma, state, payment } = fakeAssignmentPrisma(checkedInAssignment, baseShift);
+    vi.useFakeTimers().setSystemTime(baseShift.endsAt);
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkOut('worker-1', 'shift-1')).resolves.toMatchObject({ shiftId: 'shift-1' });
+    expect(state.assignment.status).toBe('COMPLETED');
+    expect(payment.upsert).toHaveBeenCalledOnce();
+  });
+
+  it('flags a checked-in, never-checked-out assignment as ABANDONED past the grace period and closes the shift as CANCELLED (its endsAt already passed, so it cannot reopen to PUBLISHED), rejecting the check-out without creating a payment', async () => {
+    const { prisma, state, payment, shiftEvent } = fakeAssignmentPrisma(checkedInAssignment, baseShift);
+    vi.useFakeTimers().setSystemTime(new Date(baseShift.endsAt.getTime() + CHECK_OUT_ABANDONED_GRACE_MS + 1000));
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkOut('worker-1', 'shift-1')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
+    expect(state.assignment.status).toBe('ABANDONED');
+    // Ver ALTO-2 de CN-20260918-002: antes de esta corrección, `deriveShiftStatus`
+    // reabría este turno a `PUBLISHED` aunque `endsAt` ya hubiera pasado, dejándolo
+    // "fantasma" (visible como activo, pero inalcanzable desde cualquier endpoint,
+    // porque nadie puede postular ni hacer check-in sobre un turno vencido). El
+    // turno todavía puede resolverse manualmente vía `resolveAssignment` (no
+    // requiere que el turno siga PUBLISHED/ASSIGNED), así que cerrarlo aquí no
+    // bloquea el pago si la empresa confirma que el trabajador sí trabajó.
+    expect(state.shift.status).toBe('CANCELLED');
+    expect(payment.upsert).not.toHaveBeenCalled();
+    expect(shiftEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ actorRole: 'SYSTEM', type: 'CANCELLED', shiftId: 'shift-1' }),
+    }));
+  });
+
+  it('rejects a check-out on an assignment already resolved as ABANDONED, without touching it again', async () => {
+    const { prisma, state, shiftAssignment, payment } = fakeAssignmentPrisma({ ...checkedInAssignment, status: 'ABANDONED' }, baseShift);
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkOut('worker-1', 'shift-1')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+    expect(payment.upsert).not.toHaveBeenCalled();
+    expect(state.assignment.status).toBe('ABANDONED');
   });
 });

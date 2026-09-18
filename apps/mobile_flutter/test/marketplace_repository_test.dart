@@ -65,11 +65,17 @@ void main() {
       final movements = await repository.walletMovements();
 
       expect(client.authorization, 'Bearer worker-token');
-      expect(movements, hasLength(2));
+      expect(movements, hasLength(3));
       expect(movements.first.company, 'Turno liberado');
       expect(movements.first.amount, 'S/ 125.50');
       expect(movements.first.status, 'Liberado');
-      expect(movements.last.status, 'Pendiente');
+      expect(movements[1].status, 'Pendiente');
+      // CN-20260918-005 (Alcance 2): el mapeo interno mezclaba español e
+      // inglés ('Liberado'/'Reversed'); ahora el valor interno es
+      // consistentemente español ('Revertido'), sin cambiar la etiqueta que
+      // ve el trabajador (`_paymentStatusLabel` en worker_pages.dart sigue
+      // mostrando "Incidencia de pago").
+      expect(movements.last.status, 'Revertido');
     },
   );
 
@@ -414,6 +420,12 @@ class _WalletClient extends http.BaseClient {
                 'amountCents': 5000,
                 'description': 'Turno pendiente',
                 'status': 'PENDING',
+              },
+              {
+                'id': 'movement-3',
+                'amountCents': 3000,
+                'description': 'Turno con incidencia',
+                'status': 'REVERSED',
               },
             ],
           }),

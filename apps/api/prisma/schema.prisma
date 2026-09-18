@@ -62,6 +62,20 @@ enum AssignmentStatus {
   ASSIGNED
   CANCELLED
   COMPLETED
+  /// El trabajador confirmó o quedó asignado, pero nunca hizo check-in dentro
+  /// de la ventana de tolerancia tras `Shift.startsAt`. Se detecta "al tocar"
+  /// la asignación (lectura de un turno individual, check-in/check-out de
+  /// cualquier trabajador de ese turno), nunca por un job en segundo plano.
+  /// Excluida del cálculo agregado de `deriveShiftStatus`, igual que
+  /// `CANCELLED`, para que el turno pueda recibir un reemplazo.
+  NO_SHOW
+  /// El trabajador hizo check-in pero nunca hizo check-out, y ya pasó el
+  /// margen de tolerancia tras `Shift.endsAt`. Requiere cierre manual de la
+  /// empresa vía `POST /api/business/shifts/:id/assignments/:assignmentId/resolve`
+  /// (nunca se completa ni se cancela automáticamente, para no generar un
+  /// pago sin decisión humana). Excluida del cálculo agregado de
+  /// `deriveShiftStatus`, igual que `CANCELLED`.
+  ABANDONED
 }
 
 enum CancellationActorRole {

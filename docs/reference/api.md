@@ -28,6 +28,10 @@ El alta exige nombre comercial, RUC de 11 dígitos, correo y contraseña inicial
 
 - `GET /api/business/company`: obtiene el perfil. Si la cuenta es anterior a esta implementación, crea el perfil empresarial automáticamente con el nombre y RUC registrados.
 - `PATCH /api/business/company`: actualiza nombre comercial, razón social, industria, teléfono, dirección o distrito.
+- `GET /api/business/subscription`: si la empresa ya activó explícitamente un plan, devuelve la fila real de `CompanySubscription`. Si nunca activó nada, **no crea ninguna fila de `CompanySubscription`** -antes hacía un `upsert` que dejaba una fila `TRIAL` real persistida desde la primera consulta, aunque nadie hubiera activado algo- y en su lugar devuelve un objeto sintético en memoria (`{ companyId, plan: 'PILOT', status: 'INACTIVE', startsAt: null, endsAt: null, trialEndsAt: null }`, sin `id`, `createdAt` ni `updatedAt`) que declara explícitamente que no hay plan activo. Hoy no existe ningún endpoint de activación; cuando exista, será el único punto que persista una fila real.
+  - `INACTIVE` **no es un valor del enum `SubscriptionStatus` de Prisma** (que solo admite `TRIAL`/`ACTIVE`/`PAUSED`/`EXPIRED`/`CANCELLED`): existe únicamente en la respuesta sintética y nunca puede persistirse. Un cliente que mapee `status` debe tratarlo como un sexto caso; el panel de empresa (`apps/web`) lo muestra como "Sin plan activo".
+  - Como todos los endpoints de empresa, este `GET` sigue resolviendo la `Company` de la sesión con un `upsert` (`business.service.ts#companyFor`), así que puede crear la fila `Company` si la cuenta es anterior a esa implementación. Lo que dejó de crear es la suscripción.
+  - **Filas fantasma previas al cambio.** Cualquier base donde corrió la versión anterior conserva las filas `PILOT/TRIAL` que ese `upsert` creó sin activación explícita. No se borran solas: esas empresas seguirán viendo "Piloto activo" y una fecha de fin de prueba, indistinguibles de una activación real. Limpiarlas requiere una tarea de una sola vez, todavía no implementada.
 
 ## Turnos
 
@@ -87,12 +91,56 @@ Cada creación, edición o eliminación de un turno notifica inmediatamente al f
 
 Aceptar crea la asignación (`ShiftAssignment`) dentro de una transacción `Serializable` con reintento automático ante conflicto de serialización: si dos aceptaciones para el último cupo disponible llegan a la vez, la base de datos garantiza que solo una lea y reserve ese cupo; la otra recibe `400 SHIFT_FULL` en la misma respuesta, sin sobrecupo ni asignación duplicada. `400 SHIFT_NOT_ASSIGNABLE` rechaza decidir sobre un turno terminal, con check-in en curso o cuyo `endsAt` ya pasó (un turno vencido no puede ganar una nueva asignación aunque la postulación sea anterior a su vencimiento). `400 APPLICATION_ALREADY_DECIDED` cubre una segunda decisión sobre la misma postulación.
 
+Cada asignación recibe su propia credencial de check-in aleatoria (`checkInCredential`), generada con `crypto.randomBytes` y sin relación con `shiftId`, `workerId` ni ningún otro dato del turno. Antes, la credencial se derivaba solo de `shiftId`, así que un turno con `requiredWorkers > 1` dejaba a todas sus asignaciones compartiendo literalmente la misma credencial; cada trabajador de un turno multi-cupo recibe ahora una credencial distinta e impredecible a partir de la del resto.
+
+`checkInCredential` **no es hoy una prueba de presencia**: el propio trabajador la recibe del servidor en `GET /api/workers/applications` (`assignment.checkInCredential`) y en `GET /api/workers/active-shift`, y `POST /api/shifts/:id/check-in` resuelve la asignación por el `workerId` de la sesión, no por la credencial. Sirve para que el trabajador y la persona de la sede comparen un mismo código en el momento del ingreso, y para que ese código no se repita entre cupos del mismo turno. No tiene expiración ni rotación, y el endpoint de check-in no aplica límite de intentos; endurecerla (expiración, rotación, prueba real de presencia) sigue pendiente en el bloque "Endurecer asistencia" de `docs/product/project-master-plan.md`.
+
+### Ciclo de vida de una asignación: `NO_SHOW` y `ABANDONED`
+
+`ShiftAssignment.status` admite dos valores adicionales a `ASSIGNED`/`CANCELLED`/`COMPLETED`, calculados por el servidor (nunca enviados por el cliente):
+
+- `NO_SHOW`: la asignación seguía `ASSIGNED` y nunca llegó a tener `checkedInAt`, y ya pasó la ventana de check-in (ver abajo).
+- `ABANDONED`: la asignación sí tiene `checkedInAt` pero nunca `checkedOutAt`, y ya pasaron 60 minutos desde `endsAt`.
+
+Ninguna de las dos transiciones ocurre en segundo plano ni por un job programado: se calculan y persisten "al tocar" esa asignación puntual (`check-in`, `check-out`, o cuando la empresa abre ese turno o su lista de postulaciones en el panel). Los endpoints de listado masivo (`GET /api/shifts`, `GET /api/business/shifts`, `GET /api/workers/applications`, el feed SSE) nunca disparan esta resolución, para no agregar una escritura en cada refresco; pueden mostrar por un momento una asignación `ASSIGNED` cuya ventana ya cerró, hasta que algo la toque puntualmente.
+
+Ambos estados quedan excluidos del cálculo agregado de `Shift.status` (igual que `CANCELLED`), de modo que el cupo vuelve a quedar libre sin que la empresa tenga que cancelar el turno completo. Lo que el turno hace con ese cupo liberado depende de si `endsAt` ya pasó y de si quedan otras asignaciones vivas; está descrito más abajo, en "Estado agregado del turno cuando un cupo queda liberado".
+
+Ninguna de las dos (`NO_SHOW` o `ABANDONED`) **se completa ni se cancela automáticamente** (evita generar, o destruir, un pago sin decisión humana): la empresa debe resolverla explícitamente:
+
+- `POST /api/business/shifts/:id/assignments/:assignmentId/resolve`: cuerpo `{ "outcome": "COMPLETED" | "CANCELLED", "reason"?: "…" }`. Solo la empresa dueña del turno puede llamarlo (sesión `BUSINESS` y turno de su propia `Company`; en cualquier otro caso responde `404 SHIFT_NOT_FOUND`). Responde `404 ASSIGNMENT_NOT_FOUND` si la asignación no existe en ese turno, y `400 ASSIGNMENT_NOT_RESOLVABLE` si no está en `ABANDONED` ni en `NO_SHOW` (por ejemplo, ya se resolvió antes, o sigue `ASSIGNED`). `COMPLETED` marca la asignación como completada y genera su `Payment` con la misma forma que genera `check-out` (reporte manual, `status: PENDING`); `CANCELLED` la cierra sin generar ningún pago. Cualquiera de los dos recalcula el estado agregado del turno.
+- Un trabajador `NO_SHOW` (llegó más de 60 minutos tarde y ya no pudo hacer check-in) **sí** tiene una ruta para cobrar si igual trabajó el turno: la empresa lo resuelve con `outcome: "COMPLETED"` y `reason` explicando por qué (por ejemplo, un problema con la app o la señal). Es una decisión humana explícita, no un cálculo automático: el sistema nunca decide por sí solo si un `NO_SHOW` cobra.
+- Cada transición automática a `NO_SHOW`/`ABANDONED` deja un `ShiftEvent` (`type: CANCELLED`, `actorRole: SYSTEM`) con el detalle de cuál de los dos ocurrió, además del evento que crea `resolve` (`COMPLETED`/`CANCELLED`, actor `BUSINESS`) al cerrarla manualmente.
+
+### Estado agregado del turno cuando un cupo queda liberado
+
+Un turno que se quedaría **sin ninguna asignación viva** (ninguna `ASSIGNED`, ninguna con `checkedInAt` y ninguna `COMPLETED`) porque todas terminaron `CANCELLED`/`NO_SHOW`/`ABANDONED` se comporta así:
+
+- Si `endsAt` **todavía no pasó**: el turno vuelve a `PUBLISHED` y el cupo puede cubrirse con una nueva asignación por el flujo normal de postulación/aceptación. Es el caso típico de un `NO_SHOW`, que se detecta 60 minutos después de `startsAt`: en un turno de varias horas el reemplazo es una vacante real.
+- Si `endsAt` **ya pasó**: el turno **no reabre a `PUBLISHED`**; se cierra como `CANCELLED` en el mismo movimiento, para no quedar "fantasma" (visible como activo pero inalcanzable desde `cancelShift`/`deleteShift`/`updateShift`, y sin que nadie pueda postular ni hacer check-in sobre un `endsAt` vencido). Es siempre el caso de un `ABANDONED`, que solo se detecta 60 minutos después de `endsAt`. Cerrar el turno no bloquea resolver la asignación: `resolve` no depende del estado del turno, así que la empresa igual puede decidir si paga, y hacerlo con `outcome: "COMPLETED"` vuelve a recalcular el turno (típicamente a `COMPLETED`).
+
+**Límite conocido en turnos multi-cupo.** La regla anterior solo se aplica cuando no queda ninguna asignación viva. En un turno con `requiredWorkers > 1` donde una asignación sí completó y otra quedó `NO_SHOW`/`ABANDONED`/`CANCELLED`, el estado agregado se queda en `CHECKED_IN` aunque `endsAt` ya haya pasado, porque una asignación con `checkedInAt`/`COMPLETED` sigue contando. Ese turno solo llega a un estado terminal si la empresa resuelve la asignación pendiente con `outcome: "COMPLETED"` (`CANCELLED` lo deja otra vez en `CHECKED_IN`); `cancelShift` lo rechaza con `400 SHIFT_NOT_CANCELLABLE`, `updateShift` con `400 SHIFT_NOT_EDITABLE` y `deleteShift` con `400 SHIFT_NOT_DELETABLE`. Es comportamiento previo a los estados `NO_SHOW`/`ABANDONED` (un cupo sin cubrir siempre dejó el turno multi-cupo en curso), y sigue pendiente en el bloque "Endurecer asistencia" de `docs/product/project-master-plan.md`.
+
+**No hay interfaz para `resolve`.** El cierre manual existe solo como endpoint HTTP: ni el panel web de la empresa (`apps/web`) ni la app Flutter ofrecen hoy un control que lo invoque. Mientras eso siga así, la ruta de cobro de un `NO_SHOW`/`ABANDONED` requiere una llamada directa a la API.
+
+### Ventana de tiempo del check-in
+
+`POST /api/shifts/:id/check-in` solo tiene éxito entre 30 minutos antes y 60 minutos después de `Shift.startsAt`, **y nunca después de `Shift.endsAt`**:
+
+- Antes de esa ventana: `409 CHECK_IN_TOO_EARLY`.
+- Después de esa ventana (o si `endsAt` ya pasó): la asignación ya quedó `NO_SHOW` (ver arriba) y el check-in responde `409 ASSIGNMENT_NOT_ACTIONABLE`.
+- Si `endsAt` ya pasó pero la asignación todavía no llegó a `NO_SHOW` (turno más corto que la ventana de 60 minutos): `409 SHIFT_UNAVAILABLE`, el mismo guard directo contra `endsAt` que ya existía antes de introducir la ventana de tiempo.
+
+En un turno de menos de 60 minutos de duración, `endsAt` puede pasar antes de que se cumpla la ventana relativa a `startsAt`: el guard directo contra `endsAt` cubre exactamente ese caso, así que un check-in posterior al fin del turno nunca se acepta.
+
+`POST /api/shifts/:id/check-out` y `POST /api/shifts/:id/check-in` responden `409 ASSIGNMENT_NOT_ACTIONABLE` sobre cualquier asignación que ya haya quedado `NO_SHOW` o `ABANDONED`, en vez de proceder: ninguno de los dos endpoints puede "revivir" una asignación varada, que solo se recupera por el cierre manual (`resolve`, arriba) o por una nueva asignación tras reabrirse el turno.
+
 ## Marketplace para trabajadores
 
 - `GET /api/shifts`: devuelve los turnos publicados desde PostgreSQL.
 - `GET /api/shifts/events`: stream público de Server-Sent Events (SSE).
 
-Cada turno del marketplace (en este endpoint, en el feed SSE y en el `shift` embebido de `GET /api/workers/applications`) incluye `endsAt` (ISO 8601): es el único dato de fecha real que se expone a los clientes -`dateLabel` es solo texto formateado- y la única forma de que un cliente sepa si una asignación aceptada ya venció, dado que no existe transición automática por tiempo. Flutter lo usa para dejar de ofrecer "Confirmar asistencia"/"Confirmar llegada" sobre un turno cuyo `endsAt` ya pasó sin que el trabajador llegara a hacer check-in (una vez hecho el check-in, `checkOut` no tiene ventana de tiempo propia y sigue siendo válido más allá de `endsAt`).
+Cada turno del marketplace (en este endpoint, en el feed SSE y en el `shift` embebido de `GET /api/workers/applications`) incluye `endsAt` (ISO 8601): es el único dato de fecha real que se expone a los clientes -`dateLabel` es solo texto formateado- y la única forma de que un cliente sepa si una asignación aceptada ya venció, dado que no existe transición automática por tiempo. Flutter lo usa para dejar de ofrecer "Confirmar asistencia"/"Confirmar llegada" sobre un turno cuyo `endsAt` ya pasó sin que el trabajador llegara a hacer check-in (una vez hecho el check-in, `checkOut` sigue siendo válido más allá de `endsAt`, hasta 60 minutos después; pasado ese margen la asignación queda `ABANDONED`, ver "Ciclo de vida de una asignación" arriba).
 - `POST /api/shifts/:id/applications`: crea una postulación autenticada. Si el turno tiene preguntas de filtro, recibe todas las respuestas en `answers`.
 
 ```json
@@ -112,11 +160,13 @@ Rutas operativas autenticadas del trabajador:
 
 - `GET /api/workers/applications`: incluye asignación persistida y `nextAction` con actor, código y texto explicativo.
 - `POST /api/shifts/:id/confirm`: confirma la asignación antes del ingreso. Responde `404 ASSIGNMENT_NOT_FOUND` si la asignación no existe o su turno ya venció (`shift.endsAt` ya pasó).
-- `POST /api/shifts/:id/check-in`: exige confirmación y la credencial temporal vigente. Responde `409 SHIFT_UNAVAILABLE` si el turno ya venció o quedó en un estado terminal.
-- `POST /api/shifts/:id/check-out`: exige check-in y completa solo la asignación del trabajador. El turno completo se cierra cuando terminan todos sus cupos. No tiene ninguna ventana de tiempo propia: sigue siendo válido aunque el turno ya haya pasado su `endsAt` nominal.
+- `POST /api/shifts/:id/check-in`: exige confirmación, la credencial temporal vigente y estar dentro de la ventana de tiempo alrededor de `startsAt` (ver "Ventana de tiempo del check-in" arriba: `409 CHECK_IN_TOO_EARLY` antes de que abra, `409 ASSIGNMENT_NOT_ACTIONABLE` si ya quedó `NO_SHOW`). `409 SHIFT_UNAVAILABLE` cubre: la asignación no fue confirmada por el trabajador, el turno está en estado terminal (`COMPLETED`/`CANCELLED`), o `endsAt` ya pasó (guard directo, independiente de la ventana relativa a `startsAt`; cubre los turnos de menos de 60 minutos donde `endsAt` puede vencer antes de que la asignación llegue a `NO_SHOW`).
+- `POST /api/shifts/:id/check-out`: exige check-in y completa solo la asignación del trabajador. El turno completo se cierra cuando terminan todos sus cupos. No tiene una ventana de tiempo propia respecto a `startsAt` (sigue siendo válido aunque el turno ya haya pasado su `endsAt` nominal), pero si pasan más de 60 minutos desde `endsAt` sin check-out la asignación queda `ABANDONED` y el check-out responde `409 ASSIGNMENT_NOT_ACTIONABLE`; a partir de ahí solo la empresa puede cerrarla (`POST .../assignments/:assignmentId/resolve`, arriba).
 - `POST /api/shifts/:id/cancel`: permite cancelar antes del check-in y conserva motivo, actor y fecha.
 
 La app Flutter (`HttpWorkerMarketplaceRepository`) propaga el código real de `confirm`/`check-in`/`check-out` mediante `MarketplaceApiException` en vez de un error genérico: si el código indica que el turno ya no existe o está disponible (`ASSIGNMENT_NOT_FOUND`, `SHIFT_UNAVAILABLE`, `SHIFT_NOT_FOUND`), la pantalla de postulaciones (`WorkerApplicationsPage`) explica el motivo y recarga de inmediato en vez de dejar un botón que siempre va a fallar.
+
+`CHECK_IN_TOO_EARLY` y `ASSIGNMENT_NOT_ACTIONABLE` tienen manejo propio en `WorkerApplicationsPage._handleActionError` (`worker_secondary_pages.dart`), separado de `MarketplaceApiException.isShiftGone`: `CHECK_IN_TOO_EARLY` explica que la ventana de check-in todavía no abrió y **no** fuerza una recarga (no es un cierre permanente, el trabajador puede reintentar cuando abra); `ASSIGNMENT_NOT_ACTIONABLE` explica que la ventana ya cerró o el turno ya terminó y sí fuerza la recarga inmediata, igual que `isShiftGone`, porque es un cierre permanente para esa asignación.
 
 La empresa recibe el mismo `nextAction` al consultar `/api/business/shifts/:id/applications`, evitando que web y Flutter calculen reglas contradictorias.
 
@@ -130,6 +180,16 @@ La reemisión ocurre por dos vías independientes: inmediatamente después de qu
 event: shifts
 data: [{"id":"...","role":"Mozo de salón",...}]
 ```
+
+### Wallet del trabajador (reporte de pagos, no custodia)
+
+- `GET /api/workers/wallet`: combina, solo en memoria y en la respuesta (nunca a nivel de esquema), los `Payment` de las asignaciones del trabajador con sus `WalletMovement` (`marketplace.service.ts#wallet`). Devuelve `{ workerId, balanceCents, pendingBalanceCents, movements }`.
+  - `balanceCents` es la suma de los movimientos en estado `RELEASED`: **monto que la empresa ya confirmó como pagado/procesado**, no saldo que Chambeaya custodie o pueda transferir. Chambeaya no administra ni retiene ese dinero; el pago ocurre directamente entre empresa y trabajador, y este número es un registro de ese reporte.
+  - `pendingBalanceCents` es la suma de los movimientos en estado `PENDING`: **monto reportado y aún pendiente de que la empresa lo confirme como procesado**, no dinero en tránsito dentro de Chambeaya.
+  - `REVERSED` cubre pagos con incidencia (por ejemplo, un `Payment` cancelado) y no suma a ninguno de los dos totales.
+- `POST /api/workers/payments/:id/confirm`: el trabajador confirma que recibió un pago ya `PROCESSED` por la empresa (`workerConfirmedAt`); sobre un pago en cualquier otro estado responde `409 PAYMENT_NOT_REPORTABLE`. Es una confirmación de recepción entre las partes, no una liberación de fondos retenidos por Chambeaya.
+- En la práctica todos los movimientos provienen hoy de `Payment` (`PROCESSED → RELEASED`, `CANCELLED → REVERSED`, el resto `PENDING`): `recordWalletMovement` escribe `WalletMovement` directamente pero no está expuesto por ninguna ruta.
+- **No hay consumidor de este endpoint en la app enrutada.** La única pantalla de billetera de Flutter vive en `lib/features/marketplace/worker_pages.dart`, que no está enrutado (ningún archivo de `lib/` lo importa). Los nombres internos que todavía suenan a custodia -el modelo `WalletMovement`, la ruta `/api/workers/wallet`, los estados `RELEASED`/`REVERSED`- se conservaron a propósito: renombrarlos o fusionar las tablas quedó explícitamente fuera de alcance, y esta sección es la mitigación acordada.
 
 ## Trabajadores del directorio
 

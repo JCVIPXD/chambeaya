@@ -129,8 +129,15 @@ export async function seedDemoDatabase(
     },
   });
 
-  const startsAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
-  startsAt.setHours(9, 0, 0, 0);
+  // El recorrido de `docs/guides/client-demo.md` acepta la postulación,
+  // confirma, hace check-in y check-out de este turno en vivo, justo después
+  // de sembrar la demo. El check-in real exige estar dentro de la ventana de
+  // tolerancia alrededor de `startsAt` (`CHECK_IN_EARLY_TOLERANCE_MS`/
+  // `CHECK_IN_LATE_LIMIT_MS` en `shift-state.ts`, 30 y 60 minutos), así que
+  // `startsAt` ya debe haber comenzado -no puede seguir a 3 días vista como
+  // antes de esa regla- para que la ventana esté abierta durante toda la
+  // presentación en vivo.
+  const startsAt = new Date(Date.now() - 5 * 60 * 1000);
   const endsAt = new Date(startsAt.getTime() + 8 * 60 * 60 * 1000);
   const completedStartsAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
   completedStartsAt.setHours(9, 0, 0, 0);

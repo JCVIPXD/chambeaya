@@ -112,6 +112,10 @@ const applicationDecisionSchema = z.object({
   }
 });
 const cancellationSchema = z.object({ reason: z.string().trim().min(3).max(500) });
+const assignmentResolutionSchema = z.object({
+  outcome: z.enum(['COMPLETED', 'CANCELLED']),
+  reason: z.string().trim().min(3).max(500).optional(),
+});
 
 type BusinessHandler = (request: Request, response: Response, session: AuthSession) => Promise<void>;
 
@@ -223,6 +227,12 @@ export function createBusinessRouter(
   router.patch('/shifts/:id/applications/:applicationId', route(authService, async (request, response, session) => {
     const input = applicationDecisionSchema.parse(request.body);
     const result = await operations.decideShiftApplication(session, param(request, 'id'), param(request, 'applicationId'), input.decision, input.reason);
+    onShiftsChanged();
+    response.json(result);
+  }));
+  router.post('/shifts/:id/assignments/:assignmentId/resolve', route(authService, async (request, response, session) => {
+    const input = assignmentResolutionSchema.parse(request.body);
+    const result = await operations.resolveAssignment(session, param(request, 'id'), param(request, 'assignmentId'), input.outcome, input.reason);
     onShiftsChanged();
     response.json(result);
   }));

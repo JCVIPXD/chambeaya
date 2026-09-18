@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 import {
   ConversationStatus,
   MessageSender,
@@ -7,7 +9,19 @@ import {
 } from '@prisma/client';
 
 import type { AuthSession } from '../auth/auth.service.js';
-import { isTerminalShift, nextOperationalAction } from '../operations/shift-state.js';
+import { deriveShiftStatus, isTerminalShift, nextOperationalAction, resolveAssignmentLifecycle } from '../operations/shift-state.js';
+
+/**
+ * Antes se derivaba solo de `shiftId` (`CUMPLE-${shift.id.slice(-8)}`), así
+ * que todas las asignaciones de un turno multi-cupo (`requiredWorkers > 1`)
+ * compartían literalmente la misma credencial de check-in: cualquier
+ * trabajador asignado a ese turno podía hacer check-in por otro. Ahora es
+ * aleatoria por asignación (no derivada de ningún dato del turno ni del
+ * trabajador), generada con `crypto.randomBytes` (no `Math.random`).
+ */
+function generateCheckInCredential() {
+  return `CUMPLE-${randomBytes(4).toString('hex').toUpperCase()}`;
+}
 
 export type CompanyUpdate = {
   name?: string;
@@ -63,6 +77,7 @@ export type PaymentInput = {
 
 export type ApplicationDecision = 'ACCEPTED' | 'REJECTED';
 export type PendingApplicationsSummary = { count: number; shiftIds: string[] };
+export type AssignmentResolutionOutcome = 'COMPLETED' | 'CANCELLED';
 
 export class BusinessRecordNotFoundError extends Error {}
 export class BusinessValidationError extends Error {}
@@ -82,6 +97,7 @@ export interface BusinessOperations {
   listShiftApplications(session: AuthSession, shiftId: string): Promise<unknown>;
   pendingApplications(session: AuthSession): Promise<PendingApplicationsSummary>;
   decideShiftApplication(session: AuthSession, shiftId: string, applicationId: string, decision: ApplicationDecision, reason?: string): Promise<unknown>;
+  resolveAssignment(session: AuthSession, shiftId: string, assignmentId: string, outcome: AssignmentResolutionOutcome, reason?: string): Promise<unknown>;
   listWorkers(session: AuthSession): Promise<unknown>;
   getWorker(session: AuthSession, id: string): Promise<unknown>;
   createWorker(session: AuthSession, input: WorkerInput): Promise<unknown>;
@@ -120,7 +136,9 @@ export class DatabaseBusinessService implements BusinessOperations {
   }
 
   async getShift(session: AuthSession, id: string) {
-    return this.ownedShift(session, id);
+    const shift = await this.ownedShift(session, id);
+    const { shift: resolved } = await this.resolveShiftAssignmentsLifecycle(shift);
+    return resolved;
   }
 
   async createShift(session: AuthSession, input: ShiftInput) {
@@ -175,11 +193,15 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async getSubscription(session: AuthSession) {
     const company = await this.companyFor(session);
-    return this.prisma.companySubscription.upsert({
-      where: { companyId: company.id },
-      create: { companyId: company.id, plan: 'PILOT', status: 'TRIAL', trialEndsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) },
-      update: {},
-    });
+    const subscription = await this.prisma.companySubscription.findUnique({ where: { companyId: company.id } });
+    if (subscription) return subscription;
+    // Antes, este `GET` hacía un `upsert` que dejaba una fila TRIAL real
+    // persistida en la primera consulta, aunque nadie hubiera activado nada:
+    // sentía a "Chambeaya ya te inscribió en algo". Sin fila real, devolvemos
+    // un objeto sintético -nunca persistido- que declara explícitamente que
+    // no hay plan activo. Solo una activación explícita (hoy no existe ese
+    // endpoint) debe crear la fila real de `CompanySubscription`.
+    return { companyId: company.id, plan: 'PILOT', status: 'INACTIVE', startsAt: null, endsAt: null, trialEndsAt: null };
   }
 
   async listShiftEvents(session: AuthSession, shiftId: string) {
@@ -191,7 +213,8 @@ export class DatabaseBusinessService implements BusinessOperations {
   }
 
   async listShiftApplications(session: AuthSession, shiftId: string) {
-    const shift = await this.ownedShift(session, shiftId);
+    const owned = await this.ownedShift(session, shiftId);
+    const { shift } = await this.resolveShiftAssignmentsLifecycle(owned);
     const applications = await this.prisma.shiftApplication.findMany({
       where: { shiftId: shift.id },
       include: { worker: { select: { id: true, name: true, email: true, identifier: true } }, assignment: true },
@@ -233,10 +256,134 @@ export class DatabaseBusinessService implements BusinessOperations {
       const assignedCount = await tx.shiftAssignment.count({ where: { shiftId: shift.id, status: 'ASSIGNED' } });
       if (assignedCount >= shift.requiredWorkers) throw new BusinessValidationError('SHIFT_FULL');
       const updated = await tx.shiftApplication.update({ where: { id: application.id }, data: { status: 'ACCEPTED' }, include: { worker: { select: { id: true, name: true, email: true, identifier: true } } } });
-      await tx.shiftAssignment.create({ data: { shiftId: shift.id, workerId: application.workerId, applicationId: application.id, checkInCredential: `CUMPLE-${shift.id.slice(-8).toUpperCase()}` } });
+      await tx.shiftAssignment.create({ data: { shiftId: shift.id, workerId: application.workerId, applicationId: application.id, checkInCredential: generateCheckInCredential() } });
       await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'APPLICATION_ACCEPTED', detail: application.id } });
       const nextCount = assignedCount + 1;
       await tx.shift.update({ where: { id: shift.id }, data: { confirmedWorkers: nextCount, status: nextCount >= shift.requiredWorkers ? 'ASSIGNED' : 'PUBLISHED' } });
+      return updated;
+    }, { isolationLevel: 'Serializable' }));
+  }
+
+  /**
+   * Resuelve el ciclo de vida (`NO_SHOW`/`ABANDONED`, ver `shift-state.ts`) de
+   * cada asignación puntual de un turno y, si alguna cambió, persiste el
+   * nuevo estado de esas asignaciones junto con el estado agregado del turno.
+   * Se invoca solo desde puntos que ya abren un turno individual (`getShift`,
+   * `listShiftApplications`, `resolveAssignment`) — nunca desde `listShifts`
+   * ni desde ningún endpoint de listado/polling masivo, para no agregar una
+   * escritura en cada refresco.
+   */
+  private async resolveShiftAssignmentsLifecycle(shift: {
+    id: string;
+    status: 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
+    startsAt: Date;
+    endsAt: Date;
+    requiredWorkers: number;
+  }) {
+    const assignments = await this.prisma.shiftAssignment.findMany({ where: { shiftId: shift.id } });
+    const now = new Date();
+    const updates: { id: string; status: 'NO_SHOW' | 'ABANDONED' }[] = [];
+    const resolved = assignments.map((assignment) => {
+      const lifecycle = resolveAssignmentLifecycle(assignment, shift, now);
+      if (lifecycle.changed) updates.push({ id: assignment.id, status: lifecycle.status as 'NO_SHOW' | 'ABANDONED' });
+      return { ...assignment, status: lifecycle.status };
+    });
+    if (updates.length === 0) return { shift, assignments: resolved };
+    const nextStatus = deriveShiftStatus(shift.status, shift.requiredWorkers, resolved, shift);
+    const confirmedWorkers = resolved.filter((assignment) => assignment.status === 'ASSIGNED').length;
+    const updatedShift = await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      for (const update of updates) {
+        await tx.shiftAssignment.update({ where: { id: update.id }, data: { status: update.status } });
+        // Rastro de auditoría de la transición automática (ver MEDIO-1 de
+        // CN-20260918-002). No existe un `ShiftEventType` dedicado a
+        // `NO_SHOW`/`ABANDONED`; se reutiliza `CANCELLED` (el precedente más
+        // cercano: la asignación no va a completarse por sí sola) con actor
+        // `SYSTEM` y el detalle deja constancia de cuál de los dos ocurrió.
+        await tx.shiftEvent.create({
+          data: {
+            shiftId: shift.id,
+            actorId: null,
+            actorRole: 'SYSTEM',
+            type: 'CANCELLED',
+            detail: update.status === 'NO_SHOW'
+              ? `Asignación ${update.id} marcada NO_SHOW automáticamente: sin check-in dentro de la ventana`
+              : `Asignación ${update.id} marcada ABANDONED automáticamente: check-in sin check-out tras el margen de tolerancia`,
+          },
+        });
+      }
+      return tx.shift.update({ where: { id: shift.id }, data: { status: nextStatus, confirmedWorkers } });
+    }, { isolationLevel: 'Serializable' }));
+    return { shift: updatedShift, assignments: resolved };
+  }
+
+  async resolveAssignment(session: AuthSession, shiftId: string, assignmentId: string, outcome: AssignmentResolutionOutcome, reason?: string) {
+    const owned = await this.ownedShift(session, shiftId);
+    await this.resolveShiftAssignmentsLifecycle(owned);
+    const assignment = await this.prisma.shiftAssignment.findFirst({
+      where: { id: assignmentId, shiftId: owned.id },
+      include: { shift: { include: { company: true } } },
+    });
+    if (!assignment) throw new BusinessRecordNotFoundError('ASSIGNMENT_NOT_FOUND');
+    // Una asignación `ABANDONED` (hizo check-in, nunca hizo check-out, ya
+    // pasó el margen) o `NO_SHOW` (nunca hizo check-in, ventana cerrada)
+    // admite este cierre manual: son las dos situaciones donde el sistema
+    // deliberadamente no decide nada por su cuenta (para no generar ni
+    // destruir un pago sin una decisión humana, ver ALTO-1 de
+    // CN-20260918-002). `CANCELLED` siempre está disponible para ambas
+    // (nunca se generó ni corresponde generar un pago); `COMPLETED` también
+    // está disponible para `NO_SHOW` cuando la empresa confirma que el
+    // trabajador sí llegó y trabajó el turno completo pese a no haber hecho
+    // check-in a tiempo (por ejemplo, un problema con la app o la señal).
+    // `ASSIGNED` sigue su curso normal; `COMPLETED`/`CANCELLED` ya están
+    // cerradas.
+    const sourceStatus = assignment.status;
+    if (!['ABANDONED', 'NO_SHOW'].includes(sourceStatus)) throw new BusinessValidationError('ASSIGNMENT_NOT_RESOLVABLE');
+    return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      const completedAt = new Date();
+      const updated = await tx.shiftAssignment.update({
+        where: { id: assignment.id },
+        data: {
+          status: outcome,
+          completedAt: outcome === 'COMPLETED' ? completedAt : assignment.completedAt,
+        },
+      });
+      const sourceLabel = sourceStatus === 'ABANDONED' ? 'abandonada (check-in sin check-out)' : 'no-show (sin check-in a tiempo)';
+      await tx.shiftEvent.create({
+        data: {
+          shiftId: owned.id,
+          actorId: session.userId,
+          actorRole: 'BUSINESS',
+          type: outcome === 'COMPLETED' ? 'COMPLETED' : 'CANCELLED',
+          detail: reason?.trim() || (outcome === 'COMPLETED'
+            ? `Cierre manual de una asignación ${sourceLabel}: turno completado`
+            : `Cierre manual de una asignación ${sourceLabel}: turno cancelado`),
+        },
+      });
+      if (outcome === 'COMPLETED') {
+        // Misma forma de `Payment` que crea `checkOut` en
+        // `marketplace.service.ts`: un reporte manual, nunca una pasarela ni
+        // custodia de fondos. `upsert` es defensivo (idempotente si esta
+        // asignación ya tuviera un pago por alguna otra vía).
+        await tx.payment.upsert({
+          where: { assignmentId: assignment.id },
+          update: {},
+          create: {
+            companyId: assignment.shift.companyId,
+            shiftId: owned.id,
+            assignmentId: assignment.id,
+            reference: `CN-${owned.id.slice(-8).toUpperCase()}-${assignment.id.slice(-8).toUpperCase()}`,
+            description: `${assignment.shift.title} · ${assignment.shift.company.name}`,
+            amountCents: assignment.shift.payCents,
+            workerCount: 1,
+            status: 'PENDING',
+            dueAt: completedAt,
+          },
+        });
+      }
+      const assignments = await tx.shiftAssignment.findMany({ where: { shiftId: owned.id } });
+      const nextShiftStatus = deriveShiftStatus(owned.status, owned.requiredWorkers, assignments, owned);
+      const confirmedWorkers = assignments.filter((candidate) => candidate.status === 'ASSIGNED').length;
+      await tx.shift.update({ where: { id: owned.id }, data: { status: nextShiftStatus, confirmedWorkers } });
       return updated;
     }, { isolationLevel: 'Serializable' }));
   }

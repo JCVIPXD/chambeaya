@@ -224,7 +224,7 @@ Primera propuesta concreta:
 
 Los trabajadores conservarán el acceso gratuito a las oportunidades.
 
-La empresa comienza automáticamente con `PILOT/TRIAL`; el panel muestra el plan vigente. La activación de `PRO` se mantiene manual hasta que exista un módulo administrativo y métricas suficientes.
+La empresa **no** comienza con ninguna suscripción persistida: hasta que exista una activación explícita, `GET /api/business/subscription` devuelve un objeto sintético `PILOT/INACTIVE` sin fila en base de datos y el panel muestra "Sin plan activo" (ver `docs/reference/api.md`). Hasta 2026-09-18 ese mismo `GET` creaba una fila `PILOT/TRIAL` real en la primera consulta aunque nadie hubiera activado nada; se eliminó justamente porque sugería que Chambeaya ya había inscrito a la empresa en algo. La activación de `PILOT` y de `PRO` se mantiene manual hasta que exista un módulo administrativo y métricas suficientes; hoy no existe todavía ningún endpoint de activación.
 
 Implementación incremental:
 

@@ -23,10 +23,14 @@ export type CompanyRecord = {
 };
 
 export type SubscriptionRecord = {
-  id: string;
+  // `id`/`startsAt` faltan cuando la empresa no activó ningún plan: el
+  // backend ya no crea una fila real en el primer `GET`, así que devuelve un
+  // objeto sintético en memoria con `status: 'INACTIVE'` en vez de fingir un
+  // trial que nadie inició (ver `business.service.ts#getSubscription`).
+  id?: string;
   plan: 'PILOT' | 'PRO' | 'CUSTOM';
-  status: 'TRIAL' | 'ACTIVE' | 'PAUSED' | 'EXPIRED' | 'CANCELLED';
-  startsAt: string;
+  status: 'INACTIVE' | 'TRIAL' | 'ACTIVE' | 'PAUSED' | 'EXPIRED' | 'CANCELLED';
+  startsAt?: string | null;
   endsAt: string | null;
   trialEndsAt: string | null;
 };

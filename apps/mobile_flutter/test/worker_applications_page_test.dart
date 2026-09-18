@@ -72,6 +72,66 @@ void main() {
   );
 
   testWidgets(
+    'checking in too early explains the check-in window without retiring '
+    'the card (CN-20260918-002 MEDIO-2)',
+    (tester) async {
+      final repository = _TooEarlyCheckInRepository();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerApplicationsPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Confirmar llegada'), findsOneWidget);
+
+      await tester.tap(find.text('Confirmar llegada'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Sí, registrar llegada'));
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.textContaining('la ventana de check-in abre 30 minutos antes'),
+        findsWidgets,
+      );
+
+      // Unlike ASSIGNMENT_NOT_ACTIONABLE/isShiftGone, this is not permanent:
+      // the card stays actionable so the worker can retry once the window
+      // opens.
+      await tester.pumpAndSettle();
+      expect(find.text('Confirmar llegada'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'a NO_SHOW/ABANDONED assignment reports it is no longer actionable and '
+    'retires the card (CN-20260918-002 MEDIO-2)',
+    (tester) async {
+      final repository = _NotActionableCheckInRepository();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerApplicationsPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Confirmar llegada'), findsOneWidget);
+
+      await tester.tap(find.text('Confirmar llegada'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Sí, registrar llegada'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.textContaining('Ya no puedes hacer esto'), findsWidgets);
+
+      await tester.pumpAndSettle();
+      expect(find.text('Confirmar llegada'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'a transient failure while confirming keeps the card actionable with a '
     'generic message instead of retiring it',
     (tester) async {
@@ -174,6 +234,54 @@ class _ExpiringConfirmedRepository extends DemoWorkerMarketplaceRepository {
   Future<void> checkIn(String shiftId, String credential) {
     _closed = true;
     return Future.error(const MarketplaceApiException('SHIFT_UNAVAILABLE'));
+  }
+}
+
+/// Simulates the server rejecting a check-in attempted before the 30-minute
+/// tolerance window opens (`CHECK_IN_TOO_EARLY`, see `checkInWindowViolation`
+/// in `shift-state.ts`). This is not a permanent closure: the card must stay
+/// actionable so the worker can retry once the window opens.
+class _TooEarlyCheckInRepository extends DemoWorkerMarketplaceRepository {
+  @override
+  Future<Map<String, ApplicationState>> applicationStates() async => {
+    _acceptedConfirmedShift.id: ApplicationState.accepted,
+  };
+
+  @override
+  Future<List<Shift>> availableShifts() async => const [
+    _acceptedConfirmedShift,
+  ];
+
+  @override
+  Future<void> checkIn(String shiftId, String credential) =>
+      Future.error(const MarketplaceApiException('CHECK_IN_TOO_EARLY'));
+}
+
+/// Simulates the server having already resolved this assignment as
+/// `NO_SHOW`/`ABANDONED` (`ASSIGNMENT_NOT_ACTIONABLE`, see
+/// `resolveAssignmentLifecycle` in `shift-state.ts`): unlike
+/// `CHECK_IN_TOO_EARLY`, this is a permanent closure for this assignment, so
+/// the card must retire on reload.
+class _NotActionableCheckInRepository extends DemoWorkerMarketplaceRepository {
+  var _closed = false;
+
+  @override
+  Future<Map<String, ApplicationState>> applicationStates() async => {
+    _acceptedConfirmedShift.id: _closed
+        ? ApplicationState.closed
+        : ApplicationState.accepted,
+  };
+
+  @override
+  Future<List<Shift>> availableShifts() async =>
+      _closed ? const <Shift>[] : const [_acceptedConfirmedShift];
+
+  @override
+  Future<void> checkIn(String shiftId, String credential) {
+    _closed = true;
+    return Future.error(
+      const MarketplaceApiException('ASSIGNMENT_NOT_ACTIONABLE'),
+    );
   }
 }
 
