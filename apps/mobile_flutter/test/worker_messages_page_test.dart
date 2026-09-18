@@ -10,7 +10,11 @@ import 'package:flutter_test/flutter_test.dart';
 // reconstruía. En el sondeo (`_poll`) el error además lo tragaba `catch (_)`,
 // así que el síntoma era silencioso: la lista simplemente dejaba de
 // refrescarse. Por eso las pruebas verifican el efecto visible (la lista
-// nueva aparece), no solo `takeException`.
+// nueva aparece), no solo `takeException`. La tercera prueba cubre el `catch`
+// del sondeo: un fallo conserva la lista, muestra un aviso discreto y el
+// siguiente sondeo exitoso lo limpia. La cuarta cubre el "Reintentar" de la
+// pantalla de error de carga: un sondeo fallido detrás de esa pantalla enciende
+// la bandera, y el reintento exitoso debe limpiarla.
 void main() {
   testWidgets(
     'retrying after a failed load reloads the conversations without a '
@@ -67,6 +71,91 @@ void main() {
 
       expect(tester.takeException(), isNull);
       expect(find.text('Eventos Perú'), findsOneWidget);
+      await _unmount(tester);
+    },
+  );
+
+  testWidgets(
+    'a failed poll keeps the list, shows a notice and clears it once a later '
+    'poll succeeds',
+    (tester) async {
+      final repository = _ScriptedConversationsRepository([
+        () async => [_conversation('c1', 'Restaurante La Mar')],
+        () => Future.error(StateError('sin conexión')),
+        () async => [
+          _conversation('c1', 'Restaurante La Mar'),
+          _conversation('c2', 'Eventos Perú'),
+        ],
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerMessagesPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Restaurante La Mar'), findsOneWidget);
+      expect(find.textContaining('No pudimos actualizar'), findsNothing);
+
+      // First poll fails: the list already on screen stays, the full-screen
+      // error state does not replace it, and the notice tells the worker the
+      // data may be stale.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Restaurante La Mar'), findsOneWidget);
+      expect(find.text('No pudimos cargar tus mensajes'), findsNothing);
+      expect(find.textContaining('No pudimos actualizar'), findsOneWidget);
+
+      // The timer keeps retrying; the next success brings the fresh list and
+      // clears the notice.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Eventos Perú'), findsOneWidget);
+      expect(find.textContaining('No pudimos actualizar'), findsNothing);
+      await _unmount(tester);
+    },
+  );
+
+  testWidgets(
+    'retrying from the load error screen clears a notice raised by a poll that '
+    'failed in the meantime',
+    (tester) async {
+      final repository = _ScriptedConversationsRepository([
+        () => Future.error(StateError('sin conexión')),
+        () => Future.error(StateError('sin conexión')),
+        () async => [_conversation('c1', 'Restaurante La Mar')],
+      ]);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerMessagesPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('No pudimos cargar tus mensajes'), findsOneWidget);
+
+      // A poll fails while the initial-load error screen is still showing: it
+      // raises the flag behind that screen, which keeps precedence.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('No pudimos cargar tus mensajes'), findsOneWidget);
+      expect(find.textContaining('No pudimos actualizar'), findsNothing);
+
+      // The worker taps "Reintentar" before the next tick and the reload works:
+      // nothing is failing any more, so the stale notice must not appear on top
+      // of the fresh list while waiting for the next poll to clear it.
+      await tester.tap(find.text('Reintentar'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Restaurante La Mar'), findsOneWidget);
+      expect(find.text('No pudimos cargar tus mensajes'), findsNothing);
+      expect(find.textContaining('No pudimos actualizar'), findsNothing);
       await _unmount(tester);
     },
   );

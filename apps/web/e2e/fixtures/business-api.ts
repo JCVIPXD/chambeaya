@@ -27,7 +27,7 @@ export const company: CompanyRecord = {
   district: null,
 };
 
-const subscription: SubscriptionRecord = {
+const activeSubscription: SubscriptionRecord = {
   id: 'browser-test-subscription',
   plan: 'PILOT',
   status: 'TRIAL',
@@ -36,11 +36,35 @@ const subscription: SubscriptionRecord = {
   trialEndsAt: null,
 };
 
-type ApiCall = { method: string; path: string; authorization: string | undefined };
+// Respuesta sintética de `GET /business/subscription` para una empresa que no
+// activó ningún plan: sin `id`/`startsAt` y con `status: 'INACTIVE'` (ver
+// `business.service.ts#getSubscription`). Trae `plan: 'PILOT'` aunque no haya
+// ningún plan vigente.
+export const inactiveSubscription: SubscriptionRecord = {
+  plan: 'PILOT',
+  status: 'INACTIVE',
+  endsAt: null,
+  trialEndsAt: null,
+};
+
+// Empresa con un plan `PRO` activado de forma manual (no existe endpoint de
+// activación; el plan solo puede venir de una fila creada por administración).
+export const proSubscription: SubscriptionRecord = {
+  id: 'browser-test-subscription-pro',
+  plan: 'PRO',
+  status: 'ACTIVE',
+  startsAt: '2026-09-01T00:00:00.000Z',
+  endsAt: null,
+  trialEndsAt: null,
+};
+
+type ApiCall ={ method: string; path: string; authorization: string | undefined };
 type BrowserApi = { calls: ApiCall[] };
 
-export const test = base.extend<{ browserApi: BrowserApi }>({
-  browserApi: [async ({ context, baseURL }, use) => {
+export const test = base.extend<{ browserApi: BrowserApi; subscription: SubscriptionRecord }>({
+  // Override per file/describe with `test.use({ subscription: ... })`.
+  subscription: [activeSubscription, { option: true }],
+  browserApi: [async ({ context, baseURL, subscription }, use) => {
     const calls: ApiCall[] = [];
     const unexpected: string[] = [];
     const pageErrors: string[] = [];

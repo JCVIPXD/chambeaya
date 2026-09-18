@@ -1337,9 +1337,7 @@ export default function HomePage() {
           </span>
           <span className="company-copy">
             <strong>{company?.name ?? session.name}</strong>
-            <span>
-              {subscription?.plan === "PRO" ? "Empresa Pro" : "Plan piloto"}
-            </span>
+            <span>{sidebarPlanLabel(subscription)}</span>
           </span>
           <Pencil size={15} color="#718096" />
         </button>
@@ -2637,6 +2635,25 @@ export default function HomePage() {
   );
 }
 
+// `INACTIVE` es la respuesta sintética de `GET /business/subscription` cuando
+// la empresa no activó ningún plan: el `plan: "PILOT"` que trae no es un plan
+// vigente, así que no debe presentarse como plan actual. Sin registro
+// (`null`, todavía cargando o fallo de carga) tampoco se afirma ningún plan.
+function hasActivatedPlan(subscription: SubscriptionRecord | null): boolean {
+  return subscription !== null && subscription.status !== "INACTIVE";
+}
+
+// Rótulo bajo el nombre de la empresa en la barra lateral (chrome permanente).
+// Comparte `hasActivatedPlan` con `MembershipView` para que ninguna vista
+// afirme un plan que la empresa no activó.
+function sidebarPlanLabel(subscription: SubscriptionRecord | null): string {
+  if (subscription === null) return "Plan sin confirmar";
+  if (!hasActivatedPlan(subscription)) return "Sin plan activado";
+  if (subscription.plan === "PRO") return "Empresa Pro";
+  if (subscription.plan === "CUSTOM") return "Plan Custom";
+  return "Plan piloto";
+}
+
 function MembershipView({
   subscription,
   onToast,
@@ -2646,6 +2663,7 @@ function MembershipView({
 }) {
   const plan = subscription?.plan ?? "PILOT";
   const status = subscription?.status ?? "INACTIVE";
+  const hasPlan = hasActivatedPlan(subscription);
   const statusLabel =
     status === "INACTIVE"
       ? "Sin plan activo"
@@ -2731,10 +2749,15 @@ function MembershipView({
       <section className="membership-current panel">
         <div>
           <p className="eyebrow">Tu situación actual</p>
-          <h2>Plan {plan === "PILOT" ? "Piloto" : plan === "PRO" ? "Empresa Pro" : "Custom"}</h2>
+          <h2>
+            {hasPlan
+              ? `Plan ${plan === "PILOT" ? "Piloto" : plan === "PRO" ? "Empresa Pro" : "Custom"}`
+              : "Sin plan activado"}
+          </h2>
           <p>
-            {statusLabel}. El piloto no requiere tarjeta ni suscripción para
-            publicar, seleccionar o reportar pagos.
+            {hasPlan
+              ? `${statusLabel}. El piloto no requiere tarjeta ni suscripción para publicar, seleccionar o reportar pagos.`
+              : `${statusLabel}. Publicar, seleccionar y reportar pagos no requiere tarjeta ni suscripción.`}
           </p>
         </div>
         <div className="membership-current-meta">
@@ -2742,14 +2765,16 @@ function MembershipView({
           <small>
             {status === "TRIAL"
               ? `Vigente hasta el ${trialEnd}`
-              : "Periodo administrado por Chambeaya"}
+              : status === "INACTIVE"
+                ? "Sin periodo vigente"
+                : "Periodo administrado por Chambeaya"}
           </small>
         </div>
       </section>
 
       <section className="membership-grid" aria-label="Planes propuestos">
         {plans.map((item) => {
-          const isCurrent = item.code === plan;
+          const isCurrent = hasPlan && item.code === plan;
           return (
             <article
               className={`membership-card${isCurrent ? " current" : ""}`}
@@ -2777,7 +2802,11 @@ function MembershipView({
                   className="secondary-button"
                   type="button"
                   onClick={() =>
-                    onToast("La activación se habilitará cuando termine el piloto y validemos el beneficio.")
+                    onToast(
+                      hasPlan
+                        ? "La activación se habilitará cuando termine el piloto y validemos el beneficio."
+                        : "Por ahora los planes no se activan desde el panel. Puedes seguir publicando, seleccionando y reportando pagos sin ningún plan.",
+                    )
                   }
                 >
                   Quiero conocerlo

@@ -540,6 +540,10 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
   late Future<List<WorkerConversationRecord>> _loading;
   Timer? _refreshTimer;
   var _refreshing = false;
+  // True while the last background refresh failed. The list already on screen
+  // is kept as is; the flag only drives a discreet notice and is cleared by
+  // the next successful refresh.
+  var _refreshFailed = false;
   @override
   void initState() {
     super.initState();
@@ -570,9 +574,20 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
         // list silently stopped refreshing.
         setState(() {
           _loading = Future.value(conversations);
+          _refreshFailed = false;
         });
       }
-    } catch (_) {
+    } catch (error) {
+      // A failed refresh must not break the screen or wipe the list already
+      // shown, and it must not be silent either (an empty `catch` once hid a
+      // frozen list). Keep the data, log it and flag the notice; the timer
+      // keeps retrying and the next success clears the flag.
+      debugPrint('WorkerMessagesPage: no se pudo actualizar: $error');
+      if (mounted && !_refreshFailed) {
+        setState(() {
+          _refreshFailed = true;
+        });
+      }
     } finally {
       _refreshing = false;
     }
@@ -598,6 +613,10 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
           return _MessageState(
             onRetry: () => setState(() {
               _loading = widget.repository.workerConversations();
+              // A poll that failed while this error screen was showing raised
+              // the flag; this retry supersedes it, so a successful reload must
+              // not keep the "could not refresh" notice on top of fresh data.
+              _refreshFailed = false;
             }),
             title: 'No pudimos cargar tus mensajes',
             message: 'Revisa tu conexión e inténtalo nuevamente.',
@@ -605,31 +624,72 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
         }
         final conversations =
             snapshot.data ?? const <WorkerConversationRecord>[];
+        final Widget content;
         if (conversations.isEmpty) {
-          return const _MessageState(
+          content = const _MessageState(
             title: 'Aún no tienes conversaciones',
-            message:
-                'Cuando te postules a un turno, podrás coordinar directamente con la empresa.',
+            message: 'Cuando te postules a un turno, podrás coordinar directamente con la empresa.',
+          );
+        } else {
+          content = Column(
+            children: conversations.map((conversation) {
+              return _ConversationTile(
+                record: conversation,
+                onTap: () {
+                  showModalBottomSheet<void>(
+                    context: context,
+                    isScrollControlled: true,
+                    builder: (_) => _ConversationSheet(
+                      repository: widget.repository,
+                      conversationId: conversation.id,
+                    ),
+                  );
+                },
+              );
+            }).toList(),
           );
         }
+        if (!_refreshFailed) return content;
         return Column(
-          children: conversations.map((conversation) {
-            return _ConversationTile(
-              record: conversation,
-              onTap: () {
-                showModalBottomSheet<void>(
-                  context: context,
-                  isScrollControlled: true,
-                  builder: (_) => _ConversationSheet(
-                    repository: widget.repository,
-                    conversationId: conversation.id,
-                  ),
-                );
-              },
-            );
-          }).toList(),
+          children: [
+            const _RefreshFailedNotice(),
+            const SizedBox(height: 12),
+            content,
+          ],
         );
       },
+    ),
+  );
+}
+
+/// Discreet notice shown above the conversations while background refreshes
+/// are failing. It keeps the last list visible instead of replacing it with
+/// the full-screen error state.
+class _RefreshFailedNotice extends StatelessWidget {
+  const _RefreshFailedNotice();
+  @override
+  Widget build(BuildContext context) => Semantics(
+    liveRegion: true,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: context.palette.surfaceMuted,
+        border: Border.all(color: context.palette.border),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.cloud_off_rounded, size: 18, color: context.palette.muted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'No pudimos actualizar tus mensajes. Reintentaremos en unos '
+              'segundos.',
+              style: TextStyle(color: context.palette.muted, fontSize: 13),
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }

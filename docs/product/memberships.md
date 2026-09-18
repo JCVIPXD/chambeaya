@@ -11,9 +11,16 @@ Durante el piloto:
 - el trabajador usa Chambeaya sin costo;
 - la empresa opera con el plan **Piloto** sin tarjeta ni cobro automático;
 - el plan `PILOT/TRIAL` solo sirve para identificar el periodo de validación, y
-  únicamente existe cuando alguien lo activó de forma explícita: una empresa que
-  nunca activó nada no tiene suscripción persistida y el panel le muestra "Sin
-  plan activo" (`PILOT/INACTIVE` sintético, ver `docs/reference/api.md`);
+  desde 2026-09-18 solo se crea cuando alguien lo activó de forma explícita: una
+  empresa que nunca activó nada no tiene suscripción persistida y el panel le
+  muestra "Sin plan activo" (`PILOT/INACTIVE` sintético, ver
+  `docs/reference/api.md`) y ninguna vista del panel (Membresías, barra lateral
+  ni los avisos de las tarjetas) la presenta como en piloto. Salvedad: en
+  cualquier base donde corrió la versión anterior sobreviven filas
+  `PILOT/TRIAL` que nadie activó y que no se pueden
+  distinguir de una activación real, así que no se borran; esas empresas siguen
+  viendo "Piloto activo" hasta que un operador las revise (ver la limitación en
+  `docs/reference/api.md`);
 - ningún turno, postulación o pago directo se bloquea por suscripción;
 - los precios se validan con empresas reales antes de mostrarlos como oferta.
 

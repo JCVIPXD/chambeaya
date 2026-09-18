@@ -50,7 +50,29 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    enviada" y sin estado "Pendiente" residual). Recargar la página ocultaría la
    regresión, por eso la prueba no lo hace (`talent-invite.spec.ts`).
 
-Dieciséis ejecuciones en total. Cada una tiene su navegador aislado y su estado de
+7. Membresía: una empresa con periodo de prueba activo ve "Plan Piloto", su
+   vigencia y la tarjeta Piloto marcada como "Actual"; una empresa **sin plan
+   activado** (respuesta sintética `INACTIVE` de `GET /api/business/subscription`,
+   que trae `plan: 'PILOT'` sin que exista ningún plan vigente) ve "Sin plan
+   activado" y "Sin periodo vigente", y no ve ni "Periodo administrado por
+   Chambeaya", ni "Piloto activo", ni ninguna tarjeta marcada como "Actual" o
+   "Incluido en tu piloto" (`membership.spec.ts`). Tampoco aparece "Plan piloto"
+   en la barra lateral (allí se lee "Sin plan activado"), y los botones "Quiero
+   conocerlo" de las tres tarjetas avisan que los planes todavía no se activan
+   desde el panel en vez de prometer una activación "cuando termine el piloto".
+   Con el periodo de prueba activo la barra lateral conserva "Plan piloto" y el
+   botón de Empresa Pro conserva el aviso previo; con un plan `PRO` activado la
+   barra lateral dice "Empresa Pro" y esa tarjeta es la actual. La respuesta de
+   suscripción se cambia por archivo o bloque con `test.use({ subscription: ...
+   })` (`inactiveSubscription` y `proSubscription` viven en
+   `fixtures/business-api.ts`); el valor por defecto es el periodo de prueba
+   activo. No cubierto: el rótulo "Plan sin confirmar" (solo aparece antes de la
+   primera respuesta o si la carga falla) y, en el caso `PRO`, el texto
+   "Incluido en tu piloto" y el párrafo "El piloto no requiere tarjeta ni
+   suscripción", que siguen apareciendo para un plan que no es el piloto
+   (defecto de copy preexistente, registrado en `CN-20260918-012`).
+
+Veintiocho ejecuciones en total. Cada una tiene su navegador aislado y su estado de
 API propio. Una petición API no prevista, una petición externa o un error
 JavaScript sin capturar hacen fallar la prueba. No se permiten reintentos que
 oculten fallos.

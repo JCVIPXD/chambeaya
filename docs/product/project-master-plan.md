@@ -370,8 +370,29 @@ Objetivo: cerrar primero la obligación económica y después mover dinero.
   plan**, así que hoy ninguna empresa puede pasar de `INACTIVE` a `TRIAL`/`ACTIVE` por
   el producto (solo `demo.seed.ts` siembra una fila real); y **no hay limpieza de las
   filas `TRIAL` fantasma** que la versión anterior ya creó en cualquier base donde
-  corrió — esas empresas siguen viendo "Piloto activo" indistinguible de una activación
-  real hasta que exista esa tarea de una sola vez.
+  corrió. Se investigó en `CN-20260918-009` y **no existe un criterio seguro** para
+  distinguirlas de una activación manual (el `upsert` antiguo, `demo.seed.ts` y una
+  fila creada a mano con los valores por defecto dejan los mismos valores y
+  timestamps), así que no se implementó ningún script de borrado: esas empresas siguen
+  viendo "Piloto activo" hasta que un operador las revise una por una (consulta de
+  solo lectura en `docs/reference/api.md`). Pendiente conocido, no bloqueante.
+  Además, el panel web ya no afirma un piloto vigente ante una empresa sin plan
+  activado (`INACTIVE`): la sección "Tu situación actual" de `MembershipView` muestra
+  "Sin plan activado"/"Sin periodo vigente" y no marca ninguna tarjeta como "Actual"
+  (`CN-20260918-009`); la tarjeta de empresa de la barra lateral rotula "Sin plan
+  activado" (y "Plan sin confirmar" mientras no haya respuesta de la API); y los
+  botones "Quiero conocerlo" avisan que los planes todavía no se activan desde el
+  panel en vez de prometer una activación "cuando termine el piloto"
+  (`CN-20260918-011`, con `membership.spec.ts`). Los tres textos comparten la misma
+  noción de "plan activado" (`hasActivatedPlan` en `apps/web/app/page.tsx`).
+  Quedan dos textos de piloto sin revisar, ambos preexistentes y verificados en la
+  auditoría `CN-20260918-012`: el aviso de la vista Pagos ("La integración de pagos
+  queda fuera del piloto"), que una empresa sin plan también lee; y, del lado
+  contrario, una empresa con un plan `PRO`/`CUSTOM` o con el piloto ya
+  `EXPIRED`/`CANCELLED`/`PAUSED` -hoy solo posible con una fila creada a mano- sigue
+  leyendo "Incluido en tu piloto" y "El piloto no requiere tarjeta ni suscripción"
+  en `MembershipView`, porque `hasActivatedPlan` solo distingue `INACTIVE` y el copy
+  de las tarjetas está fijo en el piloto.
 - **Reencuadre de pagos sin pasarela (P2, parcial).** El objetivo declarado -que nada
   en la capa interna suene a que Chambeaya custodia o retiene dinero- se atacó en
   `CN-20260918-005` por comportamiento y documentación, no por renombrado: se eliminó
@@ -518,7 +539,10 @@ Riesgos residuales declarados al cerrar el hito (ninguno bloqueante, cada uno co
   de `worker_discovery_page.dart`) usan ahora un cuerpo de bloque. En compilación *debug* el
   `assert` de `State.setState` lanzaba antes de `markNeedsBuild` y la pantalla no se
   reconstruía (en el sondeo de "Conversaciones" el `catch (_)` lo tragaba, así que la lista
-  dejaba de refrescarse sin ningún error visible); en *release* no ocurría. Ya hay pruebas de
+  dejaba de refrescarse sin ningún error visible; desde `CN-20260918-009` ese `catch` ya no
+  es mudo: conserva la lista, la registra con `debugPrint` y muestra el aviso "No pudimos
+  actualizar tus mensajes" hasta el siguiente sondeo exitoso); en *release* no
+  ocurría. Ya hay pruebas de
   widget que fallaban antes del arreglo (`worker_messages_page_test.dart` y un caso de
   reintento en `worker_applications_page_test.dart` y `worker_discovery_page_test.dart`). El
   patrón no tiene ningún otro sitio en `lib/`: se verificó por búsqueda, y los tres sitios
@@ -530,16 +554,16 @@ Riesgos residuales declarados al cerrar el hito (ninguno bloqueante, cada uno co
 - **Código sin consumidor que quedó tras eliminar `worker_pages.dart` (`CN-20260918-007`).**
   Dos casos distintos, declarados en la auditoría `CN-20260918-008`. (a)
   `lib/features/marketplace/app_capabilities.dart` (`AppCapabilities`, con
-  `cameraCheckInEnabled`/`locationCheckInEnabled`/`paymentsEnabled`) ya no lo lee ningún
-  archivo de `lib/`: su único consumidor era la `CheckInPage` eliminada. Lo único que
-  queda es `marketplace_repository_test.dart`, que afirma que las tres banderas son
-  `false`, es decir, comprueba las constantes de una clase que nadie consulta. Con el
-  archivo desapareció también el copy que avisaba al trabajador de que la cámara y la
-  ubicación están apagadas; hoy la app enrutada no dice nada al respecto porque tampoco
-  ofrece ninguna pantalla de cámara o GPS. Candidato a un alcance propio de limpieza
-  (borrar la clase y esas tres aserciones) o a reconectarse si alguna vez se enruta una
-  pantalla de asistencia con cámara. (b) `walletMovements()`/`confirmPayment()`/
-  `PaymentRecord` en el repositorio de trabajador **no** son el mismo caso: son la mitad
+  `cameraCheckInEnabled`/`locationCheckInEnabled`/`paymentsEnabled`) quedó sin ningún
+  lector en `lib/` porque su único consumidor era la `CheckInPage` eliminada, y su única
+  prueba solo afirmaba que tres constantes valían `false`. **Se eliminó en
+  `CN-20260918-009`** junto con esa aserción (verificado por búsqueda exhaustiva en
+  `lib/` y `test/`); el resto de `marketplace_repository_test.dart` no cambió. La app
+  enrutada no dice nada sobre cámara o ubicación porque tampoco ofrece ninguna pantalla
+  de cámara o GPS; si alguna vez se enruta una pantalla de asistencia con cámara, esa
+  decisión deberá modelarse de nuevo desde el requisito y no desde esa clase. (b)
+  `walletMovements()`/`confirmPayment()`/`PaymentRecord` en el repositorio de
+  trabajador **no** son el mismo caso: son la mitad
   cliente de `GET /api/workers/wallet` y `POST /api/workers/payments/:id/confirm`, dos
   endpoints vivos y documentados, y el plan del ciclo prohibía tocarlos. Se conservan a
   propósito, documentados en `docs/reference/api.md`.
@@ -571,8 +595,9 @@ producción solo se habilitan tras validar el recorrido completo y las obligacio
   reseñas.
 - Concurrencia real en cupos, decisiones, cancelación, asistencia, ledger y webhooks.
 - Playwright para publicación, selección, mensajería y cierre. Ya cubiertos: el acceso
-  empresarial, la paginación del directorio de talento y la invitación de talento
-  (suite simulada de `apps/web/e2e/`, dieciséis ejecuciones), y el borrado de un
+  empresarial, la paginación del directorio de talento, la invitación de talento y el
+  estado de membresía con piloto activo, sin plan activado y con plan Pro (suite
+  simulada de `apps/web/e2e/`, veintiocho ejecuciones), y el borrado de un
   trabajador desde el panel superadmin contra el stack real —API Express, PostgreSQL y
   panel Next.js, sin ningún `page.route`— en la suite opcional `apps/web/e2e-real/`
   (`npm run test:web:admin-real`, cerrada en `CN-20260916-094` y reproducida por la

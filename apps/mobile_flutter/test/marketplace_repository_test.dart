@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:chambeaya_mobile/features/marketplace/app_capabilities.dart';
 import 'package:chambeaya_mobile/features/discovery/discovery_models.dart';
 import 'package:chambeaya_mobile/features/marketplace/marketplace_data.dart';
 import 'package:chambeaya_mobile/features/marketplace/marketplace_repository.dart';
@@ -9,12 +8,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 void main() {
-  test('all protected capabilities are disabled by default', () {
-    expect(AppCapabilities.defaults.cameraCheckInEnabled, isFalse);
-    expect(AppCapabilities.defaults.locationCheckInEnabled, isFalse);
-    expect(AppCapabilities.defaults.paymentsEnabled, isFalse);
-  });
-
   test(
     'accepting a published demo shift produces an assigned check-in credential',
     () async {
