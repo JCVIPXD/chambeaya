@@ -27,7 +27,9 @@ npm run dev:mobile
 `npm run demo:seed` es explícito, idempotente y sólo opera sobre los registros
 reservados para la demostración local. Restablece un turno con una postulación
 pendiente para recorrer selección, confirmación, asistencia y pago; también deja
-un turno histórico pagado para mostrar historial y billetera. El comando
+un turno histórico pagado para mostrar el historial de pagos (visible desde el panel
+Empresa o vía `GET /api/workers/wallet`; la app Flutter no tiene una pantalla de
+billetera enrutada, ver el paso 5 del recorrido). El comando
 requiere exactamente `NODE_ENV=development`, se rechaza en producción y nunca se
 ejecuta al iniciar Docker.
 
@@ -59,7 +61,7 @@ Todos estos datos son ficticios. También puede usarse cualquier correo válido,
 2. En `Selección de talento`, muestra la postulación pendiente de Trabajador Demo y acepta el perfil.
 3. En el panel Trabajador, abre `Postulaciones`, confirma el turno y sigue el paso de llegada/check-in; completa la salida para generar el pago pendiente. El check-in real exige estar dentro de una ventana de tolerancia alrededor de la hora de inicio del turno (30 minutos antes, 60 minutos después; fuera de esa ventana el servidor responde `409` y, pasado ese margen sin check-in, la asignación queda `NO_SHOW`). `npm run demo:seed`/`npm run demo:smoke` siembran el turno de este recorrido con inicio 5 minutos antes de sembrarlo, así que la ventana se cierra unos 55 minutos después de sembrar la demo; si se pasa ese margen, vuelve a ejecutar `npm run demo:seed` (o `npm run demo:smoke`) para reiniciar la ventana antes de presentar.
 4. Vuelve a Empresa, abre `Pagos` y marca el pago generado como procesado.
-5. En Trabajador, confirma la recepción del pago. **La app Flutter no tiene hoy una pantalla de historial/billetera enrutada**: `workerDestinations` (`lib/core/navigation/worker_destination.dart`) solo expone Inicio, Postulaciones, Mensajes, Perfil e Invitaciones, y la vista de billetera que existe en `lib/features/marketplace/worker_pages.dart` no la importa ningún archivo de `lib/` (solo un test). El pago histórico del turno `Apoyo de salón` que siembra la demo se puede mostrar desde el panel Empresa (`Pagos`) o consultando `GET /api/workers/wallet` directamente; no busques una pestaña de billetera en la app.
+5. En Trabajador, confirma la recepción del pago. **La app Flutter no tiene hoy una pantalla de historial/billetera enrutada**: `workerDestinations` (`lib/core/navigation/worker_destination.dart`) solo expone Inicio, Postulaciones, Mensajes, Perfil e Invitaciones, y la única vista de billetera que existió (`lib/features/marketplace/worker_pages.dart`, no enrutada) se eliminó como código muerto. El pago histórico del turno `Apoyo de salón` que siembra la demo se puede mostrar desde el panel Empresa (`Pagos`) o consultando `GET /api/workers/wallet` directamente; no busques una pestaña de billetera en la app.
 6. En Trabajador, abre `Invitaciones`: el modo demo siembra una invitación pendiente de `Restaurante La Mar` que puede aceptarse o rechazarse. Contra la API real, esa pantalla lista las invitaciones creadas desde `Talento disponible` del panel Empresa y responde llamando al servidor; la tarjeta solo cambia de estado con la respuesta real.
 7. Abre Superadmin para mostrar el resumen, la empresa y el trabajador con el mismo escenario.
 8. Como cierre del recorrido de Trabajador, entra a `Perfil` y activa el interruptor `Modo oscuro`: el panel de trabajador completo (inicio, postulaciones, mensajes, perfil e invitaciones, junto con sus diálogos y hojas modales) cambia a la paleta oscura con una transición corta, y la preferencia se recuerda al volver a abrir la aplicación. Puedes activarlo en cualquier punto del recorrido: cambiar de tema conserva tus postulaciones, turnos guardados y el resto del estado del panel. El resto de la aplicación no cambia de apariencia.

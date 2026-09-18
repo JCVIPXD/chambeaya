@@ -139,7 +139,11 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
         }
         if (snapshot.hasError) {
           return _DiscoveryError(
-            onRetry: () => setState(() => _loading = _loadDiscovery()),
+            // Block body: `setState` asserts (debug) if its callback returns
+            // the `Future` that an arrow-bodied assignment would return.
+            onRetry: () => setState(() {
+              _loading = _loadDiscovery();
+            }),
           );
         }
         final data = snapshot.data!;

@@ -7,8 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 // Cubre el hallazgo ALTO-1 de CN-20260916-099: `WorkerApplicationsPage` (la
 // pestaña "Postulaciones", enrutada de verdad en `WorkerShell`, a diferencia
-// de `ShiftsPage`) debía seguir ofreciendo "Confirmar asistencia"/"Confirmar
-// llegada" sobre un turno vencido de forma permanente, porque el error real
+// de la antigua `ShiftsPage`, eliminada como código muerto en CN-20260918-007)
+// debía seguir ofreciendo "Confirmar asistencia"/"Confirmar llegada" sobre un turno vencido de forma permanente, porque el error real
 // del servidor se descartaba detrás de un mensaje genérico y la caché de la
 // pantalla podía reintroducir el turno. Estas pruebas ejercen la pantalla
 // real (no solo el repositorio) con un repositorio falso que reproduce
@@ -155,6 +155,28 @@ void main() {
       expect(find.text('Confirmar asistencia'), findsOneWidget);
     },
   );
+
+  // `onRetry` used to be `() => setState(() => _loading = _load())`: an
+  // expression-bodied callback that returns the `Future`, which `setState`
+  // rejects with an assertion in debug mode (before it schedules the rebuild).
+  testWidgets('retrying a failed load reloads the applications without a '
+      'setState assertion', (tester) async {
+    final repository = _FlakyLoadRepository();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: WorkerApplicationsPage(repository: repository)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('No pudimos cargar tus postulaciones'), findsOneWidget);
+
+    await tester.tap(find.text('Reintentar'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('No pudimos cargar tus postulaciones'), findsNothing);
+    expect(find.text('Confirmar asistencia'), findsOneWidget);
+  });
 }
 
 const _acceptedNotConfirmedShift = Shift(
@@ -299,4 +321,26 @@ class _TransientFailureRepository extends DemoWorkerMarketplaceRepository {
   @override
   Future<void> confirmAssignment(String shiftId) =>
       Future.error(StateError('sin conexión'));
+}
+
+/// Fails the first load (`applicationStates()`) and then serves an accepted,
+/// not-yet-confirmed assignment, so the retry button has something to load.
+class _FlakyLoadRepository extends DemoWorkerMarketplaceRepository {
+  var _failed = false;
+
+  @override
+  Future<Map<String, ApplicationState>> applicationStates() {
+    if (!_failed) {
+      _failed = true;
+      return Future.error(StateError('sin conexión'));
+    }
+    return Future.value({
+      _acceptedNotConfirmedShift.id: ApplicationState.accepted,
+    });
+  }
+
+  @override
+  Future<List<Shift>> availableShifts() async => const [
+    _acceptedNotConfirmedShift,
+  ];
 }

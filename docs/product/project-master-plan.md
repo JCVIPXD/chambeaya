@@ -70,10 +70,14 @@ Objetivo: eliminar ambigüedades entre demo y producto real antes de seguir ampl
   `subosito/flutter-action`. Cierre: CI reproducible, sin referencias ejecutables
   mutables y con build/pruebas verdes. Las cuatro acciones están fijadas por SHA
   completo y verificadas contra la API de GitHub en la auditoría `CN-20260916-093`;
-  `flutter analyze` no reporta ningún error (quedan 15 avisos `info` de estilo, dos de
-  ellos en `worker_pages.dart`, archivo que ningún archivo de `lib/` importa) y
+  `flutter analyze` no reporta ningún error. Al cierre de `CN-20260916-093` quedaban 15
+  avisos `info` de estilo, dos de ellos en `worker_pages.dart`; tras eliminar ese archivo
+  en `CN-20260918-007` son 11 (`curly_braces_in_flow_control_structures` ×10 y
+  `unnecessary_to_list_in_spreads` ×1), verificados en la auditoría `CN-20260918-008`. En
+  esa misma foto de `CN-20260916-093`,
   `flutter test` (67/67), la suite de la API (113/113) y la prueba vertical de
-  integración contra PostgreSQL real (2/2) pasan. **Pendiente:** ninguna corrida de
+  integración contra PostgreSQL real (2/2) pasaban; los totales vigentes al 2026-09-18
+  son 88/88 en Flutter y 156/156 en la API. **Pendiente:** ninguna corrida de
   GitHub Actions ha ocurrido todavía porque el árbol de trabajo, incluido `.github/`,
   no está versionado; hay que confirmar la primera ejecución remota tras el commit.
 
@@ -255,6 +259,13 @@ Objetivo: hacer confiable el recorrido desde la selección hasta el cierre.
   cobre igual, vía `outcome: "COMPLETED"`), y cierre del turno como `CANCELLED` -en vez
   de reabrir a un `PUBLISHED` fantasma e inalcanzable- cuando su única asignación
   activa queda cancelada/no-show/abandonada después de que `endsAt` ya pasó.
+  **Validado contra PostgreSQL real en la auditoría `CN-20260918-008`** (el entorno no lo
+  permitía en `CN-20260918-001` a `006`, donde quedó declarado como riesgo bloqueante): la
+  migración `20260918120000_assignment_no_show_abandoned` aplica limpiamente junto con las
+  otras 23 sobre una base vacía, `prisma migrate diff` no detecta divergencia contra
+  `schema.prisma`, el enum `AssignmentStatus` de la base contiene `NO_SHOW` y `ABANDONED`,
+  y la suite de integración (`vertical-marketplace-flow` y `shift-capacity-race`) pasa
+  2 archivos / 3 pruebas sobre una base `chambeaya_test` separada de la de desarrollo.
   Sigue pendiente: expiración y rotación de credenciales (la credencial no caduca y el
   propio trabajador la recibe del API, así que no prueba presencia); una ventana
   propia de check-out (hoy sigue siendo válido en cualquier momento tras el check-in,
@@ -463,13 +474,15 @@ Cerrado en `CN-20260916-092` y verificado de forma independiente en `CN-20260916
    menores ya conocidos y deliberadamente no tocados en este cierre (no bloquean el hito):
    el ramal "Empresa verificada" de `job_detail_panel.dart:219` sigue muerto (el servidor
    fija siempre `companyVerified: false` en `marketplace.service.ts:641`, condicional y
-   honesto en su rama alcanzable) y `worker_pages.dart` conserva insignias fabricadas
-   ("100% de entradas a tiempo", "Reemplazante IA") en una `RewardsPage` que ya no importa
-   ningún archivo de `lib/`. `CN-20260916-093` comprobó las dos afirmaciones: `companyVerified`
+   honesto en su rama alcanzable) y `worker_pages.dart` conservaba insignias fabricadas
+   ("100% de entradas a tiempo", "Reemplazante IA") en una `RewardsPage` que ya no importaba
+   ningún archivo de `lib/` (**archivo eliminado en `CN-20260918-007`**, verificado en la
+   auditoría `CN-20260918-008`). `CN-20260916-093` comprobó las dos afirmaciones: `companyVerified`
    solo se escribe una vez en todo el repositorio y con el valor `false`, el servicio de demo
    ni siquiera envía la clave y el modelo de Flutter la inicializa en `false`, así que no
    existe hoy ningún camino —tampoco en modo demo— por el que se muestre "Empresa
-   verificada"; y `worker_pages.dart` solo lo importa `test/worker_flow_test.dart`.
+   verificada"; y `worker_pages.dart` solo lo importaba `test/worker_flow_test.dart`
+   (ambos eliminados en `CN-20260918-007`).
 
 **Plan de refuerzo cerrado al 2026-09-16.** Los siete alcances de
 `.claude/plans/2026-09-15-refuerzo-piloto-talento.md` están aprobados. El último en
@@ -496,11 +509,40 @@ Riesgos residuales declarados al cerrar el hito (ninguno bloqueante, cada uno co
   divergencia cero con `prisma migrate diff`—, pero nadie ha ensayado todavía un
   `pg_dump`/restauración operativa, y `docs/guides/deployment.md` no documenta ese
   procedimiento. Acción: entrada propia que ensaye y documente el respaldo y la restauración.
-- **`setState(() => x = Future)` en cuatro puntos** (`worker_secondary_pages.dart:37`, `:61`,
-  `:479` y `worker_discovery_page.dart:142`): en compilación *debug* el `assert` de
-  `State.setState` lanza y la pantalla no se reconstruye; en *release* no ocurre. Afecta al
-  refresco periódico de "Conversaciones" y a dos botones de reintento (MEDIO-2 de
-  `CN-20260916-091`, sigue abierto).
+- ~~**`setState(() => x = Future)` en cuatro puntos**~~ **Corregido en `CN-20260918-007`
+  y verificado en la auditoría `CN-20260918-008`,** que revirtió los cuatro bloques a la
+  forma de expresión y confirmó que las cuatro pruebas nuevas fallan sin el arreglo (tres
+  con `FlutterError: setState() callback argument returned a Future`; la del sondeo, sin
+  excepción visible, porque la conversación nueva no aparece). Los cuatro sitios vivos (el reintento de "Postulaciones", el
+  sondeo y el reintento de "Conversaciones" en `worker_secondary_pages.dart`, y el reintento
+  de `worker_discovery_page.dart`) usan ahora un cuerpo de bloque. En compilación *debug* el
+  `assert` de `State.setState` lanzaba antes de `markNeedsBuild` y la pantalla no se
+  reconstruía (en el sondeo de "Conversaciones" el `catch (_)` lo tragaba, así que la lista
+  dejaba de refrescarse sin ningún error visible); en *release* no ocurría. Ya hay pruebas de
+  widget que fallaban antes del arreglo (`worker_messages_page_test.dart` y un caso de
+  reintento en `worker_applications_page_test.dart` y `worker_discovery_page_test.dart`). El
+  patrón no tiene ningún otro sitio en `lib/`: se verificó por búsqueda, y los tres sitios
+  restantes vivían en `worker_pages.dart`, eliminado en el mismo cierre. Se decidió no extraer
+  una utilidad compartida: son cuatro líneas de bloque sin lógica común. Queda una
+  incoherencia menor sin tocar: el botón de reintento de la pantalla de error de
+  descubrimiento se rotula "Limpiar filtros" (`_InlineState` reutilizado), y cambiar el texto
+  sería un cambio visible fuera de este alcance.
+- **Código sin consumidor que quedó tras eliminar `worker_pages.dart` (`CN-20260918-007`).**
+  Dos casos distintos, declarados en la auditoría `CN-20260918-008`. (a)
+  `lib/features/marketplace/app_capabilities.dart` (`AppCapabilities`, con
+  `cameraCheckInEnabled`/`locationCheckInEnabled`/`paymentsEnabled`) ya no lo lee ningún
+  archivo de `lib/`: su único consumidor era la `CheckInPage` eliminada. Lo único que
+  queda es `marketplace_repository_test.dart`, que afirma que las tres banderas son
+  `false`, es decir, comprueba las constantes de una clase que nadie consulta. Con el
+  archivo desapareció también el copy que avisaba al trabajador de que la cámara y la
+  ubicación están apagadas; hoy la app enrutada no dice nada al respecto porque tampoco
+  ofrece ninguna pantalla de cámara o GPS. Candidato a un alcance propio de limpieza
+  (borrar la clase y esas tres aserciones) o a reconectarse si alguna vez se enruta una
+  pantalla de asistencia con cámara. (b) `walletMovements()`/`confirmPayment()`/
+  `PaymentRecord` en el repositorio de trabajador **no** son el mismo caso: son la mitad
+  cliente de `GET /api/workers/wallet` y `POST /api/workers/payments/:id/confirm`, dos
+  endpoints vivos y documentados, y el plan del ciclo prohibía tocarlos. Se conservan a
+  propósito, documentados en `docs/reference/api.md`.
 - Sin regresión automatizada que impida reintroducir una afirmación sin fuente: la
   comprobación es hoy una búsqueda manual, no una prueba.
 - El residuo de carrera al cerrar sesión declarado en `CN-20260915-085` y la verificación de

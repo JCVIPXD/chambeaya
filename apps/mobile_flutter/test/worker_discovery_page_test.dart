@@ -235,6 +235,47 @@ void main() {
     expect(find.text('3 resultados'), findsNothing);
     expect(find.text('4 resultados'), findsOneWidget);
   });
+
+  // `onRetry` used to be `() => setState(() => _loading = _loadDiscovery())`:
+  // an expression-bodied callback that returns the `Future`, which `setState`
+  // rejects with an assertion in debug mode (before it schedules the rebuild).
+  testWidgets('retrying a failed load reloads discovery without a setState '
+      'assertion', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(home: WorkerDiscoveryPage(repository: _FlakyRepository())),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('No pudimos cargar los empleos'), findsOneWidget);
+
+    // The error state's action button is labelled "Limpiar filtros" (shared
+    // `_InlineState` widget); it is the only retry control on this screen.
+    await tester.tap(find.text('Limpiar filtros'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('No pudimos cargar los empleos'), findsNothing);
+    expect(find.text('Mozo de Salón'), findsOneWidget);
+  });
+}
+
+/// Fails the first `availableShifts()` call and behaves like the demo
+/// repository afterwards, so the discovery page's retry path is exercised.
+class _FlakyRepository extends DemoWorkerMarketplaceRepository {
+  var _failed = false;
+
+  @override
+  Future<List<Shift>> availableShifts() {
+    if (!_failed) {
+      _failed = true;
+      return Future.error(StateError('sin conexión'));
+    }
+    return super.availableShifts();
+  }
 }
 
 class _LiveRepository extends DemoWorkerMarketplaceRepository {

@@ -66,7 +66,11 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
           return _MessageState(
             title: 'No pudimos cargar tus postulaciones',
             message: 'Verifica tu conexión e inténtalo nuevamente.',
-            onRetry: () => setState(() => _loading = _load()),
+            // Block body: `setState` asserts (debug) if its callback returns
+            // the `Future` that an arrow-bodied assignment would return.
+            onRetry: () => setState(() {
+              _loading = _load();
+            }),
           );
         }
         final data = snapshot.data;
@@ -560,7 +564,13 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
     try {
       final conversations = await widget.repository.workerConversations();
       if (mounted) {
-        setState(() => _loading = Future.value(conversations));
+        // Block body (see `WorkerApplicationsPage`): returning the `Future`
+        // from an arrow body trips `setState`'s debug assertion before the
+        // rebuild is scheduled, and the `catch` below swallowed it, so the
+        // list silently stopped refreshing.
+        setState(() {
+          _loading = Future.value(conversations);
+        });
       }
     } catch (_) {
     } finally {
@@ -586,9 +596,9 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
         }
         if (snapshot.hasError) {
           return _MessageState(
-            onRetry: () => setState(
-              () => _loading = widget.repository.workerConversations(),
-            ),
+            onRetry: () => setState(() {
+              _loading = widget.repository.workerConversations();
+            }),
             title: 'No pudimos cargar tus mensajes',
             message: 'Revisa tu conexión e inténtalo nuevamente.',
           );

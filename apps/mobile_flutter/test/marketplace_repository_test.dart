@@ -72,9 +72,10 @@ void main() {
       expect(movements[1].status, 'Pendiente');
       // CN-20260918-005 (Alcance 2): el mapeo interno mezclaba español e
       // inglés ('Liberado'/'Reversed'); ahora el valor interno es
-      // consistentemente español ('Revertido'), sin cambiar la etiqueta que
-      // ve el trabajador (`_paymentStatusLabel` en worker_pages.dart sigue
-      // mostrando "Incidencia de pago").
+      // consistentemente español ('Revertido'). Su único consumidor de UI
+      // (`worker_pages.dart`, pantalla "Mis pagos") se eliminó en
+      // CN-20260918-007 por ser código no enrutado; el repositorio conserva
+      // el mapeo para cuando exista una pantalla de pagos enrutada.
       expect(movements.last.status, 'Revertido');
     },
   );
