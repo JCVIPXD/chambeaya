@@ -72,7 +72,29 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    suscripción", que siguen apareciendo para un plan que no es el piloto
    (defecto de copy preexistente, registrado en `CN-20260918-012`).
 
-Veintiocho ejecuciones en total. Cada una tiene su navegador aislado y su estado de
+8. Cierre manual de asignaciones `NO_SHOW` / `ABANDONED`
+   (`assignment-resolution.spec.ts`, 14 casos): en `Turnos` → `Postulaciones` la
+   asignación varada muestra "No se presentó a tiempo" o "Sin salida registrada" con
+   "Confirmar que sí trabajó" y "Cerrar sin pago". Elegir una acción solo abre una
+   confirmación (ninguna llamada a `POST .../resolve` hasta el "Sí, ..."; "Volver"
+   tampoco llama). Confirmar el trabajo envía `{ outcome: 'COMPLETED' }`, el copy dice
+   que el pago lo hace la empresa directo al trabajador y que Chambeaya no cobra, guarda
+   ni transfiere dinero, y tras responder se releen turno, postulaciones y pagos sin
+   recargar (el pago pendiente aparece en `Pagos`). Cerrar sin pago envía
+   `{ outcome: 'CANCELLED', reason? }` (sin `reason` si no se escribió motivo; un motivo
+   de 1-2 caracteres se rechaza en el panel sin llamar a la API) y no genera pago. Cubre
+   `NO_SHOW` y `ABANDONED` con ambas acciones; un turno ya `CANCELLED` (aviso "Aunque este
+   turno figure como cancelado…", también cuando el listado cargado antes lo traía sin
+   cancelar y hay que releerlo); errores 500 (aviso amable, la confirmación sigue abierta y
+   se puede reintentar), 400 `ASSIGNMENT_NOT_RESOLVABLE` y 404 `ASSIGNMENT_NOT_FOUND` (aviso
+   sin el código crudo; en el 400 además se refresca la lista); una asignación `ASSIGNED`/`COMPLETED`/
+   `CANCELLED` **no** muestra acciones; y un turno de tres cupos donde solo las dos filas
+   varadas ofrecen el cierre y resolver una no toca a las otras. La API con estado vive en
+   `fixtures/shift-assignments.ts` (`installShiftAssignmentsApi`, `page.route` sobre el
+   fixture base). La contraparte contra API y PostgreSQL reales está en `e2e-real/` (ver
+   más abajo).
+
+Cincuenta y seis ejecuciones en total (28 casos × escritorio y móvil). Cada una tiene su navegador aislado y su estado de
 API propio. Una petición API no prevista, una petición externa o un error
 JavaScript sin capturar hacen fallar la prueba. No se permiten reintentos que
 oculten fallos.
@@ -112,7 +134,7 @@ El workflow empezará a ejecutarse cuando estos archivos se suban al repositorio
 y GitHub Actions esté habilitado. La suite local general `npm test` también
 incluye ahora las pruebas web después de las pruebas de API.
 
-## Suite E2E real del panel superadmin (opt-in, requiere PostgreSQL)
+## Suite E2E real del panel (superadmin y empresa; opt-in, requiere PostgreSQL)
 
 Las pruebas anteriores simulan la API en el navegador. La suite
 `apps/web/e2e-real/` es distinta a propósito: arranca la **API real** de
@@ -122,6 +144,26 @@ recorrido de `apps/web/e2e/README.md` que no puede probarse sin backend real:
 autenticarse como `ADMIN`, ver la lista de trabajadores, abrir el detalle y
 borrar con confirmación, verificando que la fila desaparece y que tanto el
 contador de la lista como el del resumen se actualizan.
+
+Un segundo archivo, `assignment-resolution.spec.ts`, cubre el cierre manual de
+una asignación `NO_SHOW` desde el panel de la **empresa** (2 casos, solo
+escritorio): confirmar que sí trabajó (queda un `Payment` `PENDING` de S/ 120, la
+asignación `COMPLETED`, y el pago aparece en `Pagos`) y cerrar sin pago con motivo
+(asignación `CANCELLED`, ningún pago, el motivo queda en el `ShiftEvent`, y un
+segundo `resolve` responde `400 ASSIGNMENT_NOT_RESOLVABLE`). Como el registro público
+rechaza el rol `BUSINESS`, `apps/api/scripts/e2e-serve.ts` siembra también una cuenta
+empresa fija (`empresa.e2e@chambeaya.test`, mismos valores en
+`e2e-real/fixtures/business-real.ts`). El turno de cada caso se arma por HTTP real:
+empieza hace 90 minutos y termina 12 segundos después de crearse; el fixture registra un
+trabajador, lo postula y lo acepta, y el caso espera a que el turno venza (con el reloj
+real) antes de abrir el panel, de modo que la API detecta el `NO_SHOW` con el turno ya
+vencido y lo cierra como `CANCELLED`. Por eso cada caso tarda unos 16 s. **Con ese
+turno cerrado, confirmar el trabajo deja el turno `CANCELLED` y la asignación
+`COMPLETED` con su pago** (la base de esta ejecución lo confirmó); el panel avisa de ello.
+Solo se cubre `NO_SHOW`: llegar a `ABANDONED` exige un check-in real y esperar 60 minutos
+tras `endsAt`, y ningún endpoint permite crear un turno ya vencido ni adelantar el reloj.
+Cada caso deja sus filas en la base `_test` (títulos y trabajadores con sufijo aleatorio,
+sin colisiones); no limpia.
 
 No es parte de `npm test` ni de `npm run test:web`: requiere una base
 PostgreSQL real y accesible, así que queda **fuera** de la suite rápida y del
@@ -155,9 +197,10 @@ npm run test:web:admin-real
 
 El primer proyecto de `webServer` (`apps/web/playwright.admin-real.config.ts`)
 ejecuta `prisma migrate deploy` contra esa base, siembra directamente por
-Prisma una única cuenta `ADMIN` fija (`admin.e2e@chambeaya.test`, ver
-`apps/api/scripts/e2e-serve.ts`; el registro público rechaza el rol `ADMIN`,
-así que no puede crearse por HTTP) y arranca la API real en el puerto
+Prisma dos cuentas fijas —una `ADMIN` (`admin.e2e@chambeaya.test`) y una
+`BUSINESS` (`empresa.e2e@chambeaya.test`), ver `apps/api/scripts/e2e-serve.ts`;
+el registro público rechaza ambos roles, así que no pueden crearse por HTTP— y
+arranca la API real en el puerto
 `4400`. El segundo compila el panel con `NEXT_PUBLIC_API_URL` apuntando a esa
 API real (los valores `NEXT_PUBLIC_*` de Next.js quedan fijos en el build, por
 lo que esta suite necesita su **propio** `next build`, distinto del de
@@ -165,8 +208,10 @@ lo que esta suite necesita su **propio** `next build`, distinto del de
 registra el trabajador que va a borrar mediante `POST /api/auth/register`
 real (rol `WORKER`, sí permitido por registro público); no depende de ningún
 dato preexistente de la base y el borrado por la interfaz es, a la vez, la
-limpieza de ese registro. Si la base es un clúster efímero, apagarlo al
-terminar descarta también la cuenta `ADMIN` sembrada.
+limpieza de ese registro. `assignment-resolution.spec.ts`, en cambio, **sí deja
+filas** (turno, trabajador, postulación y pago) en la base `_test`. Si la base
+es un clúster efímero, apagarlo al terminar descarta también las dos cuentas
+sembradas y esas filas.
 
 ### Estado de esta suite
 
@@ -181,5 +226,7 @@ de `docs/PROGRESO.md` para el detalle exacto del bloqueo o del éxito.
 
 Publicar turnos y seleccionar postulantes requieren sus propios escenarios en
 `apps/web/e2e/`. La suite real de arriba cubre un recorrido del panel
-superadmin; el resto del panel (empresa, trabajador) sigue sin esa
-cobertura de extremo a extremo contra PostgreSQL real.
+superadmin y el cierre manual de una asignación `NO_SHOW` desde el panel de la
+empresa; el resto del panel (publicación de turnos, selección de postulantes,
+pagos, y todo el lado trabajador) sigue sin esa cobertura de extremo a extremo
+contra PostgreSQL real.

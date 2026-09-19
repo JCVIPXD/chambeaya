@@ -137,6 +137,7 @@ Avance actual: confirmación, check-in, check-out, cancelaciones y máquina de e
 - Confirmación del trabajador implementada mediante `POST /api/shifts/:id/confirm`.
 - Check-in básico con credencial temporal implementado mediante `POST /api/shifts/:id/check-in`.
 - Check-out implementado mediante `POST /api/shifts/:id/check-out`; exige un check-in previo y finaliza la asignación.
+- Una asignación que nunca hizo check-in a tiempo (`NO_SHOW`) o que nunca hizo check-out (`ABANDONED`) no se cierra sola: la empresa la resuelve desde `Turnos` → `Postulaciones` con "Confirmar que sí trabajó" (registra un pago pendiente que ella paga directo al trabajador) o "Cerrar sin pago", ambas con confirmación (`POST /api/business/shifts/:id/assignments/:assignmentId/resolve`; detalle en `docs/reference/api.md`).
 - Cancelación del trabajador mediante `POST /api/shifts/:id/cancel`, con motivo y registro histórico.
 - Cancelación empresarial mediante `POST /api/business/shifts/:id/cancel`, con liberación de asignaciones y cupos.
 - Permitir cancelaciones con motivo y fecha.

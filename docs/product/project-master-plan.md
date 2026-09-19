@@ -266,13 +266,20 @@ Objetivo: hacer confiable el recorrido desde la selección hasta el cierre.
   `schema.prisma`, el enum `AssignmentStatus` de la base contiene `NO_SHOW` y `ABANDONED`,
   y la suite de integración (`vertical-marketplace-flow` y `shift-capacity-race`) pasa
   2 archivos / 3 pruebas sobre una base `chambeaya_test` separada de la de desarrollo.
+  **Interfaz del cierre manual cubierta** (`CN-20260918-013`): el panel web de la empresa
+  muestra las asignaciones `NO_SHOW` ("No se presentó a tiempo") y `ABANDONED` ("Sin salida
+  registrada") en `Turnos` → `Postulaciones` y ofrece "Confirmar que sí trabajó" (registra el
+  pago pendiente que la empresa paga directo al trabajador; no mueve dinero) y "Cerrar sin
+  pago" (motivo opcional), ambas con confirmación explícita y refresco de turno, postulaciones
+  y pagos sin recargar; probado con API simulada (Playwright) y, para `NO_SHOW`, contra API y
+  PostgreSQL reales. Límite conocido: confirmar el trabajo de un `NO_SHOW` en un turno ya
+  cerrado como `CANCELLED` registra el pago pero **no reabre ni completa el turno**, que sigue
+  `CANCELLED` (BAJO-5 de `CN-20260918-004`; el copy del panel lo advierte). Tampoco hay
+  hoy ningún camino para reabrir un turno cerrado por esa regla.
   Sigue pendiente: expiración y rotación de credenciales (la credencial no caduca y el
   propio trabajador la recibe del API, así que no prueba presencia); una ventana
   propia de check-out (hoy sigue siendo válido en cualquier momento tras el check-in,
-  hasta que el margen de 60 minutos tras `endsAt` marca la asignación `ABANDONED`);
-  **una interfaz para el cierre manual** (`resolve` existe solo como endpoint HTTP: ni
-  el panel web ni Flutter ofrecen un control que lo invoque, así que en la práctica la
-  ruta de cobro de un `NO_SHOW`/`ABANDONED` exige llamar a la API a mano); y el
+  hasta que el margen de 60 minutos tras `endsAt` marca la asignación `ABANDONED`); y el
   **cierre de turnos multi-cupo parcialmente cubiertos** (si una asignación completó y
   otra quedó `NO_SHOW`/`ABANDONED`/`CANCELLED`, el turno se queda en `CHECKED_IN`
   aunque `endsAt` haya pasado, y solo sale de ahí pagando la asignación pendiente;

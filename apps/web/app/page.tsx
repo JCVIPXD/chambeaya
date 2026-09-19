@@ -52,6 +52,7 @@ import {
   authApi,
   businessApi,
   businessSessionKey,
+  type AssignmentResolutionOutcome,
   type BusinessSession,
   type CompanyRecord,
   type ConversationRecord,
@@ -300,6 +301,20 @@ function mapPayment(record: PaymentRecord): Transaction {
   };
 }
 
+// Una asignación `NO_SHOW` o `ABANDONED` no se cierra sola: la API la deja
+// esperando la decisión de la empresa (`POST .../assignments/:id/resolve`).
+type PendingClosureApplication = ShiftApplicationRecord & {
+  assignment: NonNullable<ShiftApplicationRecord["assignment"]> & {
+    status: "NO_SHOW" | "ABANDONED";
+  };
+};
+function isPendingClosure(
+  application: ShiftApplicationRecord,
+): application is PendingClosureApplication {
+  const status = application.assignment?.status;
+  return status === "NO_SHOW" || status === "ABANDONED";
+}
+
 const INVITATION_STATUS_LABEL: Record<TalentInvitationStatus, string> = {
   PENDING: "Pendiente",
   ACCEPTED: "Aceptada",
@@ -335,6 +350,18 @@ export default function HomePage() {
     null,
   );
   const [applicationsShiftId, setApplicationsShiftId] = useState("");
+  // Cierre manual de una asignación `NO_SHOW`/`ABANDONED`. Vive fuera de
+  // `shiftApplications` a propósito: esa lista se reemplaza cada 4 s y una
+  // confirmación abierta no debe perderse en cada refresco.
+  const [resolution, setResolution] = useState<{
+    assignmentId: string;
+    outcome: AssignmentResolutionOutcome;
+  } | null>(null);
+  const [resolutionReason, setResolutionReason] = useState("");
+  const [resolutionBusy, setResolutionBusy] = useState(false);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
+  const selectedShiftIdRef = useRef("");
+  const closureSyncKey = useRef("");
   const [pendingApplications, setPendingApplications] =
     useState<PendingApplicationsSummary>({ count: 0, shiftIds: [] });
   const [editingShift, setEditingShift] = useState<Shift | null>(null);
@@ -447,6 +474,15 @@ export default function HomePage() {
   }, [activeNav, session]);
 
   useEffect(() => {
+    // Cambiar de turno, de vista o de sesión descarta cualquier confirmación de
+    // cierre abierta: pertenece a la lista de postulaciones que ya no se ve.
+    selectedShiftIdRef.current = selectedShiftId;
+    setResolution(null);
+    setResolutionReason("");
+    setResolutionError(null);
+  }, [activeNav, selectedShiftId, session]);
+
+  useEffect(() => {
     if (!session || !selectedShiftId || activeNav !== "Turnos") {
       setShiftApplications([]);
       setApplicationsError(null);
@@ -469,6 +505,35 @@ export default function HomePage() {
           setShiftApplications(applications);
           setApplicationsError(null);
           setApplicationsShiftId(selectedShiftId);
+          // La API detecta `NO_SHOW`/`ABANDONED` al leer las postulaciones y,
+          // en el mismo movimiento, puede cambiar el estado del turno (por
+          // ejemplo cerrarlo como `CANCELLED` si ya venció). La lista de
+          // turnos se cargó antes y no lo sabe: se vuelve a leer el turno una
+          // vez por cada conjunto de asignaciones pendientes de cierre, para
+          // que el aviso de la confirmación refleje el estado real.
+          const pendingIds = applications
+            .filter(isPendingClosure)
+            .map((application) => application.assignment.id)
+            .sort()
+            .join(",");
+          const syncKey = pendingIds ? `${selectedShiftId}:${pendingIds}` : "";
+          if (syncKey && closureSyncKey.current !== syncKey) {
+            closureSyncKey.current = syncKey;
+            // Sin esperar: la lista de postulaciones no debe depender de esta lectura.
+            businessApi.shifts
+              .get(session.token, selectedShiftId)
+              .then((record) => {
+                if (cancelled) return;
+                const mapped = mapShift(record);
+                setShifts((current) =>
+                  current.map((item) => (item.id === mapped.id ? mapped : item)),
+                );
+              })
+              .catch(() => {
+                // Sin la relectura solo se pierde el aviso de turno cancelado.
+                closureSyncKey.current = "";
+              });
+          }
         }
       } catch {
         if (!cancelled) {
@@ -1071,6 +1136,120 @@ export default function HomePage() {
       );
     }
   }
+  function startResolution(
+    assignmentId: string,
+    outcome: AssignmentResolutionOutcome,
+  ) {
+    if (resolutionBusy) return;
+    setResolution({ assignmentId, outcome });
+    setResolutionReason("");
+    setResolutionError(null);
+  }
+  function cancelResolution() {
+    if (resolutionBusy) return;
+    setResolution(null);
+    setResolutionReason("");
+    setResolutionError(null);
+  }
+  // Vuelve a leer lo que el cierre pudo cambiar (asignación y turno, y el pago
+  // que `COMPLETED` deja pendiente) sin recargar el panel completo. Cada lectura
+  // es independiente: si una falla, las demás igual se aplican.
+  async function refreshAfterResolution(token: string, shiftId: string) {
+    const [shiftResult, applicationsResult, paymentsResult] =
+      await Promise.allSettled([
+        businessApi.shifts.get(token, shiftId),
+        businessApi.applications.list(token, shiftId),
+        businessApi.payments.list(token),
+      ]);
+    if (shiftResult.status === "fulfilled") {
+      const mapped = mapShift(shiftResult.value);
+      setShifts((current) =>
+        current.map((item) => (item.id === mapped.id ? mapped : item)),
+      );
+    }
+    if (
+      applicationsResult.status === "fulfilled" &&
+      selectedShiftIdRef.current === shiftId
+    ) {
+      setShiftApplications(applicationsResult.value);
+    }
+    if (paymentsResult.status === "fulfilled") {
+      setPaymentRecords(paymentsResult.value.map(mapPayment));
+    }
+    return [shiftResult, applicationsResult, paymentsResult].every(
+      (result) => result.status === "fulfilled",
+    );
+  }
+  async function submitResolution(workerName: string) {
+    if (!session || !selectedShift || !resolution || resolutionBusy) return;
+    const { assignmentId, outcome } = resolution;
+    const shiftId = selectedShift.id;
+    const reason = outcome === "CANCELLED" ? resolutionReason.trim() : "";
+    if (reason && reason.length < 3) {
+      setResolutionError(
+        "El motivo debe tener al menos 3 caracteres, o déjalo vacío.",
+      );
+      return;
+    }
+    setResolutionBusy(true);
+    setResolutionError(null);
+    try {
+      await businessApi.assignments.resolve(
+        session.token,
+        shiftId,
+        assignmentId,
+        outcome,
+        reason || undefined,
+      );
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : null;
+      if (error instanceof ApiError && error.status === 401) {
+        setResolutionBusy(false);
+        await logout();
+        return;
+      }
+      if (
+        code === "ASSIGNMENT_NOT_RESOLVABLE" ||
+        code === "ASSIGNMENT_NOT_FOUND" ||
+        code === "SHIFT_NOT_FOUND"
+      ) {
+        // La asignación ya no está pendiente de cierre (otra sesión la cerró,
+        // o el turno ya no existe): no tiene sentido reintentar. Se cierra la
+        // confirmación y se actualiza la lista con lo que hay realmente.
+        setResolution(null);
+        setResolutionReason("");
+        showToast(
+          code === "ASSIGNMENT_NOT_RESOLVABLE"
+            ? "Esta asignación ya no está pendiente de cierre; puede que ya se haya cerrado. Actualizamos la lista."
+            : "No encontramos esta asignación en el turno. Actualizamos la lista.",
+        );
+        await refreshAfterResolution(session.token, shiftId);
+      } else {
+        setResolutionError(
+          code === "INVALID_INPUT"
+            ? "El motivo debe tener entre 3 y 500 caracteres."
+            : "No pudimos registrar el cierre. Revisa tu conexión e inténtalo nuevamente.",
+        );
+      }
+      setResolutionBusy(false);
+      return;
+    }
+    setResolution(null);
+    setResolutionReason("");
+    const refreshed = await refreshAfterResolution(session.token, shiftId);
+    setResolutionBusy(false);
+    if (!refreshed) {
+      showToast(
+        "El cierre quedó registrado, pero no pudimos actualizar toda la pantalla. Vuelve a abrir el turno para verlo.",
+      );
+    } else if (outcome === "COMPLETED") {
+      showToast(
+        `Trabajo de ${workerName} confirmado. Quedó un pago pendiente en Pagos; tú lo pagas directamente al trabajador.`,
+      );
+    } else {
+      showToast(`Asignación de ${workerName} cerrada sin pago.`);
+    }
+  }
   function openCrud(kind: Exclude<ModalKind, null>, id: string | null = null) {
     setEditingId(id);
     setModalKind(kind);
@@ -1521,11 +1700,51 @@ export default function HomePage() {
                             {application.worker.email ??
                               application.worker.identifier}
                           </small>
-                          <small
-                            className={`next-action ${application.nextAction.actor.toLowerCase()}`}
-                          >
-                            {application.nextAction.label}
-                          </small>
+                          {isPendingClosure(application) ? (
+                            // `NO_SHOW`/`ABANDONED` esperan una decisión de la
+                            // empresa. El `nextAction` de la API dice "Proceso
+                            // cerrado" en un turno ya cancelado, así que el
+                            // estado de la asignación manda sobre esa etiqueta.
+                            <AssignmentResolutionPanel
+                              workerName={application.worker.name}
+                              status={application.assignment.status}
+                              payAmount={selectedShift.pay}
+                              shiftCancelled={
+                                selectedShift.status === "CANCELLED"
+                              }
+                              pendingOutcome={
+                                resolution?.assignmentId ===
+                                application.assignment.id
+                                  ? resolution.outcome
+                                  : null
+                              }
+                              reason={resolutionReason}
+                              busy={resolutionBusy}
+                              error={
+                                resolution?.assignmentId ===
+                                application.assignment.id
+                                  ? resolutionError
+                                  : null
+                              }
+                              onChoose={(outcome) =>
+                                startResolution(
+                                  application.assignment.id,
+                                  outcome,
+                                )
+                              }
+                              onReasonChange={setResolutionReason}
+                              onConfirm={() =>
+                                void submitResolution(application.worker.name)
+                              }
+                              onBack={cancelResolution}
+                            />
+                          ) : (
+                            <small
+                              className={`next-action ${application.nextAction.actor.toLowerCase()}`}
+                            >
+                              {application.nextAction.label}
+                            </small>
+                          )}
                           {(application.screeningAnswers ?? []).length > 0 && (
                             <dl className="screening-answers">
                               {(application.screeningAnswers ?? []).map(
@@ -2418,7 +2637,7 @@ export default function HomePage() {
                     <div className="empty-state">
                       <WalletCards size={24} />
                       <strong>No hay movimientos de pago</strong>
-                      <span>Los pagos pendientes aparecerán aquí al registrar la salida de un turno.</span>
+                      <span>Los pagos pendientes aparecerán aquí cuando un trabajador registre su salida o tú confirmes que trabajó un turno sin cierre.</span>
                     </div>
                   )}
                 </div>
@@ -3293,6 +3512,147 @@ function Overview({
           </div>
         </article>
       </section>
+    </div>
+  );
+}
+
+function AssignmentResolutionPanel({
+  workerName,
+  status,
+  payAmount,
+  shiftCancelled,
+  pendingOutcome,
+  reason,
+  busy,
+  error,
+  onChoose,
+  onReasonChange,
+  onConfirm,
+  onBack,
+}: {
+  workerName: string;
+  status: "NO_SHOW" | "ABANDONED";
+  payAmount: number;
+  shiftCancelled: boolean;
+  pendingOutcome: AssignmentResolutionOutcome | null;
+  reason: string;
+  busy: boolean;
+  error: string | null;
+  onChoose: (outcome: AssignmentResolutionOutcome) => void;
+  onReasonChange: (value: string) => void;
+  onConfirm: () => void;
+  onBack: () => void;
+}) {
+  const amount = `S/ ${payAmount.toLocaleString("es-PE")}`;
+  return (
+    <div
+      className="assignment-resolution"
+      role="group"
+      aria-label={`Cierre pendiente de ${workerName}`}
+    >
+      <p className="assignment-resolution-title">
+        <AlertTriangle size={14} />
+        {status === "NO_SHOW"
+          ? "No se presentó a tiempo"
+          : "Sin salida registrada"}
+      </p>
+      <p className="assignment-resolution-text">
+        {status === "NO_SHOW"
+          ? `${workerName} aceptó el turno pero no registró su llegada dentro de la ventana permitida.`
+          : `${workerName} registró su llegada pero nunca registró su salida.`}{" "}
+        Esta asignación espera tu decisión.
+      </p>
+      {pendingOutcome === null ? (
+        <div className="assignment-resolution-actions">
+          <button
+            className="primary-button"
+            type="button"
+            disabled={busy}
+            aria-label={`Confirmar que ${workerName} sí trabajó`}
+            onClick={() => onChoose("COMPLETED")}
+          >
+            <Check size={15} /> Confirmar que sí trabajó
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={busy}
+            aria-label={`Cerrar sin pago la asignación de ${workerName}`}
+            onClick={() => onChoose("CANCELLED")}
+          >
+            <X size={15} /> Cerrar sin pago
+          </button>
+        </div>
+      ) : (
+        <div className="assignment-resolution-confirm">
+          <p className="assignment-resolution-text">
+            {pendingOutcome === "COMPLETED" ? (
+              <>
+                <strong>
+                  ¿Confirmas que {workerName} sí trabajó este turno?
+                </strong>{" "}
+                Quedará registrado un pago pendiente de {amount} en Pagos.
+                Solo es un registro de lo que debes: tú pagas directamente al
+                trabajador y Chambeaya no cobra, guarda ni transfiere dinero.
+                {shiftCancelled &&
+                  " Aunque este turno figure como cancelado, el pago pendiente se registra igualmente."}{" "}
+                Esta acción no se puede deshacer.
+              </>
+            ) : (
+              <>
+                <strong>¿Cerrar la asignación de {workerName} sin pago?</strong>{" "}
+                No se registrará ninguna obligación de pago. Esta acción no se
+                puede deshacer.
+              </>
+            )}
+          </p>
+          {pendingOutcome === "CANCELLED" && (
+            <label className="assignment-resolution-reason">
+              <span>Motivo (opcional)</span>
+              <textarea
+                value={reason}
+                maxLength={500}
+                rows={2}
+                disabled={busy}
+                placeholder="Ej.: nunca llegó y no avisó"
+                onChange={(event) => onReasonChange(event.target.value)}
+              />
+            </label>
+          )}
+          {error && (
+            <p className="assignment-resolution-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="assignment-resolution-actions">
+            <button
+              className={
+                pendingOutcome === "COMPLETED"
+                  ? "primary-button"
+                  : "secondary-button"
+              }
+              type="button"
+              disabled={busy}
+              onClick={onConfirm}
+            >
+              {busy
+                ? "Guardando…"
+                : pendingOutcome === "COMPLETED"
+                  ? "Sí, confirmar trabajo"
+                  : "Sí, cerrar sin pago"}
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={busy}
+              autoFocus
+              onClick={onBack}
+            >
+              Volver
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

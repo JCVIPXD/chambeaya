@@ -64,6 +64,33 @@ export type ShiftRecord = {
   status: 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
 };
 
+// Estado persistido de una asignación. `NO_SHOW` (confirmó y nunca hizo
+// check-in dentro de la ventana) y `ABANDONED` (hizo check-in y nunca check-out
+// tras el margen) los calcula la API "al leer" y quedan pendientes de una
+// decisión humana de la empresa (`businessApi.assignments.resolve`).
+export type AssignmentStatus = 'ASSIGNED' | 'CANCELLED' | 'COMPLETED' | 'NO_SHOW' | 'ABANDONED';
+export type AssignmentResolutionOutcome = 'COMPLETED' | 'CANCELLED';
+
+export type AssignmentRecord = {
+  id: string;
+  status: AssignmentStatus;
+  checkInCredential: string | null;
+  workerConfirmedAt: string | null;
+  checkedInAt: string | null;
+  checkedOutAt: string | null;
+};
+
+// Respuesta de `POST /business/shifts/:id/assignments/:assignmentId/resolve`:
+// la fila `ShiftAssignment` ya actualizada (no incluye pago ni turno; para
+// verlos hay que volver a consultarlos).
+export type ResolvedAssignmentRecord = AssignmentRecord & {
+  shiftId: string;
+  workerId: string;
+  applicationId: string;
+  assignedAt: string;
+  completedAt: string | null;
+};
+
 export type ShiftApplicationRecord = {
   id: string;
   shiftId: string;
@@ -73,14 +100,7 @@ export type ShiftApplicationRecord = {
   updatedAt: string;
   screeningAnswers: { question: string; answer: string }[] | null;
   worker: { id: string; name: string; email: string | null; identifier: string };
-  assignment?: {
-    id: string;
-    status: 'ASSIGNED' | 'CANCELLED' | 'COMPLETED';
-    checkInCredential: string | null;
-    workerConfirmedAt: string | null;
-    checkedInAt: string | null;
-    checkedOutAt: string | null;
-  } | null;
+  assignment?: AssignmentRecord | null;
   nextAction: {
     actor: 'BUSINESS' | 'WORKER' | 'NONE';
     code: 'REVIEW_APPLICATION' | 'CONFIRM_ASSIGNMENT' | 'CHECK_IN' | 'CHECK_OUT' | 'NONE';
@@ -153,7 +173,7 @@ export type PaymentRecord = {
   processedAt: string | null;
   createdAt: string;
   shift?: { id: string; title: string; startsAt: string; endsAt: string } | null;
-  assignment?: { id: string; status: 'ASSIGNED' | 'CANCELLED' | 'COMPLETED'; worker: { id: string; name: string; email: string | null } } | null;
+  assignment?: { id: string; status: AssignmentStatus; worker: { id: string; name: string; email: string | null } } | null;
   workerConfirmedAt: string | null;
 };
 
@@ -213,6 +233,12 @@ export const businessApi = {
     list: (token: string, shiftId: string) => request<ShiftApplicationRecord[]>(`/business/shifts/${shiftId}/applications`, { token }),
     pending: (token: string) => request<PendingApplicationsSummary>('/business/applications/pending', { token }),
     decide: (token: string, shiftId: string, applicationId: string, decision: 'ACCEPTED' | 'REJECTED', reason?: string) => request<ShiftApplicationRecord>(`/business/shifts/${shiftId}/applications/${applicationId}`, { method: 'PATCH', token, body: JSON.stringify({ decision, ...(reason ? { reason } : {}) }) }),
+  },
+  assignments: {
+    // `reason` es opcional pero, si se envía, la API exige al menos 3
+    // caracteres (`400 INVALID_INPUT`). Solo acepta asignaciones `NO_SHOW` o
+    // `ABANDONED` (`400 ASSIGNMENT_NOT_RESOLVABLE` en cualquier otro caso).
+    resolve: (token: string, shiftId: string, assignmentId: string, outcome: AssignmentResolutionOutcome, reason?: string) => request<ResolvedAssignmentRecord>(`/business/shifts/${shiftId}/assignments/${assignmentId}/resolve`, { method: 'POST', token, body: JSON.stringify({ outcome, ...(reason ? { reason } : {}) }) }),
   },
   workers: resource<WorkerRecord>('/business/workers'),
   talent: {

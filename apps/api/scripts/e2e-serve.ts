@@ -46,6 +46,42 @@ export const e2eAdminAccount = {
   identifier: "90000099",
 } as const;
 
+/**
+ * Cuenta BUSINESS sembrada para la suite E2E real del cierre manual de
+ * asignaciones (`apps/web/e2e-real/assignment-resolution.spec.ts`). El
+ * registro público rechaza el rol BUSINESS (`BUSINESS_REGISTRATION_DISABLED`),
+ * así que, igual que el ADMIN, solo puede crearse directamente por Prisma.
+ * `apps/web/e2e-real/fixtures/business-real.ts` usa exactamente estos valores.
+ */
+export const e2eBusinessAccount = {
+  email: "empresa.e2e@chambeaya.test",
+  password: "EmpresaE2E-2026!",
+  name: "Empresa E2E Playwright",
+  identifier: "20999999998",
+} as const;
+
+async function seedBusiness(prisma: PrismaClient) {
+  const salt = randomBytes(16).toString("hex");
+  await prisma.user.upsert({
+    where: { email: e2eBusinessAccount.email },
+    update: {
+      name: e2eBusinessAccount.name,
+      identifier: e2eBusinessAccount.identifier,
+      role: "BUSINESS",
+      salt,
+      passwordHash: hashPassword(e2eBusinessAccount.password, salt),
+    },
+    create: {
+      email: e2eBusinessAccount.email,
+      name: e2eBusinessAccount.name,
+      identifier: e2eBusinessAccount.identifier,
+      role: "BUSINESS",
+      salt,
+      passwordHash: hashPassword(e2eBusinessAccount.password, salt),
+    },
+  });
+}
+
 async function seedAdmin(prisma: PrismaClient) {
   const salt = randomBytes(16).toString("hex");
   await prisma.user.upsert({
@@ -81,6 +117,7 @@ async function main() {
   const prisma = new PrismaClient();
   await prisma.$connect();
   await seedAdmin(prisma);
+  await seedBusiness(prisma);
   await prisma.$disconnect();
 
   const port = Number(process.env.API_PORT ?? 4100);
