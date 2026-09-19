@@ -596,6 +596,82 @@ Incluye ledger conciliado, proveedor en sandbox, revisión legal, staging,
 observabilidad, recuperación y builds móviles de distribución. Los cobros de
 producción solo se habilitan tras validar el recorrido completo y las obligaciones.
 
+## Ciclo de simplificación radical (rama `codex/simplificacion-radical`, 2026-09-18)
+
+Se abrió tras guardar la versión previa en `codex/modelo-negocio-simplificado`
+(commit `c47fa87`, no se modificó después). Objetivo: dejar el flujo principal y el
+modelo de negocio sin brechas graves, sin que parezca que Chambeaya custodia dinero y sin
+esperar la decisión pendiente sobre el modelo económico real. El plan está en
+`.claude/plans/2026-09-18-cierre-brechas-flujo-simple.md`; cada cierre y su auditoría
+están en `docs/PROGRESO.md`.
+
+Cambios cerrados y auditados (todos comiteados en la rama):
+
+- **Check-in y check-out** (`CN-20260918-001` a `004`): credencial aleatoria por asignación,
+  ventana de tiempo, estados `NO_SHOW` y `ABANDONED` resueltos al leer, cierre manual
+  controlado (`POST /api/business/shifts/:id/assignments/:assignmentId/resolve`) y rastro
+  en `ShiftEvent`. Un turno sin asignaciones viables cierra como `CANCELLED`.
+- **Pagos sin sensación de custodia** (`005`, `006`): `GET /business/subscription` ya no
+  crea filas "trial"; el copy y la documentación dejan claro que el wallet del trabajador
+  es un registro de confirmación, no saldo custodiado. No se construyó pasarela real.
+- **Complejidad accidental** (`007`, `008`): se eliminó `worker_pages.dart` (código no
+  enrutado) y se corrigió `setState(Future)` en los cuatro sitios vivos. Se evaluó y
+  descartó mover `operations` (lo importan `business` y `marketplace`).
+- **Pendientes menores** (`009` a `012`): aviso visible cuando falla el sondeo de mensajes,
+  copy honesto para una empresa sin plan activado y eliminación de `AppCapabilities`.
+- **Interfaz web para cerrar asignaciones** (`013`, `014`): en Turnos > Postulaciones la
+  empresa confirma que sí trabajó (queda un pago pendiente que paga directo) o cierra sin
+  pago, con confirmación irreversible.
+
+Validación al cierre: API 156/156, integración PostgreSQL 3/3 y migración aplicada desde
+cero (base `chambeaya_test` del contenedor `cumplenow-db-1`; la base de desarrollo no se
+tocó), Flutter 89/89, Playwright rápido 56/56 y caso real de asignaciones 3/3.
+
+Pendientes conocidos, por prioridad sugerida:
+
+1. **Turno `CANCELLED` con asignación `COMPLETED` y pago pendiente** (alcance de API, el
+   siguiente recomendado por `CN-20260918-014`). Si el turno ya se cerró como `CANCELLED`
+   y luego la empresa confirma que el trabajador sí trabajó, el turno no se reabre. Al
+   corregirlo hay que ajustar el aviso de la pantalla, sus dos pruebas y
+   `docs/reference/api.md`.
+2. **Sondeo obsoleto en el panel** (`CN-20260918-014`, medio): una respuesta anterior al
+   `POST` puede reponer por segundos los botones de una fila ya resuelta. La API impide
+   duplicar el pago. Vienen con él un parpadeo de botones durante el refresco, la frase de
+   Pagos "turnos completados" y nombres accesibles asimétricos en la confirmación.
+3. **Turnos multi-cupo parcialmente cubiertos** (`CN-20260918-004`): con una asignación
+   completada y otra abandonada o no-show, el turno queda en `CHECKED_IN` y solo sale
+   pagando a la pendiente. También `cancelShift` deja una asignación `NO_SHOW` resoluble
+   sobre un turno cancelado.
+4. **La credencial de check-in no prueba presencia** (`CN-20260918-002`): no expira, no
+   rota, no limita intentos y no hay geolocalización ni cámara.
+5. **Copy de piloto residual** (`CN-20260918-012`): con un plan que no es el piloto
+   (`PRO`, `CUSTOM` o piloto vencido o pausado) `MembershipView` sigue hablando del
+   piloto, y la vista Pagos dice "queda fuera del piloto" incluso sin plan. Solo es
+   alcanzable con una fila creada a mano: no existe endpoint de activación de plan.
+6. **Filas `CompanySubscription` `TRIAL` fantasma** creadas antes de `CN-20260918-005`:
+   no hay criterio seguro para distinguirlas de una activación manual (ver la consulta de
+   solo lectura en `docs/reference/api.md`). Limpiarlas exige una columna de origen.
+7. **Nombres que evocan custodia**: `WalletMovement`, `/api/workers/wallet` y los estados
+   `RELEASED`/`REVERSED` se conservaron a propósito; renombrarlos depende de la decisión
+   de modelo económico pendiente.
+8. **Higiene**: `apps/api/scripts/e2e-serve.ts` viaja en la imagen de producción (no es
+   explotable: exige una base terminada en `_test`); el botón "Actualizar mensajes" no
+   reacciona si ya hay un sondeo en curso; el reintento de descubrimiento se rotula
+   "Limpiar filtros"; `CONTEXTO_TESIS.md` (documento externo) aún menciona
+   `worker_pages.dart`.
+9. **Fuera de este ciclo**: la duplicación `CompanyWorkerContact` frente a
+   `WorkerTalentProfile` y el rediseño de `main.dart` (inyección de dependencias, tema y
+   sesión).
+
+Sin verificar de extremo a extremo: `ABANDONED` contra API y base reales, dos sesiones
+simultáneas, multi-cupo contra base real, `demo:seed`/`demo:smoke` con estos cambios, la
+app Flutter contra una API real y en dispositivo, y la pantalla web en un móvil físico.
+
+Antes de fusionar la rama o desplegar: correr `prisma migrate deploy` sobre la base real
+del entorno (la migración `20260918120000_assignment_no_show_abandoned` es aditiva) y
+repetir el recorrido de `docs/guides/client-demo.md`. Ningún hallazgo crítico o alto
+queda abierto en las auditorías de este ciclo.
+
 ## Cobertura mínima de pruebas pendiente
 
 - Integración PostgreSQL para perfil, privacidad, búsqueda, cursores, invitaciones y
