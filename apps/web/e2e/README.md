@@ -182,8 +182,11 @@ turno `COMPLETED` (ya no `CANCELLED`), con un `ShiftEvent` `UPDATED` de la trans
 cerrar sin pago deja el turno `CANCELLED`.** (Este caso real es de un solo cupo, así que
 la confirmación deja todos sus cupos trabajados.) El panel avisa del estado del turno con
 el copy que explica todos los casos sin prometer el resultado. (Estas afirmaciones se
-ajustaron en `CN-20260920-003` y `CN-20260920-005` sin poder ejecutar la suite real: ver
-esos registros y `CN-20260920-006`.)
+ajustaron en `CN-20260920-003` y `CN-20260920-005` y quedaron **verificadas contra el
+stack real en `CN-20260920-007`**: `npm run test:web:admin-real` → `3 passed (45.7s)`
+sobre la base desechable `chambeaya_test`. Sigue sin cubrirse aquí el turno multi-cupo,
+`ABANDONED`, el turno que la empresa canceló con `cancelShift` y luego resuelve, y dos
+sesiones simultáneas.)
 Solo se cubre `NO_SHOW`: llegar a `ABANDONED` exige un check-in real y esperar 60 minutos
 tras `endsAt`, y ningún endpoint permite crear un turno ya vencido ni adelantar el reloj.
 Cada caso deja sus filas en la base `_test` (títulos y trabajadores con sufijo aleatorio,

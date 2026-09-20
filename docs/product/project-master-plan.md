@@ -652,13 +652,15 @@ Cambios cerrados y auditados (comiteados en la rama, salvo `CN-20260920-001`,
 
 Validación al cierre: API 173/173 y Playwright rápido 68/68 (medidos en
 `CN-20260920-006`), Flutter 89/89 (medido en `CN-20260918-012`; ningún cierre posterior
-toca `apps/mobile_flutter`). La integración PostgreSQL
-3/3 con la migración aplicada desde cero (base `chambeaya_test` del contenedor
-`cumplenow-db-1`; la base de desarrollo no se tocó) y el caso real de asignaciones 3/3 se
-midieron en `CN-20260918-014`: `CN-20260920-002`, `004` y `006` no pudieron repetirlos por
-falta de Docker, y el caso real cambió de aserciones en `CN-20260920-003` y
-`CN-20260920-005`. **`npm run test:web:admin-real` y `npm run test:integration` deben
-ejecutarse antes de fusionar la rama.**
+toca `apps/mobile_flutter`). La integración PostgreSQL 3/3 y la suite real del panel 3/3
+**se ejecutaron en `CN-20260920-007`** con las aserciones vigentes, sobre la base
+desechable `chambeaya_test` del contenedor `cumplenow-db-1` (`prisma migrate deploy`:
+24 migraciones, ninguna pendiente; la base de desarrollo no se tocó). Con eso queda
+cerrado el riesgo que `CN-20260920-003`, `005` y `006` declaraban como
+`NO_EJECUTADA` por falta de Docker: la reapertura del turno cerrado por vencimiento está
+verificada de extremo a extremo contra PostgreSQL real. Lo que esa corrida cubre es el
+turno de **un solo cupo**; el resto de escenarios sigue en "Sin verificar de extremo a
+extremo", más abajo.
 
 Pendientes conocidos, por prioridad sugerida:
 
@@ -710,8 +712,11 @@ Pendientes conocidos, por prioridad sugerida:
    sesión).
 
 Sin verificar de extremo a extremo: `ABANDONED` contra API y base reales, dos sesiones
-simultáneas, multi-cupo contra base real, `demo:seed`/`demo:smoke` con estos cambios, la
-app Flutter contra una API real y en dispositivo, y la pantalla web en un móvil físico.
+simultáneas, multi-cupo contra base real, la cancelación de la empresa con `cancelShift`
+seguida de `resolve` contra base real (la corrida de `CN-20260920-007` solo ejerce el
+camino en que **no** existe el `ShiftCancellation` con `actorRole: BUSINESS`),
+`demo:seed`/`demo:smoke` con estos cambios, la app Flutter contra una API real y en
+dispositivo, y la pantalla web en un móvil físico.
 
 Antes de fusionar la rama o desplegar: correr `prisma migrate deploy` sobre la base real
 del entorno (la migración `20260918120000_assignment_no_show_abandoned` es aditiva) y
