@@ -39,6 +39,16 @@ function confirmAction(worker: string) {
 function closeAction(worker: string) {
   return `Cerrar sin pago la asignación de ${worker}`;
 }
+// Botones de la confirmación: también nombran al trabajador (BAJO-3 de CN-20260918-014).
+function yesConfirmAction(worker: string) {
+  return `Sí, confirmar trabajo de ${worker}`;
+}
+function yesCloseAction(worker: string) {
+  return `Sí, cerrar sin pago la asignación de ${worker}`;
+}
+function backAction(worker: string) {
+  return `Volver sin cerrar la asignación de ${worker}`;
+}
 
 function callsAfterLastPost(server: ShiftAssignmentsServer) {
   const post = server.log.map((entry) => entry.startsWith('POST ')).lastIndexOf(true);
@@ -69,12 +79,12 @@ test.describe('asignación NO_SHOW', () => {
     expect(server.resolveCalls).toEqual([]);
 
     // "Volver" tampoco ejecuta nada y devuelve las dos acciones.
-    await ana.getByRole('button', { name: 'Volver', exact: true }).click();
+    await ana.getByRole('button', { name: backAction('Ana Pérez'), exact: true }).click();
     await expect(ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true })).toBeVisible();
     expect(server.resolveCalls).toEqual([]);
 
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
-    await ana.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
     await expect(page.locator('.toast')).toContainText('tú lo pagas directamente al trabajador');
@@ -114,7 +124,7 @@ test.describe('asignación NO_SHOW', () => {
     expect(server.resolveCalls).toEqual([]);
 
     await ana.getByLabel('Motivo (opcional)').fill('Nunca llegó y no avisó');
-    await ana.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click();
+    await ana.getByRole('button', { name: yesCloseAction('Ana Pérez'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('Asignación de Ana Pérez cerrada sin pago');
     expect(server.resolveCalls).toEqual([
@@ -134,7 +144,7 @@ test.describe('asignación NO_SHOW', () => {
     const ana = row(page, 'Ana Pérez');
 
     await ana.getByRole('button', { name: closeAction('Ana Pérez'), exact: true }).click();
-    await ana.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click();
+    await ana.getByRole('button', { name: yesCloseAction('Ana Pérez'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('cerrada sin pago');
     expect(server.resolveCalls).toHaveLength(1);
@@ -151,13 +161,13 @@ test.describe('asignación NO_SHOW', () => {
 
     await ana.getByRole('button', { name: closeAction('Ana Pérez'), exact: true }).click();
     await ana.getByLabel('Motivo (opcional)').fill('no');
-    await ana.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click();
+    await ana.getByRole('button', { name: yesCloseAction('Ana Pérez'), exact: true }).click();
 
     await expect(ana.getByRole('alert')).toContainText('al menos 3 caracteres');
     expect(server.resolveCalls).toEqual([]);
     // Sigue abierta y corregible.
     await ana.getByLabel('Motivo (opcional)').fill('No se presentó');
-    await ana.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click();
+    await ana.getByRole('button', { name: yesCloseAction('Ana Pérez'), exact: true }).click();
     await expect(page.locator('.toast')).toContainText('cerrada sin pago');
     expect(server.resolveCalls).toHaveLength(1);
   });
@@ -177,7 +187,7 @@ test.describe('asignación ABANDONED', () => {
 
     await luis.getByRole('button', { name: confirmAction('Luis Rojas'), exact: true }).click();
     await expect(luis).toContainText(CONFIRM_NO_CUSTODY);
-    await luis.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true }).click();
+    await luis.getByRole('button', { name: yesConfirmAction('Luis Rojas'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('Trabajo de Luis Rojas confirmado');
     expect(server.resolveCalls).toEqual([
@@ -196,17 +206,36 @@ test.describe('asignación ABANDONED', () => {
     const luis = row(page, 'Luis Rojas');
 
     await luis.getByRole('button', { name: closeAction('Luis Rojas'), exact: true }).click();
-    await luis.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click();
+    await luis.getByRole('button', { name: yesCloseAction('Luis Rojas'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('Asignación de Luis Rojas cerrada sin pago');
     expect(server.resolveCalls[0].body.outcome).toBe('CANCELLED');
     expect(server.payments).toEqual([]);
+    // Cerrar sin pago no reabre nada: el turno cancelado sigue igual.
+    expect(server.shift.status).toBe('CANCELLED');
     await expect(luis.getByText('Sin salida registrada')).toHaveCount(0);
   });
 });
 
+// El turno vencido sin asignaciones viables lo cierra la API como `CANCELLED`
+// (ver docs/reference/api.md). Ese cierre automático se reabre al confirmar
+// que sí se trabajó, pero solo si todos sus cupos quedan confirmados como
+// trabajados (con un cupo sin cerrar seguiría inalcanzable en `CHECKED_IN`,
+// MEDIO-2 de CN-20260920-004); un turno que la propia empresa canceló no. El
+// panel no puede distinguir estos casos, así que el aviso no promete el
+// resultado y explica todos.
+const CANCELLED_NOTICE = 'Este turno figura como cancelado';
+const CANCELLED_NOTICE_ALL_CASES = [
+  'Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado solo cuando todos sus cupos queden confirmados como trabajados',
+  'si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado',
+  'En todos los casos el pago pendiente se registra',
+];
+// Textos anteriores: prometían que el turno seguiría cancelado o que "se
+// actualizará al confirmar", algo que en multi-cupo no siempre ocurre.
+const OLD_NOTICES = ['Aunque este turno figure como cancelado', 'se actualizará al confirmar'];
+
 test.describe('turno ya cerrado como cancelado', () => {
-  test('una asignación NO_SHOW sigue pudiendo cobrarse y el copy no promete más que el pago pendiente', async ({ page, isMobile }) => {
+  test('una asignación NO_SHOW sigue pudiendo cobrarse, el aviso explica los dos casos y el turno cerrado por vencimiento deja de figurar cancelado', async ({ page, isMobile }) => {
     // La API cierra como `CANCELLED` el turno vencido sin asignaciones viables
     // (ver docs/reference/api.md). Su `nextAction` dice "Proceso cerrado", pero
     // `resolve` no depende del estado del turno.
@@ -220,11 +249,17 @@ test.describe('turno ya cerrado como cancelado', () => {
     await expect(ana.getByText('Proceso cerrado')).toHaveCount(0);
 
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
-    await expect(ana).toContainText('Aunque este turno figure como cancelado, el pago pendiente se registra igualmente');
-    await ana.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true }).click();
+    await expect(ana).toContainText(CANCELLED_NOTICE);
+    for (const phrase of CANCELLED_NOTICE_ALL_CASES) await expect(ana).toContainText(phrase);
+    // Los textos anteriores prometían un resultado que la API no siempre da.
+    for (const old of OLD_NOTICES) await expect(ana).not.toContainText(old);
+    // El aviso no debe insinuar que Chambeaya mueve dinero.
+    await expect(ana).toContainText(CONFIRM_NO_CUSTODY);
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
     expect(server.payments).toHaveLength(1);
+    expect(server.shift.status).toBe('COMPLETED');
   });
 
   test('el aviso usa el estado real del turno aunque el listado cargado antes lo mostrara sin cancelar', async ({ page, isMobile }) => {
@@ -240,7 +275,9 @@ test.describe('turno ya cerrado como cancelado', () => {
     const ana = row(page, 'Ana Pérez');
 
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
-    await expect(ana).toContainText('Aunque este turno figure como cancelado, el pago pendiente se registra igualmente');
+    await expect(ana).toContainText(CANCELLED_NOTICE);
+    await expect(ana).toContainText('si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado');
+    for (const old of OLD_NOTICES) await expect(ana).not.toContainText(old);
     expect(server.log).toContain('GET /api/business/shifts/shift-resolution-1');
   });
 
@@ -254,7 +291,69 @@ test.describe('turno ya cerrado como cancelado', () => {
 
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
     await expect(ana).toContainText(CONFIRM_NO_CUSTODY);
-    await expect(ana).not.toContainText('figure como cancelado');
+    await expect(ana).not.toContainText(CANCELLED_NOTICE);
+    for (const old of OLD_NOTICES) await expect(ana).not.toContainText(old);
+  });
+
+  test('en un turno multi-cupo cerrado por vencimiento, el turno sigue cancelado mientras quede un cupo sin confirmar y pasa a completado al confirmar el último', async ({ page, isMobile }) => {
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift({ status: 'CANCELLED', requiredWorkers: 2 }),
+      applications: [
+        buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' }),
+        buildApplication({ id: 'app-luis', workerName: 'Luis Rojas', assignmentStatus: 'NO_SHOW' }),
+      ],
+    });
+    await openShifts(page, isMobile);
+    const ana = row(page, 'Ana Pérez');
+    const luis = row(page, 'Luis Rojas');
+
+    // Mientras el turno figura cancelado, ambas confirmaciones lo avisan.
+    await luis.getByRole('button', { name: confirmAction('Luis Rojas'), exact: true }).click();
+    await expect(luis).toContainText(CANCELLED_NOTICE);
+    await luis.getByRole('button', { name: backAction('Luis Rojas'), exact: true }).click();
+
+    await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
+    await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
+
+    // Queda un cupo sin cerrar: el turno NO se reabre (en `CHECKED_IN` quedaría
+    // inalcanzable), pero el pago de Ana sí se registró y el aviso sigue
+    // siendo veraz para la fila que queda.
+    expect(server.shift.status).toBe('CANCELLED');
+    expect(server.payments).toHaveLength(1);
+    await luis.getByRole('button', { name: confirmAction('Luis Rojas'), exact: true }).click();
+    await expect(luis.getByText('¿Confirmas que Luis Rojas sí trabajó este turno?')).toBeVisible();
+    await expect(luis).toContainText(CANCELLED_NOTICE);
+    await expect(luis).toContainText('si queda algún cupo sin confirmar, seguirá cancelado');
+
+    // Con el último cupo confirmado, todos los cupos quedan trabajados y el turno se completa.
+    await luis.getByRole('button', { name: yesConfirmAction('Luis Rojas'), exact: true }).click();
+    await expect(page.locator('.toast')).toContainText('Trabajo de Luis Rojas confirmado');
+    expect(server.shift.status).toBe('COMPLETED');
+    expect(server.payments).toHaveLength(2);
+  });
+
+  test('un turno que la empresa canceló sigue cancelado tras confirmar: el pago se registra y el aviso sigue vigente', async ({ page, isMobile }) => {
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift({ status: 'CANCELLED', requiredWorkers: 2 }),
+      cancelledByCompany: true,
+      applications: [
+        buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' }),
+        buildApplication({ id: 'app-luis', workerName: 'Luis Rojas', assignmentStatus: 'NO_SHOW' }),
+      ],
+    });
+    await openShifts(page, isMobile);
+    const ana = row(page, 'Ana Pérez');
+    const luis = row(page, 'Luis Rojas');
+
+    await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
+    await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
+
+    expect(server.payments).toHaveLength(1);
+    expect(server.shift.status).toBe('CANCELLED');
+    await luis.getByRole('button', { name: confirmAction('Luis Rojas'), exact: true }).click();
+    await expect(luis).toContainText(CANCELLED_NOTICE);
   });
 });
 
@@ -269,16 +368,16 @@ test.describe('errores del servidor', () => {
     const ana = row(page, 'Ana Pérez');
 
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
-    await ana.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
 
     await expect(ana.getByRole('alert')).toContainText('No pudimos registrar el cierre');
     await expect(page.getByText('INTERNAL_ERROR')).toHaveCount(0);
     // Nada cambió: la asignación sigue pendiente y la confirmación abierta.
     await expect(ana.getByText('No se presentó a tiempo', { exact: true })).toBeVisible();
-    await expect(ana.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true })).toBeEnabled();
+    await expect(ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true })).toBeEnabled();
     expect(server.payments).toEqual([]);
 
-    await ana.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
     await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
     expect(server.resolveCalls).toHaveLength(2);
     expect(server.payments).toHaveLength(1);
@@ -299,7 +398,7 @@ test.describe('errores del servidor', () => {
     server.applications[0].nextAction = { actor: 'NONE', code: 'NONE', label: 'Proceso cerrado' };
 
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
-    await ana.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('ya no está pendiente de cierre');
     await expect(page.getByText('ASSIGNMENT_NOT_RESOLVABLE')).toHaveCount(0);
@@ -319,7 +418,7 @@ test.describe('errores del servidor', () => {
     const ana = row(page, 'Ana Pérez');
 
     await ana.getByRole('button', { name: closeAction('Ana Pérez'), exact: true }).click();
-    await ana.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click();
+    await ana.getByRole('button', { name: yesCloseAction('Ana Pérez'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('No encontramos esta asignación');
     await expect(page.getByText('ASSIGNMENT_NOT_FOUND')).toHaveCount(0);
@@ -366,7 +465,7 @@ test.describe('asignaciones que no esperan cierre', () => {
     await expect(row(page, 'Eva Ruiz').getByRole('button', { name: confirmAction('Eva Ruiz'), exact: true })).toBeVisible();
     await expect(row(page, 'Eva Ruiz').getByText(/¿Cerrar la asignación/)).toHaveCount(0);
 
-    await row(page, 'Luis Rojas').getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click();
+    await row(page, 'Luis Rojas').getByRole('button', { name: yesCloseAction('Luis Rojas'), exact: true }).click();
     await expect(page.locator('.toast')).toContainText('Asignación de Luis Rojas cerrada sin pago');
 
     expect(server.resolveCalls.map((call) => call.assignmentId)).toEqual(['assignment-app-luis']);
@@ -374,5 +473,137 @@ test.describe('asignaciones que no esperan cierre', () => {
     // Eva sigue pendiente y Ana no cambió.
     await expect(row(page, 'Eva Ruiz').getByText('Sin salida registrada', { exact: true })).toBeVisible();
     await expect(row(page, 'Ana Pérez').getByText('Registra tu llegada en la sede')).toBeVisible();
+  });
+});
+
+test.describe('nombres accesibles de la confirmación', () => {
+  test('los botones de la confirmación nombran al trabajador y "Volver" recibe el foco, no la acción terminal', async ({ page, isMobile }) => {
+    await installShiftAssignmentsApi(page, {
+      shift: buildShift({ requiredWorkers: 3, confirmedWorkers: 1 }),
+      applications: [
+        buildApplication({ id: 'app-luis', workerName: 'Luis Rojas', assignmentStatus: 'NO_SHOW' }),
+        buildApplication({ id: 'app-eva', workerName: 'Eva Ruiz', assignmentStatus: 'ABANDONED' }),
+      ],
+    });
+    await openShifts(page, isMobile);
+    const luis = row(page, 'Luis Rojas');
+
+    await luis.getByRole('button', { name: confirmAction('Luis Rojas'), exact: true }).click();
+    await expect(luis.getByRole('button', { name: yesConfirmAction('Luis Rojas'), exact: true })).toBeVisible();
+    await expect(luis.getByRole('button', { name: backAction('Luis Rojas'), exact: true })).toBeVisible();
+    await expect(luis.getByRole('button', { name: backAction('Luis Rojas'), exact: true })).toBeFocused();
+    await expect(luis.getByRole('button', { name: yesConfirmAction('Luis Rojas'), exact: true })).not.toBeFocused();
+    // Ya no hay botones con el nombre genérico que valga para cualquier fila.
+    await expect(page.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Volver', exact: true })).toHaveCount(0);
+
+    await luis.getByRole('button', { name: backAction('Luis Rojas'), exact: true }).click();
+    await luis.getByRole('button', { name: closeAction('Luis Rojas'), exact: true }).click();
+    await expect(luis.getByRole('button', { name: yesCloseAction('Luis Rojas'), exact: true })).toBeVisible();
+    await expect(luis.getByRole('button', { name: backAction('Luis Rojas'), exact: true })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true })).toHaveCount(0);
+
+    // Con otra fila abierta, el nombre distingue a cada trabajador.
+    await luis.getByRole('button', { name: backAction('Luis Rojas'), exact: true }).click();
+    const eva = row(page, 'Eva Ruiz');
+    await eva.getByRole('button', { name: confirmAction('Eva Ruiz'), exact: true }).click();
+    await expect(eva.getByRole('button', { name: yesConfirmAction('Eva Ruiz'), exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: yesConfirmAction('Luis Rojas'), exact: true })).toHaveCount(0);
+  });
+});
+
+test.describe('lecturas obsoletas y refresco tras el cierre', () => {
+  test('una lectura de postulaciones emitida antes del cierre y entregada después del refresco no repone las acciones', async ({ page, isMobile }) => {
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift(),
+      applications: [buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' })],
+    });
+    await openShifts(page, isMobile);
+    const ana = row(page, 'Ana Pérez');
+    await expect(ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true })).toBeVisible();
+
+    // El sondeo (cada 4 s) emite una lectura de postulaciones cuando la
+    // asignación aún está `NO_SHOW`; el servidor la "lee" ya, pero la respuesta
+    // se retiene mientras la empresa cierra la asignación.
+    const stale = server.holdNext('applications');
+    await stale.reached;
+
+    await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
+    await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
+    await expect(ana.getByText('Turno finalizado; revisa el pago reportado')).toBeVisible();
+    await expect(ana.locator('.assignment-resolution')).toHaveCount(0);
+    expect(server.resolveCalls).toHaveLength(1);
+
+    // Ahora llega la respuesta vieja, con la asignación todavía `NO_SHOW`.
+    stale.release();
+    await stale.delivered;
+    await page.waitForTimeout(600);
+
+    // Sin reintentos automáticos a propósito: `toHaveCount` reintenta hasta 5 s
+    // y el siguiente sondeo (4 s) repondría el estado correcto, ocultando que la
+    // respuesta vieja se aplicó. Se mira el estado de la pantalla tal cual está.
+    expect(await ana.locator('.assignment-resolution').count()).toBe(0);
+    expect(await ana.getByRole('button', { name: /sí trabajó|Cerrar sin pago/ }).count()).toBe(0);
+    expect(await ana.getByText('No se presentó a tiempo').count()).toBe(0);
+    expect(await ana.getByText('Turno finalizado; revisa el pago reportado').count()).toBe(1);
+    expect(server.resolveCalls).toHaveLength(1);
+  });
+
+  test('mientras se refresca tras confirmar, la fila mantiene "Guardando…" y no vuelve a mostrar las acciones de apertura', async ({ page, isMobile }) => {
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift(),
+      applications: [buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' })],
+    });
+    await openShifts(page, isMobile);
+    const ana = row(page, 'Ana Pérez');
+    // Solo el refresco posterior al cierre lee los pagos: retenerlo deja la
+    // pantalla justo entre el `POST` y el fin del refresco.
+    const refresh = server.holdNext('payments');
+
+    await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
+    await refresh.reached;
+    expect(server.resolveCalls).toHaveLength(1);
+
+    const openingActions = ana.getByRole('button', { name: /sí trabajó|Cerrar sin pago/ });
+    const saving = ana.getByRole('button', { name: 'Guardando el cierre de Ana Pérez', exact: true });
+    await expect(saving).toBeVisible();
+    await expect(saving).toBeDisabled();
+    await expect(saving).toHaveText('Guardando…');
+    await expect(ana.getByText('¿Confirmas que Ana Pérez sí trabajó este turno?')).toBeVisible();
+    await expect(openingActions).toHaveCount(0);
+    await page.waitForTimeout(300);
+    await expect(openingActions).toHaveCount(0);
+    await expect(saving).toBeVisible();
+
+    refresh.release();
+    await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
+    await expect(ana.locator('.assignment-resolution')).toHaveCount(0);
+    await expect(openingActions).toHaveCount(0);
+  });
+
+  test('si la asignación ya no era resoluble tampoco reaparecen las acciones mientras se refresca la lista', async ({ page, isMobile }) => {
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift(),
+      applications: [buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' })],
+    });
+    server.resolveResponses.push({ status: 400, json: { error: 'ASSIGNMENT_NOT_RESOLVABLE' } });
+    await openShifts(page, isMobile);
+    const ana = row(page, 'Ana Pérez');
+    server.applications[0].assignment!.status = 'CANCELLED';
+    server.applications[0].nextAction = { actor: 'NONE', code: 'NONE', label: 'Proceso cerrado' };
+    const refresh = server.holdNext('payments');
+
+    await ana.getByRole('button', { name: closeAction('Ana Pérez'), exact: true }).click();
+    await ana.getByRole('button', { name: yesCloseAction('Ana Pérez'), exact: true }).click();
+    await refresh.reached;
+
+    await expect(ana.getByRole('button', { name: 'Guardando el cierre de Ana Pérez', exact: true })).toBeDisabled();
+    await expect(ana.getByRole('button', { name: /sí trabajó|Cerrar sin pago/ })).toHaveCount(0);
+
+    refresh.release();
+    await expect(ana.locator('.assignment-resolution')).toHaveCount(0);
+    await expect(ana.getByText('Proceso cerrado')).toBeVisible();
   });
 });

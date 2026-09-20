@@ -272,10 +272,18 @@ Objetivo: hacer confiable el recorrido desde la selección hasta el cierre.
   pago pendiente que la empresa paga directo al trabajador; no mueve dinero) y "Cerrar sin
   pago" (motivo opcional), ambas con confirmación explícita y refresco de turno, postulaciones
   y pagos sin recargar; probado con API simulada (Playwright) y, para `NO_SHOW`, contra API y
-  PostgreSQL reales. Límite conocido: confirmar el trabajo de un `NO_SHOW` en un turno ya
-  cerrado como `CANCELLED` registra el pago pero **no reabre ni completa el turno**, que sigue
-  `CANCELLED` (BAJO-5 de `CN-20260918-004`; el copy del panel lo advierte). Tampoco hay
-  hoy ningún camino para reabrir un turno cerrado por esa regla.
+  PostgreSQL reales. **Corregido en `CN-20260920-003` y ajustado en `CN-20260920-005`**
+  (auditados en `CN-20260920-004` y `CN-20260920-006`): confirmar el trabajo de un
+  `NO_SHOW`/`ABANDONED` en un turno que el propio vencimiento había cerrado como
+  `CANCELLED` ya **saca al turno de `CANCELLED`, y solo hacia `COMPLETED`**, es decir
+  cuando tras esa confirmación todos sus cupos quedan confirmados como trabajados; si
+  quedara algún cupo sin cerrar el turno **se mantiene `CANCELLED`** (terminal) en vez de
+  reabrirse a `CHECKED_IN`, que lo dejaría inalcanzable. La transición deja un
+  `ShiftEvent` `UPDATED`; un turno que la empresa canceló con `cancelShift` (se distingue
+  por un `ShiftCancellation` con `actorRole: BUSINESS`), uno con `endsAt` futuro y el
+  cierre sin pago nunca lo reabren, y el copy del panel explica todos los casos sin
+  prometer el resultado (BAJO-5 de `CN-20260918-004`, cerrado; detalle y límites en
+  `docs/reference/api.md`).
   Sigue pendiente: expiración y rotación de credenciales (la credencial no caduca y el
   propio trabajador la recibe del API, así que no prueba presencia); una ventana
   propia de check-out (hoy sigue siendo válido en cualquier momento tras el check-in,
@@ -605,7 +613,8 @@ esperar la decisión pendiente sobre el modelo económico real. El plan está en
 `.claude/plans/2026-09-18-cierre-brechas-flujo-simple.md`; cada cierre y su auditoría
 están en `docs/PROGRESO.md`.
 
-Cambios cerrados y auditados (todos comiteados en la rama):
+Cambios cerrados y auditados (comiteados en la rama, salvo `CN-20260920-001`,
+`CN-20260920-003` y `CN-20260920-005`, que siguen en el árbol de trabajo, sin comitear):
 
 - **Check-in y check-out** (`CN-20260918-001` a `004`): credencial aleatoria por asignación,
   ventana de tiempo, estados `NO_SHOW` y `ABANDONED` resueltos al leer, cierre manual
@@ -622,26 +631,63 @@ Cambios cerrados y auditados (todos comiteados en la rama):
 - **Interfaz web para cerrar asignaciones** (`013`, `014`): en Turnos > Postulaciones la
   empresa confirma que sí trabajó (queda un pago pendiente que paga directo) o cierra sin
   pago, con confirmación irreversible.
+- **Refresco del panel tras cerrar una asignación** (`CN-20260920-001`, `CN-20260920-002`):
+  las lecturas de postulaciones se secuencian (`apps/web/lib/request-sequence.ts`), así que
+  una respuesta emitida antes del cierre y entregada después ya no repone las acciones de
+  una fila resuelta; la confirmación se mantiene en "Guardando…" hasta que termina el
+  refresco; la tarjeta de Pagos dice "Registro de tus pagos directos a los trabajadores.
+  Chambeaya no cobra, guarda ni transfiere dinero"; y los tres botones de la confirmación
+  nombran al trabajador.
+- **Turno `CANCELLED` con asignación `COMPLETED` y pago pendiente** (`CN-20260920-003`,
+  `CN-20260920-004`, `CN-20260920-005`, `CN-20260920-006`): `resolveAssignment` calcula el
+  estado del turno con el turno que devuelve el ciclo de vida, no con la lectura previa, y
+  confirmar `COMPLETED` saca de `CANCELLED` a un turno que había cerrado el propio
+  vencimiento **solo cuando el recálculo lo deja `COMPLETED`** (todos sus cupos
+  confirmados como trabajados); con algún cupo sin cerrar se mantiene `CANCELLED`, que es
+  terminal. La transición deja un `ShiftEvent` `UPDATED`. Un turno que la empresa canceló
+  con `cancelShift` —reconocido por un `ShiftCancellation` con `actorRole: BUSINESS`, no
+  por `assignmentId: null`, que también puede escribir un trabajador—, uno con `endsAt`
+  futuro y el cierre sin pago nunca lo reabren. El aviso del panel explica todos los casos
+  sin prometer el resultado.
 
-Validación al cierre: API 156/156, integración PostgreSQL 3/3 y migración aplicada desde
-cero (base `chambeaya_test` del contenedor `cumplenow-db-1`; la base de desarrollo no se
-tocó), Flutter 89/89, Playwright rápido 56/56 y caso real de asignaciones 3/3.
+Validación al cierre: API 173/173 y Playwright rápido 68/68 (medidos en
+`CN-20260920-006`), Flutter 89/89 (medido en `CN-20260918-012`; ningún cierre posterior
+toca `apps/mobile_flutter`). La integración PostgreSQL
+3/3 con la migración aplicada desde cero (base `chambeaya_test` del contenedor
+`cumplenow-db-1`; la base de desarrollo no se tocó) y el caso real de asignaciones 3/3 se
+midieron en `CN-20260918-014`: `CN-20260920-002`, `004` y `006` no pudieron repetirlos por
+falta de Docker, y el caso real cambió de aserciones en `CN-20260920-003` y
+`CN-20260920-005`. **`npm run test:web:admin-real` y `npm run test:integration` deben
+ejecutarse antes de fusionar la rama.**
 
 Pendientes conocidos, por prioridad sugerida:
 
-1. **Turno `CANCELLED` con asignación `COMPLETED` y pago pendiente** (alcance de API, el
-   siguiente recomendado por `CN-20260918-014`). Si el turno ya se cerró como `CANCELLED`
-   y luego la empresa confirma que el trabajador sí trabajó, el turno no se reabre. Al
-   corregirlo hay que ajustar el aviso de la pantalla, sus dos pruebas y
-   `docs/reference/api.md`.
-2. **Sondeo obsoleto en el panel** (`CN-20260918-014`, medio): una respuesta anterior al
-   `POST` puede reponer por segundos los botones de una fila ya resuelta. La API impide
-   duplicar el pago. Vienen con él un parpadeo de botones durante el refresco, la frase de
-   Pagos "turnos completados" y nombres accesibles asimétricos en la confirmación.
-3. **Turnos multi-cupo parcialmente cubiertos** (`CN-20260918-004`): con una asignación
-   completada y otra abandonada o no-show, el turno queda en `CHECKED_IN` y solo sale
-   pagando a la pendiente. También `cancelShift` deja una asignación `NO_SHOW` resoluble
-   sobre un turno cancelado.
+1. **Turnos multi-cupo parcialmente cubiertos** (`CN-20260918-004`, `CN-20260920-006`): con
+   una asignación completada y otra abandonada o no-show, el turno queda en `CHECKED_IN` y
+   solo sale pagando a la pendiente. Consecuencia aceptada de `CN-20260920-005`: un turno
+   multi-cupo cerrado por vencimiento en el que la empresa confirma un cupo y otro queda
+   sin confirmar se mantiene `CANCELLED` (terminal, con su pago pendiente registrado), así
+   que el estado no refleja que un cupo sí se trabajó. También `cancelShift` deja una
+   asignación `NO_SHOW` resoluble sobre un turno cancelado. Resolverlo de raíz exige tocar
+   `deriveShiftStatus`.
+2. **`resolutionBusy` no se libera con una petición colgada** (BAJO-1 de `CN-20260920-002`,
+   causa raíz preexistente): `submitResolution` es el único sitio que lo pone a `false` y
+   `request()` de `apps/web/lib/business-api.ts` no usa `AbortSignal` ni timeout, así que
+   una lectura del refresco que nunca responde deja la confirmación fija en "Guardando…"
+   con todos sus botones deshabilitados, y al cambiar de vista o de turno ninguna fila
+   varada vuelve a ofrecer el cierre hasta recargar la página. Se cierra limpiando
+   `resolutionBusy` en el efecto de `[activeNav, selectedShiftId, session]` y/o añadiendo
+   un timeout en `request()`. Del mismo cierre siguen abiertos BAJO-2 (`decideApplication`
+   no comprueba `selectedShiftIdRef` antes de aplicar la respuesta) y BAJO-3 (el estado
+   "Guardando…" no tiene región `aria-live`).
+3. **Garantías declaradas de la transacción de `resolveAssignment`** (BAJO-1 y BAJO-2 de
+   `CN-20260920-004`): `cancelShift` abre su `$transaction` sin `isolationLevel`, así que
+   la lectura de `ShiftCancellation` dentro de la transacción `Serializable` de
+   `resolveAssignment` no está aislada por el motor frente a una cancelación concurrente
+   (la ventana es estrecha y no pierde datos: el conflicto de escritura sobre `Shift` sí se
+   detecta y el reintento ve la cancelación); y `current` se calcula fuera de
+   `withSerializableRetry`, de modo que un reintento reejecuta el cuerpo con el mismo
+   `current.status`/`current.endsAt`.
 4. **La credencial de check-in no prueba presencia** (`CN-20260918-002`): no expira, no
    rota, no limita intentos y no hay geolocalización ni cámara.
 5. **Copy de piloto residual** (`CN-20260918-012`): con un plan que no es el piloto

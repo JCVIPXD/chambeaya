@@ -318,7 +318,12 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async resolveAssignment(session: AuthSession, shiftId: string, assignmentId: string, outcome: AssignmentResolutionOutcome, reason?: string) {
     const owned = await this.ownedShift(session, shiftId);
-    await this.resolveShiftAssignmentsLifecycle(owned);
+    // `current` es el turno ya puesto al día por el ciclo de vida (si esa
+    // llamada marcó `NO_SHOW`/`ABANDONED` y cerró el turno como `CANCELLED`, aquí
+    // ya figura `CANCELLED`). `owned` es la lectura previa y puede estar
+    // obsoleta: nunca debe ser la base del cálculo del estado del turno (BAJO-5
+    // de CN-20260918-004).
+    const { shift: current } = await this.resolveShiftAssignmentsLifecycle(owned);
     const assignment = await this.prisma.shiftAssignment.findFirst({
       where: { id: assignmentId, shiftId: owned.id },
       include: { shift: { include: { company: true } } },
@@ -381,9 +386,60 @@ export class DatabaseBusinessService implements BusinessOperations {
         });
       }
       const assignments = await tx.shiftAssignment.findMany({ where: { shiftId: owned.id } });
-      const nextShiftStatus = deriveShiftStatus(owned.status, owned.requiredWorkers, assignments, owned);
+      // Base del cálculo: el turno ya puesto al día (`current`), no `owned`.
+      // `deriveShiftStatus` devuelve siempre `CANCELLED` si la base ya lo es,
+      // así que un turno que el ciclo de vencimiento cerró "sin asignaciones
+      // viables" (ALTO-2 de CN-20260918-002) quedaba `CANCELLED` aunque la
+      // empresa confirmara con `COMPLETED` que el trabajo sí ocurrió y ya
+      // existiera un `Payment`. Solo en ese caso se reabre el turno, y solo si
+      // el recálculo lo deja `COMPLETED`:
+      //  - si daría `CHECKED_IN` (multi-cupo con cupos sin cerrar) se mantiene
+      //    `CANCELLED`: un turno vencido en `CHECKED_IN` y sin asignación
+      //    `ASSIGNED` que resolver ya no lo mueve ningún endpoint (`cancelShift`,
+      //    `updateShift` y `deleteShift` lo rechazan): quedaría "fantasma"
+      //    (ALTO-2 de CN-20260918-002, MEDIO-2 de CN-20260920-004). El pago
+      //    pendiente se registra igual;
+      //  - NO se reabre si la empresa canceló el turno ella misma: `cancelShift`
+      //    es la única ruta que escribe un `ShiftCancellation` con
+      //    `actorRole: 'BUSINESS'`. La cancelación de un trabajador
+      //    (`actorRole: 'WORKER'`, `marketplace.cancelAssignment`) nunca cancela
+      //    el turno por sí sola y su `assignmentId` puede ser nulo (postulación
+      //    aún `PENDING`, o asignación borrada, `onDelete: SetNull`), así que
+      //    `assignmentId` no distingue a la empresa; `actorRole` sí (MEDIO-1 de
+      //    CN-20260920-004). Si algún día la empresa cancelara una sola
+      //    asignación con este rol, este criterio debe revisarse;
+      //  - NO se reabre si el turno aún no venció (un cierre por vencimiento
+      //    exige `endsAt <= ahora`);
+      //  - `CANCELLED` (cerrar sin pago) nunca reabre nada.
+      let nextShiftStatus = deriveShiftStatus(current.status, current.requiredWorkers, assignments, current);
+      if (current.status === 'CANCELLED' && outcome === 'COMPLETED' && current.endsAt <= completedAt) {
+        // `deriveShiftStatus` solo distingue `CANCELLED` de cualquier otra
+        // base: `PUBLISHED` es el valor neutro para que recalcule desde las
+        // asignaciones.
+        const recalculated = deriveShiftStatus('PUBLISHED', current.requiredWorkers, assignments, current);
+        if (recalculated === 'COMPLETED') {
+          const cancelledByCompany = await tx.shiftCancellation.findFirst({
+            where: { shiftId: owned.id, actorRole: 'BUSINESS' },
+            select: { id: true },
+          });
+          if (!cancelledByCompany) nextShiftStatus = recalculated;
+        }
+      }
       const confirmedWorkers = assignments.filter((candidate) => candidate.status === 'ASSIGNED').length;
       await tx.shift.update({ where: { id: owned.id }, data: { status: nextShiftStatus, confirmedWorkers } });
+      if (current.status === 'CANCELLED' && nextShiftStatus !== 'CANCELLED') {
+        // Rastro de la única transición que saca a un turno de `CANCELLED`
+        // (solo hacia `COMPLETED`).
+        await tx.shiftEvent.create({
+          data: {
+            shiftId: owned.id,
+            actorId: session.userId,
+            actorRole: 'BUSINESS',
+            type: 'UPDATED',
+            detail: `El turno pasó de CANCELLED a ${nextShiftStatus} al confirmar la empresa el trabajo de la asignación ${assignment.id} (${sourceLabel}); el cierre por vencimiento no era una cancelación de la empresa`,
+          },
+        });
+      }
       return updated;
     }, { isolationLevel: 'Serializable' }));
   }

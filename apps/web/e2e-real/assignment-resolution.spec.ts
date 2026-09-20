@@ -15,7 +15,9 @@ import { businessAccount, expect, test } from './fixtures/business-real';
  * El turno de cada prueba termina 12 s después de crearse (ver
  * `fixtures/business-real.ts`), así que la asignación varada se detecta con el
  * turno ya vencido: es exactamente el caso en que la API cierra el turno como
- * `CANCELLED` y la empresa igual debe poder cobrar a quien sí trabajó.
+ * `CANCELLED` por vencimiento y la empresa igual debe poder cobrar a quien sí
+ * trabajó; al hacerlo, el turno deja de quedar `CANCELLED` (BAJO-5 de
+ * CN-20260918-004). Cerrar sin pago, en cambio, no toca el turno.
  */
 
 async function openStrandedShift(page: Page, title: string) {
@@ -43,6 +45,7 @@ async function get<T>(api: APIRequestContext, token: string, path: string): Prom
 type PaymentRow = { description: string; status: string; amountCents: number; assignment: { status: string } | null };
 type ApplicationRow = { assignment: { status: string } | null };
 type EventRow = { type: string; actorRole: string; detail: string | null };
+type ShiftRow = { status: string };
 
 test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda un pago pendiente', async ({ page, api, strandedShift }) => {
   await waitUntil(strandedShift.endsAtMs);
@@ -53,12 +56,16 @@ test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda
 
   await row.getByRole('button', { name: `Confirmar que ${strandedShift.workerName} sí trabajó`, exact: true }).click();
   // El turno venció sin asignaciones viables: la API ya lo cerró como cancelado.
-  await expect(row).toContainText('Aunque este turno figure como cancelado');
+  await expect(row).toContainText('Este turno figura como cancelado');
+  await expect(row).toContainText('pasará a completado solo cuando todos sus cupos queden confirmados como trabajados');
+  await expect(row).toContainText('si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado');
+  await expect(row).not.toContainText('Aunque este turno figure como cancelado');
+  await expect(row).not.toContainText('se actualizará al confirmar');
   await expect(row).toContainText('Chambeaya no cobra, guarda ni transfiere dinero');
 
   const [resolveResponse] = await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST' && /\/assignments\/[^/]+\/resolve$/.test(response.url())),
-    row.getByRole('button', { name: 'Sí, confirmar trabajo', exact: true }).click(),
+    row.getByRole('button', { name: `Sí, confirmar trabajo de ${strandedShift.workerName}`, exact: true }).click(),
   ]);
   expect(resolveResponse.status()).toBe(200);
   expect(resolveResponse.request().postDataJSON()).toEqual({ outcome: 'COMPLETED' });
@@ -67,7 +74,11 @@ test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda
   await expect(row.getByRole('button', { name: /sí trabajó|Cerrar sin pago/ })).toHaveCount(0);
   await expect(row.getByText('No se presentó a tiempo')).toHaveCount(0);
 
-  // Persistencia real: asignación COMPLETED y exactamente un pago PENDING.
+  // Persistencia real: asignación COMPLETED, exactamente un pago PENDING y el
+  // turno ya no queda CANCELLED (era el cierre automático por vencimiento, no
+  // una cancelación de la empresa).
+  const shift = await get<ShiftRow>(api, strandedShift.businessToken, `/api/business/shifts/${strandedShift.shiftId}`);
+  expect(shift.status).toBe('COMPLETED');
   const applications = await get<ApplicationRow[]>(api, strandedShift.businessToken, `/api/business/shifts/${strandedShift.shiftId}/applications`);
   expect(applications.map((application) => application.assignment?.status)).toEqual(['COMPLETED']);
   const payments = (await get<PaymentRow[]>(api, strandedShift.businessToken, '/api/business/payments')).filter((payment) => payment.description.startsWith(strandedShift.title));
@@ -75,6 +86,7 @@ test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda
   expect(payments[0]).toMatchObject({ status: 'PENDING', amountCents: 12000 });
   const events = await get<EventRow[]>(api, strandedShift.businessToken, `/api/business/shifts/${strandedShift.shiftId}/events`);
   expect(events.some((event) => event.actorRole === 'BUSINESS' && event.type === 'COMPLETED' && /no-show/.test(event.detail ?? ''))).toBe(true);
+  expect(events.some((event) => event.actorRole === 'BUSINESS' && event.type === 'UPDATED' && /pasó de CANCELLED a COMPLETED/.test(event.detail ?? ''))).toBe(true);
 
   // Y el pago pendiente aparece en la vista Pagos, sin recargar el panel.
   await page.getByRole('button', { name: 'Pagos', exact: true }).click();
@@ -92,7 +104,7 @@ test('la empresa cierra sin pago un NO_SHOW con motivo y no se genera ningún pa
 
   const [resolveResponse] = await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST' && /\/assignments\/[^/]+\/resolve$/.test(response.url())),
-    row.getByRole('button', { name: 'Sí, cerrar sin pago', exact: true }).click(),
+    row.getByRole('button', { name: `Sí, cerrar sin pago la asignación de ${strandedShift.workerName}`, exact: true }).click(),
   ]);
   expect(resolveResponse.status()).toBe(200);
   expect(resolveResponse.request().postDataJSON()).toEqual({ outcome: 'CANCELLED', reason: 'Nunca llegó y no avisó' });
@@ -102,6 +114,8 @@ test('la empresa cierra sin pago un NO_SHOW con motivo y no se genera ningún pa
 
   const applications = await get<ApplicationRow[]>(api, strandedShift.businessToken, `/api/business/shifts/${strandedShift.shiftId}/applications`);
   expect(applications.map((application) => application.assignment?.status)).toEqual(['CANCELLED']);
+  // Cerrar sin pago no reabre nada: el turno cerrado por vencimiento sigue CANCELLED.
+  expect((await get<ShiftRow>(api, strandedShift.businessToken, `/api/business/shifts/${strandedShift.shiftId}`)).status).toBe('CANCELLED');
   const payments = (await get<PaymentRow[]>(api, strandedShift.businessToken, '/api/business/payments')).filter((payment) => payment.description.startsWith(strandedShift.title));
   expect(payments).toEqual([]);
   const events = await get<EventRow[]>(api, strandedShift.businessToken, `/api/business/shifts/${strandedShift.shiftId}/events`);

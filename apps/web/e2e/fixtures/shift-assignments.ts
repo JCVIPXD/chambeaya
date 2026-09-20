@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Page, Route } from '@playwright/test';
 import type {
   AssignmentRecord,
   AssignmentStatus,
@@ -90,6 +90,28 @@ export type ShiftAssignmentsServer = {
    * API real ante una asignación `NO_SHOW`/`ABANDONED`.
    */
   resolveResponses: ResolveResponse[];
+  /**
+   * Retiene la próxima lectura `GET` del tipo indicado: el cuerpo se fija al
+   * llegar la petición (es lo que el servidor "leyó" en ese instante) pero la
+   * respuesta no se entrega hasta `release()`. Permite reproducir una lectura
+   * emitida antes de una escritura que llega después del refresco posterior.
+   */
+  holdNext: (kind: HoldableRead) => HeldRead;
+};
+
+export type HoldableRead = 'shift' | 'applications' | 'payments';
+export type HeldRead = {
+  /** Se resuelve cuando la lectura retenida ya llegó al servidor simulado. */
+  reached: Promise<void>;
+  /** Se resuelve cuando la respuesta retenida ya se entregó al navegador. */
+  delivered: Promise<void>;
+  release: () => void;
+};
+
+type Hold = {
+  markReached: () => void;
+  markDelivered: () => void;
+  released: Promise<void>;
 };
 
 function paymentFor(shift: ShiftRecord, application: ShiftApplicationRecord): PaymentRecord {
@@ -121,6 +143,13 @@ export async function installShiftAssignmentsApi(
      * listado cargado antes sigue mostrando el estado anterior.
      */
     listedStatus?: ShiftRecord['status'];
+    /**
+     * Simula un turno `CANCELLED` que la propia empresa canceló (`cancelShift`).
+     * Por defecto el `CANCELLED` del fixture es el cierre automático por
+     * vencimiento sin asignaciones viables, que la API reabre al confirmar
+     * `COMPLETED`; el cancelado por la empresa nunca se reabre.
+     */
+    cancelledByCompany?: boolean;
   },
 ): Promise<ShiftAssignmentsServer> {
   const server: ShiftAssignmentsServer = {
@@ -130,8 +159,34 @@ export async function installShiftAssignmentsApi(
     resolveCalls: [],
     log: [],
     resolveResponses: [],
+    holdNext: (kind) => {
+      let markReached!: () => void;
+      let markDelivered!: () => void;
+      let release!: () => void;
+      const reached = new Promise<void>((resolve) => (markReached = resolve));
+      const delivered = new Promise<void>((resolve) => (markDelivered = resolve));
+      const released = new Promise<void>((resolve) => (release = resolve));
+      holds[kind].push({ markReached, markDelivered, released });
+      return { reached, delivered, release };
+    },
   };
+  const holds: Record<HoldableRead, Hold[]> = { shift: [], applications: [], payments: [] };
   const shiftPath = `/api/business/shifts/${input.shift.id}`;
+
+  // Responde una lectura; si hay una retención armada para ese tipo, la
+  // respuesta lleva el cuerpo de este instante pero se entrega solo al liberarla.
+  const answerRead = async (route: Route, kind: HoldableRead, body: unknown) => {
+    const hold = holds[kind].shift();
+    if (!hold) {
+      await route.fulfill({ json: body });
+      return;
+    }
+    const snapshot: unknown = JSON.parse(JSON.stringify(body));
+    hold.markReached();
+    await hold.released;
+    await route.fulfill({ json: snapshot });
+    hold.markDelivered();
+  };
 
   await page.route((url) => url.pathname.startsWith('/api/business/'), async (route) => {
     const request = route.request();
@@ -144,13 +199,13 @@ export async function installShiftAssignmentsApi(
       await route.fulfill({ json: [{ ...server.shift, status: input.listedStatus ?? server.shift.status }] });
     } else if (method === 'GET' && pathname === shiftPath) {
       server.log.push(`${method} ${pathname}`);
-      await route.fulfill({ json: server.shift });
+      await answerRead(route, 'shift', server.shift);
     } else if (method === 'GET' && pathname === `${shiftPath}/applications`) {
       server.log.push(`${method} ${pathname}`);
-      await route.fulfill({ json: server.applications });
+      await answerRead(route, 'applications', server.applications);
     } else if (method === 'GET' && pathname === '/api/business/payments') {
       server.log.push(`${method} ${pathname}`);
-      await route.fulfill({ json: server.payments });
+      await answerRead(route, 'payments', server.payments);
     } else if (method === 'POST' && resolveMatch) {
       server.log.push(`${method} ${pathname}`);
       const assignmentId = resolveMatch[1];
@@ -173,6 +228,19 @@ export async function installShiftAssignmentsApi(
       application.assignment.status = body.outcome as AssignmentStatus;
       application.nextAction = nextActionByStatus[application.assignment.status];
       if (body.outcome === 'COMPLETED') server.payments.push(paymentFor(server.shift, application));
+      // Regla de la API (`resolveAssignment`, BAJO-5 de CN-20260918-004 y
+      // MEDIO-2 de CN-20260920-004): al confirmar `COMPLETED`, un turno que el
+      // ciclo de vencimiento cerró como `CANCELLED` pasa a `COMPLETED` solo si
+      // todos sus cupos quedan confirmados como trabajados; con algún cupo sin
+      // cerrar sigue `CANCELLED` (nunca `CHECKED_IN`: quedaría inalcanzable).
+      // Un turno cancelado por la empresa no se reabre; `CANCELLED` (cerrar sin
+      // pago) tampoco toca el turno.
+      if (body.outcome === 'COMPLETED' && !input.cancelledByCompany && server.shift.status === 'CANCELLED') {
+        const live = server.applications
+          .map((item) => item.assignment?.status)
+          .filter((status) => status && !['CANCELLED', 'NO_SHOW', 'ABANDONED'].includes(status));
+        if (live.length >= server.shift.requiredWorkers && live.every((status) => status === 'COMPLETED')) server.shift.status = 'COMPLETED';
+      }
       await route.fulfill({
         json: { ...application.assignment, shiftId: input.shift.id, workerId: application.workerId, applicationId: application.id, assignedAt: '2026-09-17T10:00:00.000Z', completedAt: null },
       });

@@ -73,7 +73,7 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    (defecto de copy preexistente, registrado en `CN-20260918-012`).
 
 8. Cierre manual de asignaciones `NO_SHOW` / `ABANDONED`
-   (`assignment-resolution.spec.ts`, 14 casos): en `Turnos` → `Postulaciones` la
+   (`assignment-resolution.spec.ts`, 20 casos): en `Turnos` → `Postulaciones` la
    asignación varada muestra "No se presentó a tiempo" o "Sin salida registrada" con
    "Confirmar que sí trabajó" y "Cerrar sin pago". Elegir una acción solo abre una
    confirmación (ninguna llamada a `POST .../resolve` hasta el "Sí, ..."; "Volver"
@@ -83,18 +83,37 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    recargar (el pago pendiente aparece en `Pagos`). Cerrar sin pago envía
    `{ outcome: 'CANCELLED', reason? }` (sin `reason` si no se escribió motivo; un motivo
    de 1-2 caracteres se rechaza en el panel sin llamar a la API) y no genera pago. Cubre
-   `NO_SHOW` y `ABANDONED` con ambas acciones; un turno ya `CANCELLED` (aviso "Aunque este
-   turno figure como cancelado…", también cuando el listado cargado antes lo traía sin
-   cancelar y hay que releerlo); errores 500 (aviso amable, la confirmación sigue abierta y
+   `NO_SHOW` y `ABANDONED` con ambas acciones; un turno ya `CANCELLED` (aviso "Este turno figura como
+   cancelado…" que no promete el resultado y explica los casos: cierre automático por
+   vencimiento, que pasa a completado solo cuando todos sus cupos quedan confirmados como
+   trabajados, y turno cancelado por la empresa o con algún cupo sin confirmar, que sigue
+   cancelado; el pago pendiente se registra en todos; también cuando el listado cargado
+   antes lo traía sin cancelar y hay que releerlo; el fixture simula la regla de la API:
+   confirmar `COMPLETED` reabre el cierre por vencimiento a `COMPLETED` solo si todos los
+   cupos quedan trabajados, y no toca (sigue `CANCELLED`) uno cancelado por la empresa, uno
+   con algún cupo sin cerrar ni el cierre sin pago; en un turno de dos cupos el turno sigue
+   cancelado y el aviso sigue en la segunda fila tras confirmar la primera, y pasa a
+   completado al confirmar la segunda); errores 500 (aviso amable, la confirmación sigue abierta y
    se puede reintentar), 400 `ASSIGNMENT_NOT_RESOLVABLE` y 404 `ASSIGNMENT_NOT_FOUND` (aviso
    sin el código crudo; en el 400 además se refresca la lista); una asignación `ASSIGNED`/`COMPLETED`/
    `CANCELLED` **no** muestra acciones; y un turno de tres cupos donde solo las dos filas
-   varadas ofrecen el cierre y resolver una no toca a las otras. La API con estado vive en
+   varadas ofrecen el cierre y resolver una no toca a las otras. Además cubre tres
+   comportamientos del refresco: una lectura de postulaciones emitida antes del `POST` y
+   entregada después del refresco posterior no repone las acciones ya resueltas (el sondeo
+   se secuencia con `lib/request-sequence.ts`; el caso mide el estado sin reintentos
+   automáticos porque el siguiente sondeo repararía la pantalla y ocultaría el fallo);
+   entre el `POST` y el fin del refresco la confirmación se mantiene en "Guardando…" y
+   no reaparecen las acciones de apertura (también en el 400 `ASSIGNMENT_NOT_RESOLVABLE`);
+   y los botones de la confirmación ("Sí, confirmar trabajo de X", "Sí, cerrar sin pago la
+   asignación de X", "Volver sin cerrar la asignación de X") llevan el nombre del
+   trabajador, con el foco inicial en "Volver". Para provocar estas carreras la API con
+   estado ofrece `server.holdNext('applications' | 'payments' | 'shift')`, que retiene la
+   próxima lectura (con el cuerpo que el servidor leyó al llegar) hasta `release()`. La API con estado vive en
    `fixtures/shift-assignments.ts` (`installShiftAssignmentsApi`, `page.route` sobre el
    fixture base). La contraparte contra API y PostgreSQL reales está en `e2e-real/` (ver
    más abajo).
 
-Cincuenta y seis ejecuciones en total (28 casos × escritorio y móvil). Cada una tiene su navegador aislado y su estado de
+Sesenta y ocho ejecuciones en total (34 casos × escritorio y móvil). Cada una tiene su navegador aislado y su estado de
 API propio. Una petición API no prevista, una petición externa o un error
 JavaScript sin capturar hacen fallar la prueba. No se permiten reintentos que
 oculten fallos.
@@ -158,8 +177,13 @@ empieza hace 90 minutos y termina 12 segundos después de crearse; el fixture re
 trabajador, lo postula y lo acepta, y el caso espera a que el turno venza (con el reloj
 real) antes de abrir el panel, de modo que la API detecta el `NO_SHOW` con el turno ya
 vencido y lo cierra como `CANCELLED`. Por eso cada caso tarda unos 16 s. **Con ese
-turno cerrado, confirmar el trabajo deja el turno `CANCELLED` y la asignación
-`COMPLETED` con su pago** (la base de esta ejecución lo confirmó); el panel avisa de ello.
+turno cerrado, confirmar el trabajo deja la asignación `COMPLETED` con su pago y el
+turno `COMPLETED` (ya no `CANCELLED`), con un `ShiftEvent` `UPDATED` de la transición;
+cerrar sin pago deja el turno `CANCELLED`.** (Este caso real es de un solo cupo, así que
+la confirmación deja todos sus cupos trabajados.) El panel avisa del estado del turno con
+el copy que explica todos los casos sin prometer el resultado. (Estas afirmaciones se
+ajustaron en `CN-20260920-003` y `CN-20260920-005` sin poder ejecutar la suite real: ver
+esos registros y `CN-20260920-006`.)
 Solo se cubre `NO_SHOW`: llegar a `ABANDONED` exige un check-in real y esperar 60 minutos
 tras `endsAt`, y ningún endpoint permite crear un turno ya vencido ni adelantar el reloj.
 Cada caso deja sus filas en la base `_test` (títulos y trabajadores con sufijo aleatorio,

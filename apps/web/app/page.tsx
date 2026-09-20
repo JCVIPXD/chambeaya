@@ -67,6 +67,12 @@ import {
   type BusinessTalentInvitationRecord,
   type TalentInvitationStatus,
 } from "../lib/business-api";
+import {
+  acceptResponse,
+  createRequestSequence,
+  invalidateInFlight,
+  issueRequest,
+} from "../lib/request-sequence";
 import { BusinessAuth } from "../components/business-auth";
 import { CrudModal } from "../components/crud-modal";
 
@@ -362,6 +368,10 @@ export default function HomePage() {
   const [resolutionError, setResolutionError] = useState<string | null>(null);
   const selectedShiftIdRef = useRef("");
   const closureSyncKey = useRef("");
+  // Secuencia de las lecturas de postulaciones (sondeo cada 4 s, refresco tras
+  // aceptar/rechazar o cerrar una asignación). Una respuesta emitida antes de
+  // una escritura confirmada, o que llega detrás de una más nueva, se descarta.
+  const applicationsSequence = useRef(createRequestSequence());
   const [pendingApplications, setPendingApplications] =
     useState<PendingApplicationsSummary>({ count: 0, shiftIds: [] });
   const [editingShift, setEditingShift] = useState<Shift | null>(null);
@@ -496,12 +506,17 @@ export default function HomePage() {
     setApplicationsShiftId("");
     setApplicationsLoading(true);
     const refreshApplications = async () => {
+      const sequence = applicationsSequence.current;
+      const request = issueRequest(sequence);
       try {
         const applications = await businessApi.applications.list(
           session.token,
           selectedShiftId,
         );
-        if (!cancelled) {
+        // Una respuesta emitida antes de un cierre/decisión ya confirmado, o
+        // que llega detrás de otra más nueva, traería filas obsoletas (por
+        // ejemplo las acciones de una asignación que ya se resolvió).
+        if (!cancelled && acceptResponse(sequence, request)) {
           setShiftApplications(applications);
           setApplicationsError(null);
           setApplicationsShiftId(selectedShiftId);
@@ -536,7 +551,7 @@ export default function HomePage() {
           }
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && acceptResponse(sequence, request)) {
           setShiftApplications([]);
           setApplicationsError(
             "No pudimos cargar las postulaciones de este turno. Inténtalo nuevamente en unos segundos.",
@@ -1112,6 +1127,11 @@ export default function HomePage() {
         decision,
         reason,
       );
+      // La decisión ya está confirmada: cualquier lectura de postulaciones
+      // emitida antes (el sondeo) puede traer el estado previo y se descarta.
+      const sequence = applicationsSequence.current;
+      invalidateInFlight(sequence);
+      const request = issueRequest(sequence);
       const [updatedShift, applications, pending] = await Promise.all([
         businessApi.shifts.get(session.token, selectedShift.id),
         businessApi.applications.list(session.token, selectedShift.id),
@@ -1121,7 +1141,7 @@ export default function HomePage() {
       setShifts((current) =>
         current.map((item) => (item.id === mapped.id ? mapped : item)),
       );
-      setShiftApplications(applications);
+      if (acceptResponse(sequence, request)) setShiftApplications(applications);
       setPendingApplications(pending);
       showToast(
         decision === "ACCEPTED"
@@ -1155,6 +1175,12 @@ export default function HomePage() {
   // que `COMPLETED` deja pendiente) sin recargar el panel completo. Cada lectura
   // es independiente: si una falla, las demás igual se aplican.
   async function refreshAfterResolution(token: string, shiftId: string) {
+    // Se llama con el estado de la asignación ya cambiado en el servidor (o ya
+    // conocido como cambiado): las lecturas de postulaciones emitidas antes,
+    // incluido el sondeo en vuelo, pueden traer el estado previo y se descartan.
+    const sequence = applicationsSequence.current;
+    invalidateInFlight(sequence);
+    const request = issueRequest(sequence);
     const [shiftResult, applicationsResult, paymentsResult] =
       await Promise.allSettled([
         businessApi.shifts.get(token, shiftId),
@@ -1169,7 +1195,8 @@ export default function HomePage() {
     }
     if (
       applicationsResult.status === "fulfilled" &&
-      selectedShiftIdRef.current === shiftId
+      selectedShiftIdRef.current === shiftId &&
+      acceptResponse(sequence, request)
     ) {
       setShiftApplications(applicationsResult.value);
     }
@@ -1215,15 +1242,18 @@ export default function HomePage() {
       ) {
         // La asignación ya no está pendiente de cierre (otra sesión la cerró,
         // o el turno ya no existe): no tiene sentido reintentar. Se cierra la
-        // confirmación y se actualiza la lista con lo que hay realmente.
-        setResolution(null);
-        setResolutionReason("");
+        // confirmación y se actualiza la lista con lo que hay realmente. La
+        // confirmación se mantiene (en "Guardando…") hasta que termine la
+        // lectura: si se quitara antes, la fila volvería a mostrar por un
+        // instante las acciones que ya no valen.
         showToast(
           code === "ASSIGNMENT_NOT_RESOLVABLE"
             ? "Esta asignación ya no está pendiente de cierre; puede que ya se haya cerrado. Actualizamos la lista."
             : "No encontramos esta asignación en el turno. Actualizamos la lista.",
         );
         await refreshAfterResolution(session.token, shiftId);
+        setResolution(null);
+        setResolutionReason("");
       } else {
         setResolutionError(
           code === "INVALID_INPUT"
@@ -1234,9 +1264,13 @@ export default function HomePage() {
       setResolutionBusy(false);
       return;
     }
+    // El cierre ya está confirmado. La confirmación (y su "Guardando…") se
+    // mantiene hasta que termine el refresco: si se quitara antes, la fila
+    // volvería a mostrar las acciones de apertura, deshabilitadas y sin
+    // indicador, hasta que llegaran las lecturas.
+    const refreshed = await refreshAfterResolution(session.token, shiftId);
     setResolution(null);
     setResolutionReason("");
-    const refreshed = await refreshAfterResolution(session.token, shiftId);
     setResolutionBusy(false);
     if (!refreshed) {
       showToast(
@@ -2528,7 +2562,10 @@ export default function HomePage() {
                     .reduce((sum, item) => sum + item.amount, 0)
                     .toLocaleString("es-PE", { minimumFractionDigits: 2 })}
                 </strong>
-                <p>Pagos directos asociados a turnos completados.</p>
+                <p>
+                  Registro de tus pagos directos a los trabajadores. Chambeaya
+                  no cobra, guarda ni transfiere dinero.
+                </p>
                 <div>
                   <span>
                     <small>Comprometido</small>
@@ -3595,7 +3632,13 @@ function AssignmentResolutionPanel({
                 Solo es un registro de lo que debes: tú pagas directamente al
                 trabajador y Chambeaya no cobra, guarda ni transfiere dinero.
                 {shiftCancelled &&
-                  " Aunque este turno figure como cancelado, el pago pendiente se registra igualmente."}{" "}
+                  // La API reabre el turno (a completado) solo si lo cerró ella
+                  // misma por vencimiento sin asistencia y, tras esta
+                  // confirmación, todos sus cupos quedan confirmados como
+                  // trabajados; uno cancelado por la empresa, o con algún cupo
+                  // sin confirmar, sigue cancelado. El panel no sabe cuál es el
+                  // caso, así que no promete el resultado.
+                  " Este turno figura como cancelado. Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado solo cuando todos sus cupos queden confirmados como trabajados; si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado. En todos los casos el pago pendiente se registra."}{" "}
                 Esta acción no se puede deshacer.
               </>
             ) : (
@@ -3633,6 +3676,13 @@ function AssignmentResolutionPanel({
               }
               type="button"
               disabled={busy}
+              aria-label={
+                busy
+                  ? `Guardando el cierre de ${workerName}`
+                  : pendingOutcome === "COMPLETED"
+                    ? `Sí, confirmar trabajo de ${workerName}`
+                    : `Sí, cerrar sin pago la asignación de ${workerName}`
+              }
               onClick={onConfirm}
             >
               {busy
@@ -3646,6 +3696,7 @@ function AssignmentResolutionPanel({
               type="button"
               disabled={busy}
               autoFocus
+              aria-label={`Volver sin cerrar la asignación de ${workerName}`}
               onClick={onBack}
             >
               Volver
