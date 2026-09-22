@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../theme/app_theme.dart';
 import '../../marketplace/marketplace_data.dart';
 import '../discovery_controller.dart';
 
@@ -153,7 +154,11 @@ class _FilterDropdown<T> extends StatelessWidget {
     constraints: const BoxConstraints(minWidth: 170, maxWidth: 220),
     padding: const EdgeInsets.symmetric(horizontal: 12),
     decoration: BoxDecoration(
-      color: Colors.white,
+      // `Colors.white` fijo dejaba el valor seleccionado (`textTheme.
+      // titleMedium`, casi blanco en oscuro) blanco sobre blanco: 1.13:1.
+      // `palette.surface` es `Colors.white` en claro (sin cambio) y el
+      // relleno oscuro de los demás campos en oscuro.
+      color: context.palette.surface,
       border: Border.all(color: Theme.of(context).dividerColor),
       borderRadius: BorderRadius.circular(12),
     ),

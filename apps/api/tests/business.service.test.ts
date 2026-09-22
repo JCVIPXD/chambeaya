@@ -272,6 +272,7 @@ describe('DatabaseBusinessService.listShiftApplications', () => {
     const shiftEventCreate = vi.fn(async () => undefined);
     const applicationsAfterResolution = [{
       id: 'application-1', status: 'ACCEPTED',
+      worker: { id: 'worker-1', name: 'Ana', email: null, identifier: '12345678', talentProfile: null, documents: [] },
       assignment: { ...staleAssignment, status: 'ABANDONED' },
     }];
     const prisma = {
@@ -847,5 +848,84 @@ describe('DatabaseBusinessService.getSubscription', () => {
     const result = await service.getSubscription(session);
 
     expect(result).toBe(realSubscription);
+  });
+});
+
+describe('DatabaseBusinessService.listShiftApplications: indicador hasCv', () => {
+  const shift = {
+    id: 'shift-1', companyId: 'company-1', status: 'PUBLISHED' as const, requiredWorkers: 1,
+    startsAt: new Date(Date.now() + 60 * 60 * 1000),
+    endsAt: new Date(Date.now() + 5 * 60 * 60 * 1000),
+  };
+
+  function application(id: string, status: string, worker: { profile: { isVisible: boolean } | null; cv: boolean }) {
+    return {
+      id, shiftId: 'shift-1', workerId: `worker-${id}`, status, screeningAnswers: null, assignment: null,
+      worker: {
+        id: `worker-${id}`, name: `Trabajador ${id}`, email: `${id}@example.test`, identifier: '70000000',
+        talentProfile: worker.profile,
+        documents: worker.cv ? [{ id: `doc-${id}` }] : [],
+      },
+    };
+  }
+
+  function setup(applications: ReturnType<typeof application>[]) {
+    const findMany = vi.fn(async () => applications);
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      shift: { findFirst: vi.fn(async () => shift) },
+      shiftAssignment: { findMany: vi.fn(async () => []) },
+      shiftApplication: { findMany },
+    };
+    return { service: new DatabaseBusinessService(prisma as never), findMany };
+  }
+
+  it('marks hasCv only when the CV exists, the profile is visible and the application is still active', async () => {
+    const { service } = setup([
+      application('pending-ok', 'PENDING', { profile: { isVisible: true }, cv: true }),
+      application('accepted-ok', 'ACCEPTED', { profile: { isVisible: true }, cv: true }),
+      application('hidden', 'PENDING', { profile: { isVisible: false }, cv: true }),
+      application('no-profile', 'PENDING', { profile: null, cv: true }),
+      application('no-cv', 'PENDING', { profile: { isVisible: true }, cv: false }),
+      application('rejected', 'REJECTED', { profile: { isVisible: true }, cv: true }),
+      application('withdrawn', 'WITHDRAWN', { profile: { isVisible: true }, cv: true }),
+      application('cancelled', 'CANCELLED', { profile: { isVisible: true }, cv: true }),
+    ]);
+
+    const result = (await service.listShiftApplications(session, 'shift-1')) as Array<{ id: string; worker: { hasCv: boolean } }>;
+
+    expect(Object.fromEntries(result.map((item) => [item.id, item.worker.hasCv]))).toEqual({
+      'pending-ok': true,
+      'accepted-ok': true,
+      hidden: false,
+      'no-profile': false,
+      'no-cv': false,
+      rejected: false,
+      withdrawn: false,
+      cancelled: false,
+    });
+  });
+
+  it('never leaks the profile visibility or the document rows, only the boolean', async () => {
+    const { service } = setup([application('a', 'PENDING', { profile: { isVisible: true }, cv: true })]);
+
+    const [item] = (await service.listShiftApplications(session, 'shift-1')) as Array<{ worker: Record<string, unknown> }>;
+
+    expect(Object.keys(item.worker).sort()).toEqual(['email', 'hasCv', 'id', 'identifier', 'name']);
+  });
+
+  it('resolves every applicant in a single query, selecting only the id of the CV row (no file, no N+1)', async () => {
+    const { service, findMany } = setup([
+      application('a', 'PENDING', { profile: { isVisible: true }, cv: true }),
+      application('b', 'PENDING', { profile: { isVisible: true }, cv: true }),
+      application('c', 'PENDING', { profile: { isVisible: true }, cv: true }),
+    ]);
+
+    await service.listShiftApplications(session, 'shift-1');
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    const args = findMany.mock.calls[0] as unknown as [{ include: { worker: { select: Record<string, unknown> } } }];
+    expect(args[0].include.worker.select.documents).toEqual({ where: { kind: 'CV' }, select: { id: true } });
+    expect(args[0].include.worker.select.talentProfile).toEqual({ select: { isVisible: true } });
   });
 });

@@ -85,7 +85,7 @@ Cada creación, edición o eliminación de un turno notifica inmediatamente al f
 
 ### Postulaciones y decisión de la empresa
 
-- `GET /api/business/shifts/:id/applications`: postulaciones del turno, con el mismo `nextAction` que ve el trabajador. Cada postulación aceptada incluye su `assignment` completo (`id`, `status` -también `NO_SHOW`/`ABANDONED`-, `workerConfirmedAt`, `checkedInAt`, `checkedOutAt`); el panel web usa `assignment.status` y `assignment.id` para ofrecer el cierre manual (ver "Interfaz del panel web para `resolve`" más abajo).
+- `GET /api/business/shifts/:id/applications`: postulaciones del turno, con el mismo `nextAction` que ve el trabajador. Cada postulación aceptada incluye su `assignment` completo (`id`, `status` -también `NO_SHOW`/`ABANDONED`-, `workerConfirmedAt`, `checkedInAt`, `checkedOutAt`); el panel web usa `assignment.status` y `assignment.id` para ofrecer el cierre manual (ver "Interfaz del panel web para `resolve`" más abajo). `worker` trae `{ id, name, email, identifier, hasCv }` y nada más: `hasCv` es un booleano que ya aplica toda la regla de acceso al CV (ver "CV de un postulante" abajo), no el archivo ni su nombre ni su tamaño. La visibilidad del perfil y las filas de documento se leen para calcularlo, pero nunca salen en la respuesta.
 - `GET /api/business/applications/pending`: total y turnos con postulaciones `PENDING` de la empresa.
 - `PATCH /api/business/shifts/:id/applications/:applicationId`: decide una postulación `PENDING`. Cuerpo `{ "decision": "ACCEPTED" | "REJECTED", "reason"?: "…" }` (`reason` obligatorio si `decision` es `REJECTED`, opcional en `ACCEPTED`).
 
@@ -94,6 +94,26 @@ Aceptar crea la asignación (`ShiftAssignment`) dentro de una transacción `Seri
 Cada asignación recibe su propia credencial de check-in aleatoria (`checkInCredential`), generada con `crypto.randomBytes` y sin relación con `shiftId`, `workerId` ni ningún otro dato del turno. Antes, la credencial se derivaba solo de `shiftId`, así que un turno con `requiredWorkers > 1` dejaba a todas sus asignaciones compartiendo literalmente la misma credencial; cada trabajador de un turno multi-cupo recibe ahora una credencial distinta e impredecible a partir de la del resto.
 
 `checkInCredential` **no es hoy una prueba de presencia**: el propio trabajador la recibe del servidor en `GET /api/workers/applications` (`assignment.checkInCredential`) y en `GET /api/workers/active-shift`, y `POST /api/shifts/:id/check-in` resuelve la asignación por el `workerId` de la sesión, no por la credencial. Sirve para que el trabajador y la persona de la sede comparen un mismo código en el momento del ingreso, y para que ese código no se repita entre cupos del mismo turno. No tiene expiración ni rotación, y el endpoint de check-in no aplica límite de intentos; endurecerla (expiración, rotación, prueba real de presencia) sigue pendiente en el bloque "Endurecer asistencia" de `docs/product/project-master-plan.md`.
+
+### CV de un postulante (lectura de la empresa)
+
+- `GET /api/business/shifts/:id/applications/:applicationId/cv` (sesión `BUSINESS`): devuelve el PDF que subió el trabajador con `PUT /api/workers/me/cv`. Solo lectura, un archivo por petición y siempre con la cabecera `Authorization: Bearer`; no existe ninguna URL pública ni firmada del CV.
+
+Regla de acceso (una sola implementación, `apps/api/src/modules/talent/cv_access.ts`, compartida por esta descarga y por `hasCv` de la lista de postulantes, de modo que nunca discrepan). La empresa ve el CV solo si se cumplen **las dos** condiciones:
+
+1. El trabajador tiene una postulación **vigente** (`PENDING` o `ACCEPTED`) a un turno **de esa empresa** (`shift.company.ownerId` = usuario de la sesión). `REJECTED`, `WITHDRAWN` y `CANCELLED` retiran el acceso.
+2. Su `WorkerTalentProfile` existe y tiene `isVisible: true`. Un perfil oculto o inexistente nunca expone el CV, aunque exista la postulación.
+
+La regla se evalúa en cada petición: ocultar el perfil o rechazar la postulación retira el acceso de inmediato, sin trabajo diferido. El CV **no** se expone en el directorio (`GET /api/business/talent`) ni en ninguna otra respuesta; solo `GET /api/workers/me/cv/download` (el propio trabajador) y esta ruta entregan bytes.
+
+Respuestas:
+
+- `200`: `Content-Type: application/pdf` fijo (no el `mediaType` guardado), `Content-Disposition: inline; filename*=UTF-8''…` con el nombre —que controla el trabajador— codificado también en `'`, `(`, `)` y `*`, `X-Content-Type-Options: nosniff` y `Cache-Control: private, no-store`.
+- `401` sin sesión o con token inválido; `403 BUSINESS_ACCOUNT_REQUIRED` para cualquier sesión `WORKER`, incluido el dueño del CV (esa ruta es `GET /api/workers/me/cv/download`).
+- `404 APPLICATION_NOT_FOUND`: la postulación no existe, no pertenece a un turno de esta empresa o se consulta bajo otro `:id` de turno. Misma respuesta en los tres casos, para no permitir enumeración.
+- `404 CV_NOT_AVAILABLE`: la postulación sí es de esta empresa pero el archivo no se entrega (no hay CV, el perfil está oculto o no existe, la postulación ya no está vigente, o el archivo falta en el almacenamiento privado). La respuesta es deliberadamente uniforme para no revelar que un perfil oculto tiene CV.
+
+Límites vigentes: no hay bitácora de accesos (no se registra quién abrió qué CV ni cuándo), no hay límite de tasa en esta ruta, no hay caducidad del acceso mientras la postulación siga vigente, y el PDF solo se valida por la firma `%PDF-` en la carga (sin antimalware ni comprobación de estructura). El consentimiento es grueso: `isVisible` gobierna a la vez el directorio y el CV; no existe una bandera propia del CV.
 
 ### Ciclo de vida de una asignación: `NO_SHOW` y `ABANDONED`
 
@@ -229,7 +249,7 @@ Estados: `AVAILABLE`, `ON_SHIFT`, `UNAVAILABLE`.
 
 `completion` (en ambas respuestas) se calcula sobre 13 señales de contenido con el mismo peso: `headline`, `bio`, `district`, `availabilityText`, `availabilityDays`, `availabilityPeriods`, `specialties`, CV, foto, radio/distritos de trabajo, experiencia, certificaciones e idiomas. Un perfil con las 13 señales completas llega a 100%; uno sin ninguna, a 0%. (Antes de este alcance el divisor estaba fijo en 9 con un máximo real de 8 señales, por lo que nunca podía llegar a 100%; queda corregido.)
 - `PUT /api/workers/me/cv`: carga o reemplaza el CV privado. Recibe un cuerpo PDF de hasta 5 MB, `Content-Type: application/pdf` y el encabezado `X-File-Name` codificado. Devuelve el perfil actualizado.
-- `GET /api/workers/me/cv/download`: descarga el PDF únicamente para el trabajador autenticado; usa `Cache-Control: private, no-store`.
+- `GET /api/workers/me/cv/download`: descarga el PDF del trabajador autenticado (`Content-Disposition: attachment`, `Cache-Control: private, no-store`). Una sesión `BUSINESS` recibe `403`. **Ya no es el único acceso al CV**: la empresa dueña de un turno puede leerlo desde `GET /api/business/shifts/:id/applications/:applicationId/cv` cuando se cumple la regla descrita en "CV de un postulante (lectura de la empresa)".
 - `PUT /api/workers/me/photo`: carga o reemplaza una foto privada de perfil JPG, PNG o WebP de hasta 3 MB. Exige `X-File-Name` y devuelve el perfil actualizado.
 - `GET /api/workers/me/photo`: devuelve la foto solo al trabajador autenticado, con `Cache-Control: private, no-store`.
 - `GET /api/specialties`: catálogo activo de especialidades.

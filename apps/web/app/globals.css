@@ -52,9 +52,13 @@ button { cursor: pointer; }
   to { opacity: 1; }
 }
 
+/* El pulso solo anima `transform` y `opacity` (los ejecuta el compositor, sin
+   tocar el hilo principal). Antes animaba `box-shadow`, que obligaba a
+   recalcular estilos y repintar en cada fotograma, incluso con la pantalla
+   quieta. 17 / 7 = 2.4286 reproduce el aro de 5 px de la sombra anterior. */
 @keyframes cn-notification-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(217, 52, 75, .22); }
-  50% { box-shadow: 0 0 0 5px rgba(217, 52, 75, 0); }
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(2.4286); opacity: 0; }
 }
 
 .app-shell { min-height: 100vh; display: flex; }
@@ -106,7 +110,10 @@ button { cursor: pointer; }
 .icon-button:hover { border-color: var(--teal); background: var(--teal-soft); }
 .icon-button:hover { transform: translateY(-1px); box-shadow: 0 7px 16px rgba(26, 43, 74, .08); }
 .icon-button:active { transform: scale(.96); }
-.notification-dot { width: 7px; height: 7px; background: var(--danger); border: 2px solid white; border-radius: 999px; position: absolute; top: 9px; right: 9px; animation: cn-notification-pulse 2.4s ease-in-out infinite; }
+.notification-dot { width: 7px; height: 7px; border-radius: 999px; position: absolute; top: 9px; right: 9px; }
+.notification-dot::before, .notification-dot::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.notification-dot::after { background: var(--danger); border: 2px solid white; }
+.notification-dot::before { background: rgba(217, 52, 75, .22); opacity: 0; will-change: transform, opacity; animation: cn-notification-pulse 2.4s ease-in-out infinite; }
 .primary-button, .secondary-button { min-height: 44px; border-radius: 12px; padding: 0 16px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; font-size: 12px; font-weight: 800; transition: transform var(--motion-fast) var(--ease-out), background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease; }
 .primary-button { border: 1px solid var(--teal); background: var(--teal); color: var(--navy); }
 .primary-button:hover { background: #00b889; border-color: #00b889; }
@@ -766,6 +773,11 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 .application-copy .next-action { color: #35506f; font-weight: 700; margin-top: 3px; }
 .application-copy .next-action.business { color: #9b6400; }
 .application-copy .next-action.worker { color: #007f69; }
+.applicant-cv { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; }
+.applicant-cv-button { min-height: 36px; padding: 0 12px; }
+.applicant-cv-button[aria-disabled="true"] { cursor: progress; opacity: .7; }
+.applicant-cv-note { color: var(--muted, #718096); font-size: 11px; }
+.applicant-cv-error { flex-basis: 100%; margin: 0; color: var(--danger); font-size: 12px; font-weight: 700; }
 .screening-answers { display: grid; gap: 8px; margin: 12px 0 0; }
 .screening-answers div { border-left: 2px solid var(--gold, #d6a84b); padding-left: 10px; }
 .screening-answers dt { color: var(--muted, #667085); font-size: 11px; font-weight: 700; }

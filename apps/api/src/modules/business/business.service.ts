@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import type { AuthSession } from '../auth/auth.service.js';
+import { companyCanViewApplicantCv } from '../talent/cv_access.js';
 import { deriveShiftStatus, isTerminalShift, nextOperationalAction, resolveAssignmentLifecycle } from '../operations/shift-state.js';
 
 /**
@@ -217,11 +218,26 @@ export class DatabaseBusinessService implements BusinessOperations {
     const { shift } = await this.resolveShiftAssignmentsLifecycle(owned);
     const applications = await this.prisma.shiftApplication.findMany({
       where: { shiftId: shift.id },
-      include: { worker: { select: { id: true, name: true, email: true, identifier: true } }, assignment: true },
+      include: {
+        worker: {
+          select: {
+            id: true, name: true, email: true, identifier: true,
+            // Solo para calcular `hasCv`; ni la visibilidad ni el documento
+            // salen en la respuesta (el CV se pide bajo demanda aparte).
+            talentProfile: { select: { isVisible: true } },
+            documents: { where: { kind: 'CV' }, select: { id: true } },
+          },
+        },
+        assignment: true,
+      },
       orderBy: { createdAt: 'asc' },
     });
-    return applications.map((application) => ({
+    return applications.map(({ worker: { talentProfile, documents, ...worker }, ...application }) => ({
       ...application,
+      worker: {
+        ...worker,
+        hasCv: documents.length > 0 && companyCanViewApplicantCv({ applicationStatus: application.status, profileIsVisible: talentProfile?.isVisible }),
+      },
       nextAction: nextOperationalAction({
         shiftStatus: shift.status,
         applicationStatus: application.status,

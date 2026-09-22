@@ -73,11 +73,14 @@ Objetivo: eliminar ambigüedades entre demo y producto real antes de seguir ampl
   `flutter analyze` no reporta ningún error. Al cierre de `CN-20260916-093` quedaban 15
   avisos `info` de estilo, dos de ellos en `worker_pages.dart`; tras eliminar ese archivo
   en `CN-20260918-007` son 11 (`curly_braces_in_flow_control_structures` ×10 y
-  `unnecessary_to_list_in_spreads` ×1), verificados en la auditoría `CN-20260918-008`. En
+  `unnecessary_to_list_in_spreads` ×1), verificados en la auditoría `CN-20260918-008`; desde
+  `CN-20260921-007` son 10, porque ese aviso `unnecessary_to_list_in_spreads` desapareció al
+  reescribir la lista de "Mis postulaciones" (medido en `CN-20260921-008`). En
   esa misma foto de `CN-20260916-093`,
   `flutter test` (67/67), la suite de la API (113/113) y la prueba vertical de
-  integración contra PostgreSQL real (2/2) pasaban; los totales vigentes al 2026-09-18
-  son 88/88 en Flutter y 156/156 en la API. **Pendiente:** ninguna corrida de
+  integración contra PostgreSQL real (2/2) pasaban; los totales al 2026-09-18
+  eran 88/88 en Flutter y 156/156 en la API (los vigentes están más abajo, en el ciclo de
+  simplificación radical: 114/114 y 190/190). **Pendiente:** ninguna corrida de
   GitHub Actions ha ocurrido todavía porque el árbol de trabajo, incluido `.github/`,
   no está versionado; hay que confirmar la primera ejecución remota tras el commit.
 
@@ -326,9 +329,14 @@ Objetivo: preparar acceso real y documentos privados sin degradar seguridad.
   filtran secretos.
 - **Carga privada de CV y foto (P1, piloto local completado).** CV PDF de hasta
   5 MB y foto JPG/PNG/WebP de hasta 3 MB se almacenan fuera de recursos estáticos;
-  PostgreSQL conserva sólo metadatos y una clave, y únicamente el trabajador
-  autenticado puede descargarlos. Pendiente: almacenamiento de objetos, hash,
-  antivirus/cuarentena, descarga temporal y eliminación auditada.
+  PostgreSQL conserva sólo metadatos y una clave. La **foto** solo la descarga el
+  trabajador autenticado. El **CV**, desde `CN-20260921-005`, lo lee también la
+  empresa dueña del turno al que ese trabajador se postuló, mientras la postulación
+  siga vigente y el perfil esté visible (ver arriba y `docs/reference/api.md`).
+  Pendiente: almacenamiento de objetos, hash, antivirus/cuarentena, descarga
+  temporal, caducidad y eliminación auditada; bitácora de accesos al CV; límite de
+  tasa en la ruta de lectura; y un consentimiento explícito por documento
+  (`isCvVisible`) en lugar del `isVisible` general del perfil.
   Implementar carga mediante URL firmada, límites, antivirus/cuarentena, descarga
   temporal y eliminación. Cierre: el CV nunca es público y una empresa solo accede
   con consentimiento y relación vigente.
@@ -613,8 +621,9 @@ esperar la decisión pendiente sobre el modelo económico real. El plan está en
 `.claude/plans/2026-09-18-cierre-brechas-flujo-simple.md`; cada cierre y su auditoría
 están en `docs/PROGRESO.md`.
 
-Cambios cerrados y auditados (comiteados en la rama, salvo `CN-20260920-001`,
-`CN-20260920-003` y `CN-20260920-005`, que siguen en el árbol de trabajo, sin comitear):
+Cambios cerrados y auditados (todos comiteados en la rama hasta `efc4182`, salvo
+`CN-20260921-001`, `CN-20260921-003`, `CN-20260921-005` y `CN-20260921-007`, que siguen en
+el árbol de trabajo, sin comitear):
 
 - **Check-in y check-out** (`CN-20260918-001` a `004`): credencial aleatoria por asignación,
   ventana de tiempo, estados `NO_SHOW` y `ABANDONED` resueltos al leer, cierre manual
@@ -649,11 +658,121 @@ Cambios cerrados y auditados (comiteados en la rama, salvo `CN-20260920-001`,
   por `assignmentId: null`, que también puede escribir un trabajador—, uno con `endsAt`
   futuro y el cierre sin pago nunca lo reabren. El aviso del panel explica todos los casos
   sin prometer el resultado.
+- **Costo de render del panel en reposo** (`CN-20260921-001`): el pulso del punto de
+  notificaciones animaba `box-shadow`, que obliga a recalcular estilos y repintar en cada
+  fotograma; ahora son dos pseudo-elementos y solo se animan `transform` y `opacity`. Y
+  los cuatro sondeos de 4 s guardaban arreglos u objetos nuevos pero idénticos, lo que
+  volvía a renderizar el panel entero (un solo componente) sin cambio visible; con
+  `apps/web/lib/stable-state.ts` el estado conserva la referencia anterior cuando el
+  contenido es igual. Medido con el panel quieto 20 s: Turnos pasó de 10 confirmaciones de
+  render y 1 413 ms de hilo principal a 0 y 79 ms; Mensajes de 15 y 1 160 ms a 0 y 92 ms;
+  Pagos de 10 y 1 753 ms a 0 y 57 ms. Cubierto por `apps/web/e2e/render-cost.spec.ts`. No
+  cambia comportamiento de producto, copy ni contratos. **Esto no atiende ninguna queja de
+  "cambio claro/oscuro": el panel web no tiene modo oscuro ni interruptor de tema** (no hay
+  `prefers-color-scheme`, `data-theme` ni clase de tema en `apps/web/app/globals.css`); el
+  único modo oscuro del repositorio es el del panel de trabajador en Flutter
+  (`apps/mobile_flutter/lib/theme/theme_mode_controller.dart`), que este cierre no tocó;
+  su rendimiento se midió y corrigió aparte, en `CN-20260921-003` (siguiente viñeta).
+- **Costo del cambio claro/oscuro en la app del trabajador** (`CN-20260921-003`): el
+  interruptor `Modo oscuro` aplicaba el tema con un `AnimatedTheme` de 220 ms, así que
+  cada uno de ~14 fotogramas construía un `ThemeData` interpolado y notificaba a todo
+  widget que lee `Theme.of`/`context.palette`; como el `IndexedStack` del panel mantiene
+  las cinco pestañas montadas y no silencia los tickers de las ocultas, también se
+  reconstruían las cuatro pestañas invisibles. Ahora el tema se aplica en un fotograma
+  (`Theme` en vez de `AnimatedTheme`), cada página del `IndexedStack` va envuelta en un
+  `TickerMode` activo solo para la pestaña visible, y `buildAppTheme` está memoizado por
+  `(Brightness, defaultTargetPlatform)`. Medido con `flutter test` (modo depuración,
+  `MediaQuery` 390 × 844) y reproducido en la auditoría `CN-20260921-004`: desde `Inicio`,
+  28 fotogramas y 26 348 reconstrucciones de elementos por cambio pasaron a 14 y 3 254;
+  desde `Perfil`, a 20 y 3 581; construir el `ThemeData` bajó de ~661 µs a 12-13 µs por
+  llamada. Cubierto por `apps/mobile_flutter/test/theme_switch_cost_test.dart` (6 casos).
+  **Cambio visible:** los colores ya no se funden, cambian de golpe; solo el ícono del
+  interruptor conserva su animación de 220 ms. Falta medir en un dispositivo real en modo
+  `--profile` (ver "Sin verificar de extremo a extremo").
+- **La empresa puede leer el CV de sus postulantes** (`CN-20260921-005`): endpoint nuevo
+  `GET /api/business/shifts/:id/applications/:applicationId/cv` (solo lectura, sesión
+  `BUSINESS`, sin URL pública) y un booleano `worker.hasCv` en la lista de postulantes; el
+  archivo se pide bajo demanda al pulsar "Ver CV". La regla de acceso vive una sola vez en
+  `apps/api/src/modules/talent/cv_access.ts` y la comparten la lista y la descarga:
+  postulación **vigente** (`PENDING`/`ACCEPTED`) a un turno **de esa empresa** **y** perfil
+  con `isVisible: true`, evaluado en cada petición. El directorio de talento sigue sin
+  exponer el CV. Sin cambios de esquema ni dependencias nuevas. Se corrigió además el copy
+  de Flutter, que prometía "solo tú puedes acceder a este documento". Detalle en
+  `docs/reference/api.md` y `docs/product/talent-profile-rollout.md`. **Pendientes asumidos
+  para el piloto:** consentimiento grueso (no existe una bandera propia `isCvVisible`:
+  `isVisible` gobierna a la vez directorio y CV, y quien oculta el perfil tampoco puede
+  compartir el CV con la empresa a la que se postuló), sin bitácora de accesos, sin
+  caducidad mientras la postulación siga vigente, sin límite de tasa en esa ruta y PDF sin
+  verificar (solo la firma `%PDF-` al cargarlo; sin antimalware). La decisión entre
+  implementar `isCvVisible` o mantener esta política está abierta.
+- **"Mis postulaciones" (Flutter) deja de parpadear con su sondeo** (`CN-20260921-007`):
+  la pestaña refrescaba cada 3 s asignando un `Future` nuevo a un `FutureBuilder`, que
+  volvía a `ConnectionState.waiting` y **reemplazaba toda la lista por un
+  `CircularProgressIndicator`** durante los dos viajes de red de la recarga (hasta 8 s de
+  tiempo límite cada uno), con pérdida de la posición de scroll. Ahora el estado es
+  explícito (`_data`, nulo solo hasta la primera carga): el refresco es silencioso,
+  conserva lo que se ve, solo reconstruye si los datos cambiaron (`Shift` y
+  `_ApplicationsData` comparan por valor; el orden de las tarjetas cuenta como cambio), no
+  solapa peticiones, descarta una respuesta vieja frente a una recarga más nueva y se
+  pausa mientras la pestaña está oculta (`TickerMode`, refrescando al reaparecer). Un
+  refresco fallido conserva la lista y muestra un aviso discreto **desde el segundo fallo
+  consecutivo** ("No pudimos actualizar tus postulaciones. Reintentaremos en unos
+  segundos."); solo la primera carga y su "Reintentar" muestran indicador. Sin cambios de
+  API, de contrato, de intervalo ni dependencias nuevas. **El panel web no tenía el
+  síntoma** (su `applicationsLoading` solo se enciende al abrir el turno): no se tocó su
+  código de producción y un caso nuevo de `render-cost.spec.ts` fija esa conclusión con un
+  `MutationObserver` sobre el DOM real. Cubierto por
+  `apps/mobile_flutter/test/worker_applications_refresh_test.dart` (15 casos) y una prueba
+  de igualdad de `Shift`. **Pendientes que este cierre no atiende** (ver la lista de
+  pendientes, puntos 2 y 3): entrar a la pestaña sigue mostrando el indicador una vez,
+  "Conversaciones" pinta un fotograma de indicador en cada sondeo, el sondeo web que falla
+  con datos en pantalla sigue vaciando la lista, y el sondeo no se pausa cuando la
+  aplicación pasa a segundo plano.
+- **Filtros del trabajador legibles en modo oscuro** (`CN-20260921-009`): los seis
+  desplegables de la hoja "Filtros de búsqueda" (`_FilterDropdown`,
+  `lib/features/discovery/widgets/job_filter_controls.dart`) pintaban su caja con
+  `Colors.white` fijo mientras el valor seleccionado toma `textTheme.titleMedium` (el
+  `ink` casi blanco de la paleta oscura) y la flecha el `white70` propio de Flutter: texto
+  casi blanco sobre blanco. Medido sobre los píxeles rasterizados en la auditoría
+  `CN-20260921-010`, el texto pasó de **1,13:1 a 14,91:1** en oscuro (la flecha, de 1,00:1
+  a 8,84:1). El campo de búsqueda, los chips y los campos de perfil/mensajes **no** tenían
+  el defecto: heredan `inputDecorationTheme`/`chipTheme`, que ya usaban la paleta. En el
+  mismo pase se corrigieron dos síntomas del mismo tipo: el aviso de error bajo los
+  filtros (fondo ámbar fijo `#FFF4E5`) heredaba el texto `muted` claro del tema oscuro
+  (2,15:1 → 12,98:1 con el token nuevo `onNotice`), y el borde de campos y chips era el
+  hairline decorativo (1,33:1 → 3,59:1 con el token nuevo `controlBorder`, `#69748A`).
+  **Cambio visible más allá del síntoma:** `controlBorder` aclara el contorno de **todos**
+  los campos y chips del trabajador en oscuro (búsqueda, perfil, mensajes), no solo los
+  filtros; el modo claro conserva el mismo hairline `#D9E2EC` y la app de empresa, la
+  bienvenida y el inicio de sesión no se ven afectados porque están fijados en claro
+  (`dark_theme_scope_test.dart`). Cubierto por
+  `apps/mobile_flutter/test/worker_filter_contrast_test.dart` (18 casos que miden razones
+  de contraste WCAG sobre el árbol renderizado, no colores fijos).
+  **Deuda de contraste que este cierre no atiende** (medida en la auditoría
+  `CN-20260921-010`, ninguna es regresión de este cambio): en **oscuro**, la insignia
+  "Postulación enviada" (`#4F46E5` sobre su propio relleno al 12 %, `worker_secondary_pages.dart`
+  y `worker_invitations_page.dart`) queda en **2,46:1** —el peor valor vivo del panel
+  oscuro—, la insignia "URGENTE" de la tarjeta en 3,33:1, las insignias que usan
+  `AppColors.muted` en 3,63:1, "EN VIVO" en 3,94:1 y el ícono blanco sobre relleno teal
+  (`_JourneyStep`) en 2,16:1; en **claro**, las insignias "En revisión" (1,77:1) y
+  "Seleccionado" (1,95:1), el hint/etiqueta `muted` (4,02:1 sobre blanco, 3,74:1 sobre el
+  fondo de página), el hairline de campos y chips (1,31:1) y el borde de foco teal
+  (2,16:1). El patrón dominante en las insignias es el mismo: un color de marca fijo
+  pintado sobre su propio relleno al 12 %, cuya legibilidad cambia con la superficie de
+  debajo (el violeta y el rojo se leen peor en oscuro; el dorado y el teal, peor en
+  claro). Ninguna de esas insignias está cubierta por pruebas de contraste.
 
-Validación al cierre: API 173/173 y Playwright rápido 68/68 (medidos en
-`CN-20260920-006`), Flutter 89/89 (medido en `CN-20260918-012`; ningún cierre posterior
-toca `apps/mobile_flutter`). La integración PostgreSQL 3/3 y la suite real del panel 3/3
-**se ejecutaron en `CN-20260920-007`** con las aserciones vigentes, sobre la base
+Validación al cierre: API 190/190 y Playwright rápido 90/90 (medidos y reproducidos en la
+auditoría `CN-20260921-008`; eran 173/173 y 72/72 antes de los 17 casos de API, los 8
+casos × 2 proyectos de `applicant-cv.spec.ts` y el caso nuevo × 2 de `render-cost.spec.ts`),
+Flutter 132/132 (medidos en la auditoría `CN-20260921-010`; eran 114/114 en
+`CN-20260921-008`, antes de los 18 casos de `worker_filter_contrast_test.dart`, y 98/98
+tras `CN-20260921-005`, antes de los 15 casos de `worker_applications_refresh_test.dart` y
+el de igualdad de `Shift`) e integración PostgreSQL 8/8
+(3 de siempre + 5 de `applicant-cv.integration.test.ts`, ejecutadas en esa auditoría sobre
+la base desechable `chambeaya_test` del contenedor `cumplenow-db-1`; `prisma migrate
+deploy`: 24 migraciones, ninguna pendiente). La suite real del panel 3/3
+**se ejecutó en `CN-20260920-007`** con las aserciones vigentes, sobre la base
 desechable `chambeaya_test` del contenedor `cumplenow-db-1` (`prisma migrate deploy`:
 24 migraciones, ninguna pendiente; la base de desarrollo no se tocó). Con eso queda
 cerrado el riesgo que `CN-20260920-003`, `005` y `006` declaraban como
@@ -672,7 +791,24 @@ Pendientes conocidos, por prioridad sugerida:
    que el estado no refleja que un cupo sí se trabajó. También `cancelShift` deja una
    asignación `NO_SHOW` resoluble sobre un turno cancelado. Resolverlo de raíz exige tocar
    `deriveShiftStatus`.
-2. **`resolutionBusy` no se libera con una petición colgada** (BAJO-1 de `CN-20260920-002`,
+2. **Indicadores de carga que todavía parpadean** (pendientes declarados en
+   `CN-20260921-007` y confirmados en su auditoría `CN-20260921-008`): (a) entrar a la
+   pestaña "Postulaciones" de Flutter la reconstruye desde cero —`WorkerShell` la monta con
+   `ValueKey(_applicationRevision)` como refresco manual—, así que muestra el indicador a
+   pantalla completa una vez por entrada (ya no cada 3 s); ahora que la página sabe
+   refrescarse en silencio, pasar la revisión como propiedad y recargar en
+   `didUpdateWidget` quitaría ese último parpadeo. (b) "Conversaciones"
+   (`WorkerMessagesPage`) sí pinta un fotograma de indicador en cada sondeo de 4 s, porque
+   asigna `Future.value(...)` dentro de `setState` y el `FutureBuilder` vuelve a `waiting`
+   hasta que la microtarea resuelve, ya pintado el fotograma; se arregla con
+   `SynchronousFuture` (una línea) o migrando al patrón de estado explícito de
+   "Postulaciones". (c) En el panel web, un sondeo de postulaciones que **falla** con datos
+   en pantalla vacía la lista y muestra el error (`apps/web/app/page.tsx`, `catch` de
+   `refreshApplications`): no ocurre cada 4 s, pero un bache de red sí parpadea; corregirlo
+   cambia el contrato de errores de esa vista y de `assignment-resolution.spec.ts`. (d) El
+   sondeo de Flutter se pausa con la pestaña oculta, pero **no** con la aplicación en
+   segundo plano (no hay `AppLifecycleState`).
+3. **`resolutionBusy` no se libera con una petición colgada** (BAJO-1 de `CN-20260920-002`,
    causa raíz preexistente): `submitResolution` es el único sitio que lo pone a `false` y
    `request()` de `apps/web/lib/business-api.ts` no usa `AbortSignal` ni timeout, así que
    una lectura del refresco que nunca responde deja la confirmación fija en "Guardando…"
@@ -682,7 +818,7 @@ Pendientes conocidos, por prioridad sugerida:
    un timeout en `request()`. Del mismo cierre siguen abiertos BAJO-2 (`decideApplication`
    no comprueba `selectedShiftIdRef` antes de aplicar la respuesta) y BAJO-3 (el estado
    "Guardando…" no tiene región `aria-live`).
-3. **Garantías declaradas de la transacción de `resolveAssignment`** (BAJO-1 y BAJO-2 de
+4. **Garantías declaradas de la transacción de `resolveAssignment`** (BAJO-1 y BAJO-2 de
    `CN-20260920-004`): `cancelShift` abre su `$transaction` sin `isolationLevel`, así que
    la lectura de `ShiftCancellation` dentro de la transacción `Serializable` de
    `resolveAssignment` no está aislada por el motor frente a una cancelación concurrente
@@ -690,24 +826,24 @@ Pendientes conocidos, por prioridad sugerida:
    detecta y el reintento ve la cancelación); y `current` se calcula fuera de
    `withSerializableRetry`, de modo que un reintento reejecuta el cuerpo con el mismo
    `current.status`/`current.endsAt`.
-4. **La credencial de check-in no prueba presencia** (`CN-20260918-002`): no expira, no
+5. **La credencial de check-in no prueba presencia** (`CN-20260918-002`): no expira, no
    rota, no limita intentos y no hay geolocalización ni cámara.
-5. **Copy de piloto residual** (`CN-20260918-012`): con un plan que no es el piloto
+6. **Copy de piloto residual** (`CN-20260918-012`): con un plan que no es el piloto
    (`PRO`, `CUSTOM` o piloto vencido o pausado) `MembershipView` sigue hablando del
    piloto, y la vista Pagos dice "queda fuera del piloto" incluso sin plan. Solo es
    alcanzable con una fila creada a mano: no existe endpoint de activación de plan.
-6. **Filas `CompanySubscription` `TRIAL` fantasma** creadas antes de `CN-20260918-005`:
+7. **Filas `CompanySubscription` `TRIAL` fantasma** creadas antes de `CN-20260918-005`:
    no hay criterio seguro para distinguirlas de una activación manual (ver la consulta de
    solo lectura en `docs/reference/api.md`). Limpiarlas exige una columna de origen.
-7. **Nombres que evocan custodia**: `WalletMovement`, `/api/workers/wallet` y los estados
+8. **Nombres que evocan custodia**: `WalletMovement`, `/api/workers/wallet` y los estados
    `RELEASED`/`REVERSED` se conservaron a propósito; renombrarlos depende de la decisión
    de modelo económico pendiente.
-8. **Higiene**: `apps/api/scripts/e2e-serve.ts` viaja en la imagen de producción (no es
+9. **Higiene**: `apps/api/scripts/e2e-serve.ts` viaja en la imagen de producción (no es
    explotable: exige una base terminada en `_test`); el botón "Actualizar mensajes" no
    reacciona si ya hay un sondeo en curso; el reintento de descubrimiento se rotula
    "Limpiar filtros"; `CONTEXTO_TESIS.md` (documento externo) aún menciona
    `worker_pages.dart`.
-9. **Fuera de este ciclo**: la duplicación `CompanyWorkerContact` frente a
+10. **Fuera de este ciclo**: la duplicación `CompanyWorkerContact` frente a
    `WorkerTalentProfile` y el rediseño de `main.dart` (inyección de dependencias, tema y
    sesión).
 
@@ -716,7 +852,23 @@ simultáneas, multi-cupo contra base real, la cancelación de la empresa con `ca
 seguida de `resolve` contra base real (la corrida de `CN-20260920-007` solo ejerce el
 camino en que **no** existe el `ShiftCancellation` con `actorRole: BUSINESS`),
 `demo:seed`/`demo:smoke` con estos cambios, la app Flutter contra una API real y en
-dispositivo, y la pantalla web en un móvil físico.
+dispositivo, y la pantalla web en un móvil físico. De `CN-20260921-005` falta además abrir
+un CV real en un navegador con visor de PDF: la prueba de Playwright sustituye
+`window.open` por una pestaña falsa y comprueba el `blob:` y su contenido, no que el visor
+lo muestre; y `npm run test:web:admin-real` no se corrió con este cambio (es aditivo en la
+respuesta de postulaciones). El cambio de copy de Flutter y el `maxLines` de la barra de
+postulación tampoco se revisaron en un dispositivo real. De `CN-20260921-007` falta la
+comprobación visual: que el parpadeo de "Mis postulaciones" desapareció a simple vista, el
+aspecto del aviso nuevo y el comportamiento con latencia de red real se fijan hoy con
+pruebas de widgets (ausencia de `CircularProgressIndicator`, identidad de los widgets entre
+ticks y offset de scroll) sobre un repositorio falso, no con una captura en un dispositivo
+o emulador. De `CN-20260921-009` falta verlo en Chrome o en un dispositivo real: la
+auditoría `CN-20260921-010` sí rasterizó la hoja de filtros dentro de `flutter test`
+(`RenderRepaintBoundary.toImage`, leyendo los píxeles uno a uno: 1,13:1 antes y 14,91:1
+después en oscuro, 14,11:1 sin cambio en claro), pero con la fuente de prueba `Ahem`
+—bloques sólidos—, así que el color y la disposición quedan comprobados y la tipografía
+real no; el contorno nuevo de campos y chips en oscuro tampoco se ha juzgado a ojo en una
+pantalla real.
 
 Antes de fusionar la rama o desplegar: correr `prisma migrate deploy` sobre la base real
 del entorno (la migración `20260918120000_assignment_no_show_abandoned` es aditiva) y
@@ -744,7 +896,27 @@ queda abierto en las auditorías de este ciclo.
   reanudación SSE y flujo operacional.
 - Contratos de autorización negativos para cada rol y recurso.
 - Migración desde una copia anonimizada del esquema anterior y restauración de backup.
-- Carga/rendimiento de búsqueda, feed y operaciones críticas; accesibilidad web/móvil.
+- Carga/rendimiento de búsqueda, feed y operaciones críticas; accesibilidad web/móvil. Lo
+  único cubierto hoy es el costo de render del panel en reposo
+  (`apps/web/e2e/render-cost.spec.ts`, `CN-20260921-001`): sondeos sin cambios que no
+  vuelven a renderizar y animaciones infinitas que solo mueven `transform`/`opacity`; y el
+  costo del cambio claro/oscuro del panel de trabajador en Flutter
+  (`apps/mobile_flutter/test/theme_switch_cost_test.dart`, `CN-20260921-003`), contado en
+  fotogramas y reconstrucciones de elementos. De accesibilidad, lo único cubierto es el
+  contraste de la búsqueda y los filtros del trabajador en ambos modos
+  (`apps/mobile_flutter/test/worker_filter_contrast_test.dart`, `CN-20260921-009`): razones
+  WCAG calculadas sobre los colores efectivos del árbol renderizado, con pisos de 4,5:1
+  para texto y 3:1 para íconos y bordes en oscuro, y pisos de "no peor que hoy" en claro.
+  Fuera de esa pantalla no hay ninguna comprobación de contraste: las insignias de estado
+  de postulaciones e invitaciones, el recorrido `_JourneyStep` y las pantallas de empresa,
+  bienvenida y autenticación siguen sin medirse en pruebas (los valores conocidos están en
+  la viñeta de `CN-20260921-009`). Falta medir con datos reales y volumen, en
+  navegadores distintos de Chromium, y —en Flutter— en un dispositivo o emulador real con
+  `flutter run --profile`/DevTools: `flutter test` no rasteriza, así que el costo de
+  `layout`/pintado (sombras con desenfoque, gradientes) y el comportamiento en gama baja
+  siguen sin medirse. El entorno de desarrollo actual no permite esa medición (sin Visual
+  Studio para `-d windows`, sin `cmdline-tools` de Android para un emulador; solo quedan
+  Chrome y Edge, que no representan un móvil).
 
 ## Definición de terminado por incremento
 

@@ -52,6 +52,19 @@ configura una ubicación persistente en `DOCUMENT_STORAGE_ROOT` o sustituye el
 adaptador local por almacenamiento de objetos antes de abrir el servicio al
 público.
 
+"Privado" significa que el archivo nunca es un recurso estático y que toda
+lectura exige una sesión, **no que solo lo vea el trabajador**: desde
+`CN-20260921-005` la empresa dueña de un turno puede abrir el CV de quien se
+postuló a ese turno, mientras la postulación siga `PENDING`/`ACCEPTED` y el
+perfil esté visible (`GET /api/business/shifts/:id/applications/:applicationId/cv`;
+la regla vive en `apps/api/src/modules/talent/cv_access.ts` y está descrita en
+`docs/reference/api.md`). Para probarlo en local: sube un PDF desde `Perfil` en la
+app Flutter del trabajador, postúlate a un turno de la empresa y abre
+`Turnos` → `Postulaciones` en el panel web; el botón "Ver CV" solo aparece si la
+API devolvió `worker.hasCv: true`. La demo sembrada (`npm run demo:seed`) no crea
+ningún CV, así que ese botón no aparece hasta que subas uno. No hay bitácora de
+accesos ni análisis antimalware del archivo.
+
 Google permanece inactivo hasta completar `GOOGLE_OAUTH_WEB_CLIENT_ID` en
 `.env` y registrar los dominios/redirect URI en Google Cloud. La API expone
 `GET /api/auth/providers` para comprobar la activación. El primer ingreso con

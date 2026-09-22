@@ -73,7 +73,9 @@ import {
   invalidateInFlight,
   issueRequest,
 } from "../lib/request-sequence";
+import { keepIfEqual } from "../lib/stable-state";
 import { BusinessAuth } from "../components/business-auth";
+import { ApplicantCvButton } from "../components/applicant-cv";
 import { CrudModal } from "../components/crud-modal";
 
 type ViewName =
@@ -450,7 +452,8 @@ export default function HomePage() {
     const refreshPending = async () => {
       try {
         const summary = await businessApi.applications.pending(session.token);
-        if (!cancelled) setPendingApplications(summary);
+        if (!cancelled)
+          setPendingApplications((current) => keepIfEqual(current, summary));
       } catch {
         // The next poll retries without interrupting the current view.
       }
@@ -469,7 +472,10 @@ export default function HomePage() {
     const refreshPayments = async () => {
       try {
         const records = await businessApi.payments.list(session.token);
-        if (!cancelled) setPaymentRecords(records.map(mapPayment));
+        if (!cancelled) {
+          const next = records.map(mapPayment);
+          setPaymentRecords((current) => keepIfEqual(current, next));
+        }
       } catch {
         // The main loader and the next interval will retry without interrupting
         // the payment workflow currently visible to the business.
@@ -517,7 +523,9 @@ export default function HomePage() {
         // que llega detrás de otra más nueva, traería filas obsoletas (por
         // ejemplo las acciones de una asignación que ya se resolvió).
         if (!cancelled && acceptResponse(sequence, request)) {
-          setShiftApplications(applications);
+          setShiftApplications((current) =>
+            keepIfEqual(current, applications),
+          );
           setApplicationsError(null);
           setApplicationsShiftId(selectedShiftId);
           // La API detecta `NO_SHOW`/`ABANDONED` al leer las postulaciones y,
@@ -578,7 +586,7 @@ export default function HomePage() {
         const list = await businessApi.conversations.list(session.token);
         if (cancelled) return;
         const mapped = list.map(mapConversation);
-        setConversationRecords(mapped);
+        setConversationRecords((current) => keepIfEqual(current, mapped));
         const conversationId =
           selectedConversation &&
             mapped.some((item) => item.id === selectedConversation)
@@ -591,10 +599,13 @@ export default function HomePage() {
             conversationId,
           );
           if (!cancelled) {
-            setChatMessages((current) => ({
-              ...current,
-              [conversationId]: mapMessages(full),
-            }));
+            const messages = mapMessages(full);
+            setChatMessages((current) =>
+              keepIfEqual(current[conversationId], messages) ===
+                current[conversationId]
+                ? current
+                : { ...current, [conversationId]: messages },
+            );
           }
         }
       } catch {
@@ -1734,6 +1745,14 @@ export default function HomePage() {
                             {application.worker.email ??
                               application.worker.identifier}
                           </small>
+                          {application.worker.hasCv && (
+                            <ApplicantCvButton
+                              token={session.token}
+                              shiftId={selectedShift.id}
+                              applicationId={application.id}
+                              workerName={application.worker.name}
+                            />
+                          )}
                           {isPendingClosure(application) ? (
                             // `NO_SHOW`/`ABANDONED` esperan una decisión de la
                             // empresa. El `nextAction` de la API dice "Proceso

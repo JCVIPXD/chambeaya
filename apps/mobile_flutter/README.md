@@ -35,6 +35,39 @@ workflow se activa al cambiar esta aplicación o su configuración de CI.
 La guía completa de presentación está en
 [`../../docs/guides/client-demo.md`](../../docs/guides/client-demo.md).
 
+## Tema, modo oscuro y contraste
+
+`lib/theme/app_theme.dart` separa dos cosas:
+
+- `AppColors`: colores de marca **fijos**, iguales en claro y en oscuro. Solo valen
+  como relleno de acento (con contenido claro encima) o como ícono/texto de acento
+  que ya se lee sobre ambos fondos.
+- `AppPalette` (extensión de `ThemeData`, se lee con `context.palette`): los colores
+  que **dependen de la superficie actual** — `background`, `surface`, `surfaceMuted`,
+  `border`, `controlBorder`, `ink`, `muted`, `accentSoft`, `onNotice`, `shadow`.
+
+Regla práctica: en cualquier pantalla del trabajador, un fondo de tarjeta, hoja o
+control, y el color de un texto o borde sobre ese fondo, se toman de `context.palette`
+o del tema; nunca de `Colors.white`, `Colors.grey*` ni de un literal claro. Un color
+fijo se ve bien en claro y desaparece en oscuro: fue exactamente el defecto de los
+filtros de búsqueda que corrigió `CN-20260921-009`.
+
+Dos tokens existen por razones de contraste y conviene no confundirlos:
+
+- `controlBorder` es el contorno de los controles interactivos (campos de texto,
+  chips) y debe distinguirse de su propio relleno (WCAG 1.4.11, 3:1). `border` es el
+  hairline decorativo de tarjetas y divisores y puede ser mucho más sutil. En claro
+  ambos valen lo mismo; en oscuro `controlBorder` es un tono más claro.
+- `onNotice` es el texto sobre el relleno ámbar fijo del aviso de error
+  (`#FFF4E5` en ambos modos): al ser un fondo claro siempre, el texto no puede
+  heredar el `muted` de la paleta oscura.
+
+El modo oscuro cubre **solo** el panel de trabajador. La bienvenida, el inicio de
+sesión y el panel de empresa están fijados en claro y `test/dark_theme_scope_test.dart`
+lo impide cambiar por accidente. `test/worker_filter_contrast_test.dart` mide razones
+de contraste WCAG sobre el árbol renderizado de la búsqueda y los filtros en ambos
+modos; es el lugar donde añadir una comprobación al tocar esos colores.
+
 ## Google Sign-In local
 
 Con `GOOGLE_OAUTH_WEB_CLIENT_ID` en el `.env` de la raíz, `npm run dev:mobile`

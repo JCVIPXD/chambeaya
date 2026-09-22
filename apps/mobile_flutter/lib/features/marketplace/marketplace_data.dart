@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show listEquals;
+
 enum ShiftState { published, assigned, checkedIn, completed }
 
 enum ShiftIndustry { hospitality, foodService, retail, events }
@@ -148,6 +150,65 @@ class Shift {
     paymentProtected: paymentProtected,
     endsAt: endsAt,
   );
+
+  /// Comparison by value (every field), so a screen that polls can tell "the
+  /// server sent the same thing again" from a real change without rebuilding
+  /// on each response. Nothing in the app keys a collection by `Shift` or
+  /// relies on its identity (lookups go by [id]).
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Shift &&
+          other.id == id &&
+          other.title == title &&
+          other.company == company &&
+          other.schedule == schedule &&
+          other.workerPayCents == workerPayCents &&
+          other.match == match &&
+          other.urgent == urgent &&
+          other.industry == industry &&
+          other.location == location &&
+          other.dateScope == dateScope &&
+          other.state == state &&
+          other.checkInCredential == checkInCredential &&
+          other.assignmentConfirmed == assignmentConfirmed &&
+          other.checkedIn == checkedIn &&
+          other.checkedOut == checkedOut &&
+          other.description == description &&
+          other.responsibilities == responsibilities &&
+          other.requirements == requirements &&
+          listEquals(other.screeningQuestions, screeningQuestions) &&
+          other.modality == modality &&
+          other.companyVerified == companyVerified &&
+          other.paymentProtected == paymentProtected &&
+          other.endsAt == endsAt;
+
+  @override
+  int get hashCode => Object.hashAll([
+    id,
+    title,
+    company,
+    schedule,
+    workerPayCents,
+    match,
+    urgent,
+    industry,
+    location,
+    dateScope,
+    state,
+    checkInCredential,
+    assignmentConfirmed,
+    checkedIn,
+    checkedOut,
+    description,
+    responsibilities,
+    requirements,
+    Object.hashAll(screeningQuestions),
+    modality,
+    companyVerified,
+    paymentProtected,
+    endsAt,
+  ]);
 }
 
 class PaymentRecord {

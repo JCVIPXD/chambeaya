@@ -99,7 +99,9 @@ export type ShiftApplicationRecord = {
   createdAt: string;
   updatedAt: string;
   screeningAnswers: { question: string; answer: string }[] | null;
-  worker: { id: string; name: string; email: string | null; identifier: string };
+  // `hasCv` ya incorpora las reglas de acceso de la API (postulación vigente y perfil
+  // visible); el archivo se pide bajo demanda con `applications.cv`.
+  worker: { id: string; name: string; email: string | null; identifier: string; hasCv: boolean };
   assignment?: AssignmentRecord | null;
   nextAction: {
     actor: 'BUSINESS' | 'WORKER' | 'NONE';
@@ -232,6 +234,19 @@ export const businessApi = {
   applications: {
     list: (token: string, shiftId: string) => request<ShiftApplicationRecord[]>(`/business/shifts/${shiftId}/applications`, { token }),
     pending: (token: string) => request<PendingApplicationsSummary>('/business/applications/pending', { token }),
+    // CV de un postulante (PDF, solo lectura). Se descarga con la sesión de la empresa:
+    // no existe una URL pública. Solo se acepta `application/pdf`: un `blob:` de
+    // cualquier otro tipo se abriría en el origen del panel.
+    cv: async (token: string, shiftId: string, applicationId: string): Promise<Blob> => {
+      const response = await fetch(`${apiUrl}/business/shifts/${shiftId}/applications/${applicationId}/cv`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        throw new ApiError(response.status, payload.error ?? 'REQUEST_FAILED');
+      }
+      const blob = await response.blob();
+      if (blob.type !== 'application/pdf') throw new ApiError(502, 'INVALID_CV_RESPONSE');
+      return blob;
+    },
     decide: (token: string, shiftId: string, applicationId: string, decision: 'ACCEPTED' | 'REJECTED', reason?: string) => request<ShiftApplicationRecord>(`/business/shifts/${shiftId}/applications/${applicationId}`, { method: 'PATCH', token, body: JSON.stringify({ decision, ...(reason ? { reason } : {}) }) }),
   },
   assignments: {

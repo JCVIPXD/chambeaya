@@ -381,10 +381,12 @@ class _ProfileContent extends StatelessWidget {
                       const SizedBox(height: 18),
                       _ProfileCard(
                         icon: Icons.description_outlined,
-                        title: 'CV privado',
+                        title: 'Tu CV',
                         subtitle: profile.cv == null
                             ? 'Aún no has cargado tu CV'
-                            : 'Solo tú puedes acceder a este documento',
+                            : profile.isVisible
+                            ? 'Lo abren solo las empresas a cuyos turnos te postulas'
+                            : 'Solo tú puedes abrirlo mientras tu perfil esté oculto',
                         child: _CvDetail(
                           document: profile.cv,
                           uploading: uploadingCv,
@@ -1129,7 +1131,7 @@ class _PrivacyNote extends StatelessWidget {
         const SizedBox(width: 10),
         Expanded(
           child: Text(
-            'Tu CV se guarda en almacenamiento privado y nunca se muestra en el directorio empresarial.',
+            'Tu CV se guarda en almacenamiento privado y nunca se muestra en el directorio empresarial. Una empresa solo puede abrirlo, en modo lectura, si te postulas a uno de sus turnos y tu perfil está visible; si lo ocultas, deja de verlo.',
             style: TextStyle(
               color: context.palette.muted,
               fontSize: 12,

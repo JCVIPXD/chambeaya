@@ -347,7 +347,11 @@ Perfil profesional global del trabajador (`GET/PATCH /workers/me/profile`),
 subida/descarga de CV en PDF y foto de perfil (`PUT /workers/me/cv` y
 `GET /workers/me/cv/download` —no hay `GET /workers/me/cv`—, `PUT/GET
 /workers/me/photo`, con almacenamiento privado
-en `private_document_storage.ts`), catálogo de especialidades
+en `private_document_storage.ts`), lectura del CV de un postulante por la
+empresa dueña del turno
+(`GET /business/shifts/:id/applications/:applicationId/cv`, solo lectura y
+solo con postulación vigente y perfil visible; regla en `cv_access.ts`),
+catálogo de especialidades
 (`/specialties`), búsqueda de talento por empresa (`GET
 /business/talent`), reseñas post-asignación (`POST
 /assignments/:id/reviews`) e invitaciones de contacto empresa→trabajador

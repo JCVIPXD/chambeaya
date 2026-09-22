@@ -157,7 +157,7 @@ export function createTalentRouter(
         return;
       }
       const code = error instanceof TalentError ? error.code : 'INVALID_TALENT_REQUEST';
-      const status = code === 'WORKER_ACCOUNT_REQUIRED' || code === 'BUSINESS_ACCOUNT_REQUIRED' ? 403 : code === 'SPECIALTY_NOT_FOUND' ? 404 : code === 'REVIEW_ALREADY_EXISTS' ? 409 : 400;
+      const status = code === 'WORKER_ACCOUNT_REQUIRED' || code === 'BUSINESS_ACCOUNT_REQUIRED' ? 403 : code === 'SPECIALTY_NOT_FOUND' || code === 'APPLICATION_NOT_FOUND' || code === 'CV_NOT_AVAILABLE' ? 404 : code === 'REVIEW_ALREADY_EXISTS' ? 409 : 400;
       response.status(status).json({ error: code });
     }
   };
@@ -204,6 +204,25 @@ export function createTalentRouter(
       'Cache-Control': 'private, no-store',
       'Content-Type': document.mediaType,
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(document.originalName)}`,
+    });
+    response.send(document.bytes);
+  }));
+  // CV de un postulante para la empresa dueña del turno. Solo lectura, un
+  // archivo por petición y siempre con sesión Bearer: nunca hay una URL pública.
+  // `Content-Disposition` en `inline` para que el navegador lo muestre; el
+  // nombre lo controla el trabajador, así que se codifica estrictamente.
+  router.get('/business/shifts/:id/applications/:applicationId/cv', route(async (request, response) => {
+    const param = (name: string) => {
+      const value = request.params[name];
+      return Array.isArray(value) ? value[0] ?? '' : value ?? '';
+    };
+    const document = await service.downloadApplicantCv(await businessSession(request), param('id'), param('applicationId'));
+    const filename = encodeURIComponent(document.originalName).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    response.set({
+      'Cache-Control': 'private, no-store',
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename*=UTF-8''${filename}`,
+      'X-Content-Type-Options': 'nosniff',
     });
     response.send(document.bytes);
   }));

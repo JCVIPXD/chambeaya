@@ -49,6 +49,7 @@ export function buildApplication(input: {
   workerName: string;
   assignmentStatus: AssignmentStatus;
   shiftId?: string;
+  hasCv?: boolean;
 }): ShiftApplicationRecord {
   const shiftId = input.shiftId ?? 'shift-resolution-1';
   const assignment: AssignmentRecord = {
@@ -67,7 +68,7 @@ export function buildApplication(input: {
     createdAt: '2026-09-17T10:00:00.000Z',
     updatedAt: '2026-09-17T10:00:00.000Z',
     screeningAnswers: null,
-    worker: { id: `worker-${input.id}`, name: input.workerName, email: `${input.id}@example.test`, identifier: '70000000' },
+    worker: { id: `worker-${input.id}`, name: input.workerName, email: `${input.id}@example.test`, identifier: '70000000', hasCv: input.hasCv ?? false },
     assignment,
     nextAction: nextActionByStatus[input.assignmentStatus],
   };

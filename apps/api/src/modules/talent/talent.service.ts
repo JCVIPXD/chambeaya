@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 
 import type { AuthSession } from '../auth/auth.service.js';
+import { companyCanViewApplicantCv } from './cv_access.js';
 import { PrivateDocumentStorage } from './private_document_storage.js';
 
 export type TalentProfileInput = {
@@ -97,12 +98,13 @@ export interface TalentOperations {
   createAssignmentReview(session: AuthSession, assignmentId: string, input: AssignmentReviewInput): Promise<unknown>;
   uploadCv(session: AuthSession, input: CvUploadInput): Promise<unknown>;
   downloadCv(session: AuthSession): Promise<CvDownload | null>;
+  downloadApplicantCv(session: AuthSession, shiftId: string, applicationId: string): Promise<CvDownload>;
   uploadProfilePhoto(session: AuthSession, input: ProfilePhotoUploadInput): Promise<unknown>;
   downloadProfilePhoto(session: AuthSession): Promise<ProfilePhotoDownload | null>;
 }
 
 export class TalentError extends Error {
-  constructor(public readonly code: 'WORKER_ACCOUNT_REQUIRED' | 'BUSINESS_ACCOUNT_REQUIRED' | 'SPECIALTY_NOT_FOUND' | 'REVIEW_NOT_ELIGIBLE' | 'REVIEW_ALREADY_EXISTS') {
+  constructor(public readonly code: 'WORKER_ACCOUNT_REQUIRED' | 'BUSINESS_ACCOUNT_REQUIRED' | 'SPECIALTY_NOT_FOUND' | 'REVIEW_NOT_ELIGIBLE' | 'REVIEW_ALREADY_EXISTS' | 'APPLICATION_NOT_FOUND' | 'CV_NOT_AVAILABLE') {
     super(code);
   }
 }
@@ -275,6 +277,59 @@ export class DatabaseTalentService implements TalentOperations {
       mediaType: document.mediaType,
       bytes: await this.documents.read(document.storageKey),
     };
+  }
+
+  /**
+   * CV de un postulante, para la empresa dueña del turno. Una sola consulta
+   * resuelve propiedad (turno de la empresa de la sesión), estado de la
+   * postulación, visibilidad del perfil y existencia del CV; la regla de
+   * acceso vive en `cv_access.ts` y es la misma que alimenta `hasCv` en la
+   * lista de postulantes.
+   *
+   * - `APPLICATION_NOT_FOUND`: la postulación no existe o no es de un turno de
+   *   esta empresa (misma respuesta para ambos casos, sin enumeración).
+   * - `CV_NOT_AVAILABLE`: la postulación es suya pero el CV no se puede
+   *   entregar (no hay CV, el perfil está oculto o la postulación ya no está
+   *   vigente). Es deliberadamente uniforme: no revela si un perfil oculto
+   *   tiene CV.
+   */
+  async downloadApplicantCv(session: AuthSession, shiftId: string, applicationId: string): Promise<CvDownload> {
+    this.requireBusiness(session);
+    const application = await this.prisma.shiftApplication.findFirst({
+      where: { id: applicationId, shiftId, shift: { company: { ownerId: session.userId } } },
+      select: {
+        status: true,
+        worker: {
+          select: {
+            talentProfile: { select: { isVisible: true } },
+            documents: { where: { kind: 'CV' } },
+          },
+        },
+      },
+    });
+    if (!application) throw new TalentError('APPLICATION_NOT_FOUND');
+    const document = application.worker.documents[0];
+    if (
+      !document ||
+      !companyCanViewApplicantCv({
+        applicationStatus: application.status,
+        profileIsVisible: application.worker.talentProfile?.isVisible,
+      })
+    ) {
+      throw new TalentError('CV_NOT_AVAILABLE');
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await this.documents.read(document.storageKey);
+    } catch (error) {
+      // Archivo ausente en el almacenamiento privado: para la empresa es lo
+      // mismo que no tener CV.
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+        throw new TalentError('CV_NOT_AVAILABLE');
+      }
+      throw error;
+    }
+    return { originalName: document.originalName, mediaType: document.mediaType, bytes };
   }
 
   async uploadProfilePhoto(session: AuthSession, input: ProfilePhotoUploadInput) {

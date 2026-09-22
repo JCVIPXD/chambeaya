@@ -41,47 +41,46 @@ void main() {
     },
   );
 
-  testWidgets(
-    'shows explicit empty states for the four new profile sections',
-    (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      final repository = _ProfileRepository();
+  testWidgets('shows explicit empty states for the four new profile sections', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final repository = _ProfileRepository();
 
-      await tester.pumpWidget(
-        MaterialApp(home: ProfileHomePage(talentProfileRepository: repository)),
-      );
-      await tester.pumpAndSettle();
+    await tester.pumpWidget(
+      MaterialApp(home: ProfileHomePage(talentProfileRepository: repository)),
+    );
+    await tester.pumpAndSettle();
 
-      expect(find.text('Radio y distritos de trabajo'), findsOneWidget);
-      expect(
-        find.text(
-          'Aún no defines un radio ni distritos adicionales donde aceptas turnos.',
-        ),
-        findsOneWidget,
-      );
-      expect(find.text('Experiencia laboral'), findsOneWidget);
-      expect(
-        find.text('Añade tus puestos anteriores para reforzar tu perfil.'),
-        findsOneWidget,
-      );
-      expect(find.text('Certificaciones'), findsOneWidget);
-      expect(
-        find.text('Añade cursos o certificados que hayas completado.'),
-        findsOneWidget,
-      );
-      expect(find.text('Idiomas'), findsOneWidget);
-      expect(
-        find.text('Añade los idiomas que hablas y tu nivel en cada uno.'),
-        findsOneWidget,
-      );
-      // Certifications are worker-declared metadata: never insinuate a
-      // "verified" state anywhere in this screen.
-      expect(find.textContaining('erificad'), findsNothing);
-    },
-  );
+    expect(find.text('Radio y distritos de trabajo'), findsOneWidget);
+    expect(
+      find.text(
+        'Aún no defines un radio ni distritos adicionales donde aceptas turnos.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Experiencia laboral'), findsOneWidget);
+    expect(
+      find.text('Añade tus puestos anteriores para reforzar tu perfil.'),
+      findsOneWidget,
+    );
+    expect(find.text('Certificaciones'), findsOneWidget);
+    expect(
+      find.text('Añade cursos o certificados que hayas completado.'),
+      findsOneWidget,
+    );
+    expect(find.text('Idiomas'), findsOneWidget);
+    expect(
+      find.text('Añade los idiomas que hablas y tu nivel en cada uno.'),
+      findsOneWidget,
+    );
+    // Certifications are worker-declared metadata: never insinuate a
+    // "verified" state anywhere in this screen.
+    expect(find.textContaining('erificad'), findsNothing);
+  });
 
   testWidgets(
     'adds an experience, a certification, a language and a work area, '
@@ -251,7 +250,130 @@ void main() {
       expect(find.text('Perfil actualizado correctamente.'), findsOneWidget);
     },
   );
+
+  // La empresa puede abrir el CV de quien se postula a uno de sus turnos (si el
+  // perfil es visible); el texto para la persona trabajadora debe decirlo con
+  // exactitud y sin prometer verificación ni custodia.
+  group('CV copy tells the worker who can open it', () {
+    Future<void> pumpProfile(WidgetTester tester, TalentProfile profile) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ProfileHomePage(
+            talentProfileRepository: _ProfileRepository(initial: profile),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    final cv = CvDocument(
+      originalName: 'cv-ana.pdf',
+      mediaType: 'application/pdf',
+      sizeBytes: 1200,
+      updatedAt: DateTime(2026, 9, 21),
+    );
+
+    testWidgets('visible profile: only companies she applies to can open it', (
+      tester,
+    ) async {
+      await pumpProfile(
+        tester,
+        _ProfileRepository._defaultProfile.copyWith(cv: cv),
+      );
+
+      expect(find.text('Tu CV', skipOffstage: false), findsOneWidget);
+      expect(find.text('CV privado', skipOffstage: false), findsNothing);
+      expect(
+        find.text(
+          'Lo abren solo las empresas a cuyos turnos te postulas',
+          skipOffstage: false,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Solo tú puedes acceder a este documento',
+          skipOffstage: false,
+        ),
+        findsNothing,
+      );
+      expect(
+        find.textContaining(
+          'Una empresa solo puede abrirlo, en modo lectura, si te postulas',
+          skipOffstage: false,
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('hidden profile: nobody but her can open it', (tester) async {
+      await pumpProfile(tester, _hiddenProfile.copyWith(cv: cv));
+
+      expect(
+        find.text(
+          'Solo tú puedes abrirlo mientras tu perfil esté oculto',
+          skipOffstage: false,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Lo abren solo las empresas a cuyos turnos te postulas',
+          skipOffstage: false,
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('without a CV it only invites her to upload one', (
+      tester,
+    ) async {
+      await pumpProfile(tester, _ProfileRepository._defaultProfile);
+
+      expect(
+        find.text('Aún no has cargado tu CV', skipOffstage: false),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Lo abren solo las empresas a cuyos turnos te postulas',
+          skipOffstage: false,
+        ),
+        findsNothing,
+      );
+    });
+  });
 }
+
+const _hiddenProfile = TalentProfile(
+  id: 'profile-1',
+  name: 'Ana Torres',
+  headline: null,
+  bio: null,
+  district: null,
+  availabilityText: null,
+  availabilityDays: [],
+  availabilityPeriods: [],
+  isAvailable: true,
+  isVisible: false,
+  specialties: [],
+  completion: 0,
+  cv: null,
+  photo: null,
+  workRadiusKm: null,
+  workDistricts: [],
+  isExperienceVisible: true,
+  isCertificationsVisible: true,
+  isLanguagesVisible: true,
+  isWorkAreaVisible: true,
+  experiences: [],
+  certifications: [],
+  languages: [],
+);
 
 class _ProfileRepository implements TalentProfileRepository {
   _ProfileRepository({TalentProfile? initial})

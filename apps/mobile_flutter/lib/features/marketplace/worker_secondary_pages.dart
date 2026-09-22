@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
@@ -17,7 +18,37 @@ class WorkerApplicationsPage extends StatefulWidget {
 }
 
 class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
-  late Future<_ApplicationsData> _loading;
+  static const _pollInterval = Duration(seconds: 3);
+
+  /// A single failed background refresh is usually a network blip that the
+  /// next tick (3 s later) fixes: a notice that appeared and vanished that
+  /// fast would be a flicker of its own, so it only shows from the second
+  /// consecutive failure.
+  static const _failuresBeforeNotice = 2;
+
+  // What is on screen. `null` only until the first load succeeds: that (and the
+  // explicit "Reintentar") is the only time a loading indicator is shown. Every
+  // later refresh is silent: the previous data stays on screen until the
+  // response arrives, and the list is rebuilt only if the data really changed.
+  _ApplicationsData? _data;
+  // The first load (or a "Reintentar") failed and there is nothing to keep on
+  // screen. While it is true a later tick that succeeds recovers silently.
+  var _loadFailed = false;
+  // Consecutive failed refreshes while data is on screen (see
+  // [_failuresBeforeNotice]).
+  var _refreshFailures = 0;
+  // Sequence number of the newest request: a response is applied only if no
+  // newer request started meanwhile (a "Reintentar" or the reload that follows
+  // an action), so a slow, older answer can never overwrite fresher data.
+  var _requestId = 0;
+  // A request with the newest id is still in flight: ticks do not stack
+  // another one on top of it.
+  var _requestPending = false;
+  // False while the shell keeps this page mounted but hidden (`IndexedStack`
+  // with `TickerMode(enabled: false)` on the other tabs): nobody sees the
+  // result, so the poll is skipped.
+  var _tabVisible = true;
+  ValueListenable<TickerModeData>? _tickerMode;
   Timer? _refreshTimer;
   final Set<String> _confirmed = {};
   final Set<String> _checkedIn = {};
@@ -27,125 +58,195 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
   @override
   void initState() {
     super.initState();
-    _loading = _load();
+    unawaited(_refresh());
     // Decisions are made from the business panel, so there is no local user
     // action that can invalidate this view. Poll while the shell keeps this
     // page alive in its IndexedStack to reflect accept/reject decisions
     // without requiring a full reload.
-    _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!mounted) return;
-      // A block body, not `() => _loading = _load()`: an arrow-bodied
-      // closure returns the assignment's value (the `Future` `_load()`
-      // produces), and `setState` asserts its callback must return `void`.
-      // That assertion only ever throws once this timer actually fires
-      // (`flutter test`'s fake clock previously never advanced far enough
-      // in any existing test to reach it) — see CN-20260917-106/107.
-      setState(() {
-        _loading = _load();
-      });
-    });
+    _refreshTimer = Timer.periodic(_pollInterval, (_) => _poll());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // `getValuesNotifier` does not subscribe this widget to rebuilds: the
+    // visibility only gates the timer, it changes nothing that is painted.
+    final notifier = TickerMode.getValuesNotifier(context);
+    if (!identical(notifier, _tickerMode)) {
+      _tickerMode?.removeListener(_onTickerModeChanged);
+      _tickerMode = notifier..addListener(_onTickerModeChanged);
+      _tabVisible = notifier.value.enabled;
+    }
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _tickerMode?.removeListener(_onTickerModeChanged);
     super.dispose();
+  }
+
+  void _onTickerModeChanged() {
+    final visible = _tickerMode?.value.enabled ?? true;
+    if (visible == _tabVisible) return;
+    _tabVisible = visible;
+    // Back on screen after being hidden: catch up now instead of showing
+    // data up to one interval stale.
+    if (visible) _poll();
+  }
+
+  void _poll() {
+    if (!mounted || !_tabVisible || _requestPending) return;
+    unawaited(_refresh());
+  }
+
+  /// Loads the applications and, if this is still the newest request and the
+  /// page is still there, applies the outcome. Never toggles a loading state
+  /// by itself: the initial `_data == null` is the loading state.
+  Future<void> _refresh() async {
+    final requestId = ++_requestId;
+    _requestPending = true;
+    final _ApplicationsData data;
+    try {
+      data = await _load();
+    } catch (error) {
+      if (mounted && requestId == _requestId) _showFailure(error);
+      return;
+    } finally {
+      if (requestId == _requestId) _requestPending = false;
+    }
+    // Outside the `try`: an error raised while applying the data must not be
+    // mistaken for a failed request.
+    if (!mounted || requestId != _requestId) return;
+    _showData(data);
+  }
+
+  void _showData(_ApplicationsData data) {
+    final hadNotice = _refreshFailures >= _failuresBeforeNotice;
+    _refreshFailures = 0;
+    final changed = _data != data;
+    // Same data, nothing else to update: no `setState`, so nothing rebuilds
+    // and nothing can flicker.
+    if (!changed && !hadNotice && !_loadFailed) return;
+    setState(() {
+      if (changed) _data = data;
+      _loadFailed = false;
+    });
+  }
+
+  void _showFailure(Object error) {
+    // Not silent (an empty `catch` once hid a frozen list), but not visible
+    // either: the list on screen stays and the next tick retries.
+    debugPrint('WorkerApplicationsPage: no se pudo actualizar: $error');
+    if (_data == null) {
+      if (!_loadFailed) setState(() => _loadFailed = true);
+      return;
+    }
+    _refreshFailures++;
+    if (_refreshFailures == _failuresBeforeNotice) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) => _SecondaryPage(
     title: 'Mis postulaciones',
     subtitle: 'Sigue cada proceso sin perder ninguna actualización',
-    child: FutureBuilder<_ApplicationsData>(
-      future: _loading,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState != ConnectionState.done) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return _MessageState(
-            title: 'No pudimos cargar tus postulaciones',
-            message: 'Verifica tu conexión e inténtalo nuevamente.',
-            // Block body: `setState` asserts (debug) if its callback returns
-            // the `Future` that an arrow-bodied assignment would return.
-            onRetry: () => setState(() {
-              _loading = _load();
-            }),
-          );
-        }
-        final data = snapshot.data;
-        if (data == null || data.states.isEmpty) {
-          return const _ApplicationsEmpty();
-        }
-        final accepted = data.states.values
-            .where((state) => state == ApplicationState.accepted)
-            .length;
-        final finished = data.shifts.where((shift) => shift.checkedOut).length;
-        return Column(
-          children: [
-            _WorkerJourney(accepted: accepted, finished: finished),
-            const SizedBox(height: 16),
-            ...data.states.entries.map((entry) {
-              final shift = data.shifts
-                  .where((item) => item.id == entry.key)
-                  .firstOrNull;
-              if (shift == null) return const SizedBox.shrink();
-              final presentation = _cancelled.contains(shift.id)
-                  ? _applicationPresentation(ApplicationState.closed)
-                  : _applicationPresentation(entry.value);
-              final confirmed =
-                  shift.assignmentConfirmed || _confirmed.contains(shift.id);
-              final checkedIn =
-                  shift.checkedIn || _checkedIn.contains(shift.id);
-              final checkedOut =
-                  shift.checkedOut || _checkedOut.contains(shift.id);
-              return _ApplicationCard(
-                shift: shift,
-                company: shift.company,
-                role: shift.title,
-                status: presentation.label,
-                statusColor: presentation.color,
-                progress: presentation.progress,
-                nextStep: _operationalNextStep(
-                  entry.value,
-                  confirmed: confirmed,
-                  checkedIn: checkedIn,
-                  checkedOut: checkedOut,
-                ),
-                schedule: shift.schedule,
-                location: shift.location,
-                pay: shift.workerPayCents,
-                confirmed: confirmed,
-                checkedIn: checkedIn,
-                checkedOut: checkedOut,
-                onConfirm:
-                    entry.value == ApplicationState.accepted && !confirmed
-                    ? () => _confirm(shift.id)
-                    : null,
-                onCheckIn:
-                    entry.value == ApplicationState.accepted &&
-                        confirmed &&
-                        !checkedIn
-                    ? () => _checkIn(shift)
-                    : null,
-                onCheckOut: checkedIn && !checkedOut
-                    ? () => _checkOut(shift.id)
-                    : null,
-                onCancel:
-                    (entry.value == ApplicationState.submitted ||
-                            entry.value == ApplicationState.accepted) &&
-                        !checkedIn &&
-                        !checkedOut &&
-                        !_cancelled.contains(shift.id)
-                    ? () => _cancel(shift.id)
-                    : null,
-              );
-            }).toList(),
-          ],
-        );
-      },
-    ),
+    child: _buildContent(),
   );
+
+  Widget _buildContent() {
+    final data = _data;
+    if (data == null) {
+      if (_loadFailed) {
+        return _MessageState(
+          title: 'No pudimos cargar tus postulaciones',
+          message: 'Verifica tu conexión e inténtalo nuevamente.',
+          // Block body: `setState` asserts (debug) if its callback returns a
+          // `Future`.
+          onRetry: () {
+            setState(() {
+              _loadFailed = false;
+            });
+            unawaited(_refresh());
+          },
+        );
+      }
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (data.states.isEmpty) {
+      return const _ApplicationsEmpty();
+    }
+    final accepted = data.states.values
+        .where((state) => state == ApplicationState.accepted)
+        .length;
+    final finished = data.shifts.where((shift) => shift.checkedOut).length;
+    return Column(
+      children: [
+        if (_refreshFailures >= _failuresBeforeNotice) ...[
+          const _RefreshFailedNotice(
+            message:
+                'No pudimos actualizar tus postulaciones. Reintentaremos en '
+                'unos segundos.',
+          ),
+          const SizedBox(height: 12),
+        ],
+        _WorkerJourney(accepted: accepted, finished: finished),
+        const SizedBox(height: 16),
+        ...data.states.entries.map((entry) {
+          final shift = data.shifts
+              .where((item) => item.id == entry.key)
+              .firstOrNull;
+          if (shift == null) return const SizedBox.shrink();
+          final presentation = _cancelled.contains(shift.id)
+              ? _applicationPresentation(ApplicationState.closed)
+              : _applicationPresentation(entry.value);
+          final confirmed =
+              shift.assignmentConfirmed || _confirmed.contains(shift.id);
+          final checkedIn = shift.checkedIn || _checkedIn.contains(shift.id);
+          final checkedOut = shift.checkedOut || _checkedOut.contains(shift.id);
+          return _ApplicationCard(
+            shift: shift,
+            company: shift.company,
+            role: shift.title,
+            status: presentation.label,
+            statusColor: presentation.color,
+            progress: presentation.progress,
+            nextStep: _operationalNextStep(
+              entry.value,
+              confirmed: confirmed,
+              checkedIn: checkedIn,
+              checkedOut: checkedOut,
+            ),
+            schedule: shift.schedule,
+            location: shift.location,
+            pay: shift.workerPayCents,
+            confirmed: confirmed,
+            checkedIn: checkedIn,
+            checkedOut: checkedOut,
+            onConfirm: entry.value == ApplicationState.accepted && !confirmed
+                ? () => _confirm(shift.id)
+                : null,
+            onCheckIn:
+                entry.value == ApplicationState.accepted &&
+                    confirmed &&
+                    !checkedIn
+                ? () => _checkIn(shift)
+                : null,
+            onCheckOut: checkedIn && !checkedOut
+                ? () => _checkOut(shift.id)
+                : null,
+            onCancel:
+                (entry.value == ApplicationState.submitted ||
+                        entry.value == ApplicationState.accepted) &&
+                    !checkedIn &&
+                    !checkedOut &&
+                    !_cancelled.contains(shift.id)
+                ? () => _cancel(shift.id)
+                : null,
+          );
+        }),
+      ],
+    );
+  }
 
   Future<_ApplicationsData> _load() async {
     // Cargamos primero los estados: el repositorio HTTP conserva los turnos
@@ -243,6 +344,9 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
   /// siempre va a rechazar: se explica el motivo real y se recarga de
   /// inmediato (en vez de esperar el sondeo periódico de 3 s) para que la
   /// tarjeta se retire o se marque como cerrada tan pronto como sea posible.
+  /// La recarga es silenciosa (la lista actual se queda hasta que llegue la
+  /// nueva) y tiene prioridad: descarta la respuesta de cualquier sondeo
+  /// anterior que siga en vuelo.
   /// Cualquier otro error (de red, credencial inválida, etc.) conserva el
   /// mensaje genérico previo.
   void _handleActionError(Object error, {required String genericMessage}) {
@@ -276,9 +380,7 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
           ),
         ),
       );
-      setState(() {
-        _loading = _load();
-      });
+      unawaited(_refresh());
       return;
     }
     if (error is MarketplaceApiException && error.isShiftGone) {
@@ -289,13 +391,7 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
           ),
         ),
       );
-      // A block body (not `() => _loading = _load()`) so the callback
-      // returns void instead of the Future that `_load()` produces: setState
-      // asserts (in debug builds) that its callback does not return a
-      // Future, since it must apply state synchronously.
-      setState(() {
-        _loading = _load();
-      });
+      unawaited(_refresh());
       return;
     }
     ScaffoldMessenger.of(
@@ -351,6 +447,36 @@ class _ApplicationsData {
   const _ApplicationsData({required this.shifts, required this.states});
   final List<Shift> shifts;
   final Map<String, ApplicationState> states;
+
+  /// By value, and order-sensitive: the cards are drawn in the iteration order
+  /// of [states], so the same entries in another order is a real change.
+  @override
+  bool operator ==(Object other) =>
+      other is _ApplicationsData &&
+      listEquals(shifts, other.shifts) &&
+      _sameEntriesInOrder(states, other.states);
+
+  @override
+  int get hashCode => Object.hash(
+    Object.hashAll(shifts),
+    Object.hashAll(states.entries.map((e) => Object.hash(e.key, e.value))),
+  );
+
+  static bool _sameEntriesInOrder(
+    Map<String, ApplicationState> a,
+    Map<String, ApplicationState> b,
+  ) {
+    if (a.length != b.length) return false;
+    final left = a.entries.iterator;
+    final right = b.entries.iterator;
+    while (left.moveNext() && right.moveNext()) {
+      if (left.current.key != right.current.key ||
+          left.current.value != right.current.value) {
+        return false;
+      }
+    }
+    return true;
+  }
 }
 
 class _WorkerJourney extends StatelessWidget {
@@ -662,11 +788,15 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
   );
 }
 
-/// Discreet notice shown above the conversations while background refreshes
-/// are failing. It keeps the last list visible instead of replacing it with
-/// the full-screen error state.
+/// Discreet notice shown above the conversations (or applications) while
+/// background refreshes are failing. It keeps the last list visible instead of
+/// replacing it with the full-screen error state.
 class _RefreshFailedNotice extends StatelessWidget {
-  const _RefreshFailedNotice();
+  const _RefreshFailedNotice({
+    this.message =
+        'No pudimos actualizar tus mensajes. Reintentaremos en unos segundos.',
+  });
+  final String message;
   @override
   Widget build(BuildContext context) => Semantics(
     liveRegion: true,
@@ -683,8 +813,7 @@ class _RefreshFailedNotice extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              'No pudimos actualizar tus mensajes. Reintentaremos en unos '
-              'segundos.',
+              message,
               style: TextStyle(color: context.palette.muted, fontSize: 13),
             ),
           ),

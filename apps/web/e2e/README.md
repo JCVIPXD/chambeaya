@@ -113,7 +113,48 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    fixture base). La contraparte contra API y PostgreSQL reales está en `e2e-real/` (ver
    más abajo).
 
-Sesenta y ocho ejecuciones en total (34 casos × escritorio y móvil). Cada una tiene su navegador aislado y su estado de
+9. Costo de render del panel (`render-cost.spec.ts`, 3 casos): con la API
+   devolviendo exactamente lo mismo, tras dos sondeos completos de postulaciones
+   (4 s cada uno) el contador de confirmaciones de render de React no sube ni una
+   vez —el panel es un solo componente grande, así que un `setState` con un valor
+   nuevo pero idéntico lo volvía a renderizar entero—, y un cambio real en la
+   respuesta (`worker.name`) sí aparece en el sondeo siguiente y sí sube el
+   contador, de modo que el guardia de `lib/stable-state.ts` no puede esconder
+   datos nuevos. El segundo caso vigila el DOM real durante los sondeos con un
+   `MutationObserver`: mientras llega un sondeo con cambios y otro sin novedades
+   nunca aparecen "Cargando postulaciones…", `aria-busy="true"` en
+   `.application-board`, "Actualizando…" en `.application-count` ni una lista sin
+   filas, y el nodo de la fila (marcado con `data-probe` antes del cambio) no se
+   reemplaza: el estado de carga solo se enciende al abrir el turno, no en cada
+   sondeo de 4 s. El tercer caso comprueba que, con el punto de notificaciones
+   visible, toda animación de duración infinita del documento anima solo
+   `transform` y `opacity` (las que no repintan en cada fotograma) y que
+   `cn-notification-pulse` está entre ellas. El contador usa un
+   `__REACT_DEVTOOLS_GLOBAL_HOOK__` mínimo instalado con `page.addInitScript`.
+   **Los dos primeros casos esperan sondeos reales: tardan unos 18 s por
+   proyecto cada uno**, bastante más que el resto. Lo que estos casos **no**
+   cubren: un sondeo que *falla* con datos en pantalla sigue vaciando la lista y
+   mostrando el error (`app/page.tsx`, `catch` de `refreshApplications`).
+
+10. CV del postulante (`applicant-cv.spec.ts`, 8 casos): en `Turnos` →
+    `Postulaciones`, solo la fila cuya API respondió `worker.hasCv: true` muestra
+    "Ver CV de <nombre>"; la otra no menciona el CV. El listado no descarga ningún
+    CV (ninguna petición a `/cv` antes de pulsar). Al pulsar, la petición lleva
+    `Authorization: Bearer <token de la empresa>`, la pestaña nueva queda sin
+    `opener` y recibe un `blob:` cuyo contenido y tipo (`application/pdf`) son los
+    de la respuesta. Cubre el estado de carga (`aria-busy`/`aria-disabled`, texto
+    `role="status"`, foco conservado y clics repetidos que no duplican la
+    petición), los mensajes propios de `404 CV_NOT_AVAILABLE`, `401` y fallo de
+    red (todos con la pestaña vacía cerrada y posibilidad de reintentar), una
+    respuesta que no es PDF (nunca se abre en el origen del panel), el respaldo de
+    descarga con las ventanas emergentes bloqueadas (`CV de <nombre>.pdf`), y que
+    con un CV en la lista un sondeo sin cambios sigue sin confirmar renders (mismo
+    gancho que `render-cost.spec.ts`; este caso también espera sondeos reales y
+    tarda). Las reglas de **quién** puede ver un CV no se prueban aquí: viven solo
+    en la API (`apps/api/tests/applicant_cv.routes.test.ts` y
+    `apps/api/tests/integration/applicant-cv.integration.test.ts`).
+
+Noventa ejecuciones en total (45 casos × escritorio y móvil). Cada una tiene su navegador aislado y su estado de
 API propio. Una petición API no prevista, una petición externa o un error
 JavaScript sin capturar hacen fallar la prueba. No se permiten reintentos que
 oculten fallos.

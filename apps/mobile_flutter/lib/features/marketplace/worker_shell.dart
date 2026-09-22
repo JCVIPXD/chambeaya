@@ -110,24 +110,50 @@ class _WorkerShellState extends State<WorkerShell> {
       // Postulaciones/Mensajes keeps running and scroll state survives a
       // switch); the AnimatedOpacity around it only cross-fades what is
       // already there, it never remounts a page.
+      //
+      // Each page is wrapped in a `TickerMode` that is enabled only for the
+      // visible tab. `IndexedStack` (unlike `Visibility`) does not mute the
+      // tickers of its hidden children, so every implicit animation inside
+      // an offstage tab kept running and rebuilding: notably each `Material`
+      // (cards, scaffolds) animates its own 200 ms color/text-style change
+      // when the theme flips, so a dark-mode toggle still rebuilt the four
+      // tabs the worker cannot even see (CN-20260921-003). A muted ticker
+      // does not advance, and jumps to the end state as soon as the tab is
+      // shown again, so the hidden tabs are correct by the time they appear.
+      // Timers (background polling) are not tickers and are unaffected.
       body: AnimatedOpacity(
         key: const Key('worker-shell-tab-fade'),
         opacity: _contentVisible ? 1 : 0,
         duration: const Duration(milliseconds: 140),
         curve: Curves.easeOut,
-        child: IndexedStack(index: selected, children: pages),
+        child: IndexedStack(
+          index: selected,
+          children: [
+            for (var i = 0; i < pages.length; i++)
+              TickerMode(enabled: i == selected, child: pages[i]),
+          ],
+        ),
       ),
     );
 
     final controller = widget.themeModeController;
     if (controller == null) return scaffold;
 
-    // Dark mode is scoped to exactly this subtree via a local `AnimatedTheme`
-    // instead of `MaterialApp.darkTheme`/`themeMode` (which are global and
-    // would also darken onboarding, auth and the company dashboard, none of
-    // which have migrated colors — see CN-20260917-104). `AnimatedBuilder`
-    // with a static `child` re-wraps only the theme, it never rebuilds the
-    // scaffold/pages subtree on a toggle.
+    // Dark mode is scoped to exactly this subtree via a local `Theme` instead
+    // of `MaterialApp.darkTheme`/`themeMode` (which are global and would also
+    // darken onboarding, auth and the company dashboard, none of which have
+    // migrated colors — see CN-20260917-104). `AnimatedBuilder` with a static
+    // `child` re-wraps only the theme, it never rebuilds the scaffold/pages
+    // subtree itself on a toggle.
+    //
+    // This used to be an `AnimatedTheme` (220 ms): every animation tick built
+    // a new interpolated `ThemeData`, which notified every widget that reads
+    // `Theme.of`/`context.palette` on each of ~14 frames, and `IndexedStack`
+    // keeps all five tabs mounted, so all of them, visible or not. Measured
+    // in CN-20260921-003: ~26,000 element rebuilds per toggle versus ~1,000
+    // for a single swap. The new theme is now applied in one frame; the
+    // switch's own icon (`_AppearanceCard`) keeps its local animation as the
+    // visible feedback.
     return AnimatedBuilder(
       animation: controller,
       // `resolveIsDark` (not `controller.isDark`) so a `ThemeMode.system`
@@ -135,9 +161,7 @@ class _WorkerShellState extends State<WorkerShell> {
       // of reading `PlatformDispatcher.instance` directly: that live-updates
       // on a system brightness change and honors a `MediaQuery` override in
       // widget tests, neither of which the raw `PlatformDispatcher` read did.
-      builder: (context, child) => AnimatedTheme(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeInOut,
+      builder: (context, child) => Theme(
         data: buildAppTheme(
           controller.resolveIsDark(MediaQuery.platformBrightnessOf(context))
               ? Brightness.dark

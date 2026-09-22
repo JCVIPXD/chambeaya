@@ -732,8 +732,8 @@ class _ApplyBar extends StatelessWidget {
           ),
           const SizedBox(height: 2),
           Text(
-            'Tus datos se comparten solo al postular',
-            maxLines: 2,
+            'Tus datos se comparten solo al postular. Tu CV, solo si tu perfil está visible.',
+            maxLines: 3,
             style: TextStyle(color: palette.muted, fontSize: 9),
           ),
         ],

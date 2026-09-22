@@ -702,7 +702,16 @@ class _ErrorNotice extends StatelessWidget {
         children: [
           const Icon(Icons.info_outline_rounded, color: Color(0xFF9A5B00)),
           const SizedBox(width: 8),
-          Expanded(child: Text(message)),
+          Expanded(
+            child: Text(
+              message,
+              // Fondo ámbar fijo (`0xFFFFF4E5`) en ambos modos: el texto no
+              // puede heredar el `muted` claro del tema oscuro (2.15:1).
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: context.palette.onNotice),
+            ),
+          ),
         ],
       ),
     ),

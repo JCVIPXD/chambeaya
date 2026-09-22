@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 
 /// Brand-fixed colors: these do not change between light and dark mode
@@ -33,9 +35,11 @@ class AppPalette extends ThemeExtension<AppPalette> {
     required this.surface,
     required this.surfaceMuted,
     required this.border,
+    required this.controlBorder,
     required this.ink,
     required this.muted,
     required this.accentSoft,
+    required this.onNotice,
     required this.shadow,
   });
 
@@ -51,6 +55,12 @@ class AppPalette extends ThemeExtension<AppPalette> {
   /// Hairline borders and dividers drawn on top of [surface]/[background].
   final Color border;
 
+  /// Outline of interactive controls (text fields, filter chips): unlike the
+  /// decorative hairline [border] it must be perceivable against the control's
+  /// own fill (WCAG 1.4.11, 3:1). In light mode it is the same hairline as
+  /// [border] (unchanged); in dark mode it is a stronger tone.
+  final Color controlBorder;
+
   /// Primary heading/body text color drawn on [background] or [surface]
   /// (replaces `AppColors.navy` used as a text color, as opposed to its use
   /// as an accent background fill, which stays fixed).
@@ -62,6 +72,11 @@ class AppPalette extends ThemeExtension<AppPalette> {
   /// Soft accent fill used behind teal icons/text (avatars, badges, chips).
   final Color accentSoft;
 
+  /// Text drawn on the fixed light-amber notice fill (`_ErrorNotice`, always
+  /// `#FFF4E5` in both modes). Light keeps the inherited muted tone; dark must
+  /// not inherit its own (light) muted text onto that light fill.
+  final Color onNotice;
+
   /// Card/elevation shadow tint.
   final Color shadow;
 
@@ -70,9 +85,11 @@ class AppPalette extends ThemeExtension<AppPalette> {
     surface: AppColors.surface,
     surfaceMuted: AppColors.surfaceMuted,
     border: AppColors.border,
+    controlBorder: AppColors.border,
     ink: AppColors.navy,
     muted: AppColors.muted,
     accentSoft: AppColors.tealSoft,
+    onNotice: AppColors.muted,
     shadow: AppColors.shadow,
   );
 
@@ -81,9 +98,11 @@ class AppPalette extends ThemeExtension<AppPalette> {
     surface: Color(0xFF181D28),
     surfaceMuted: Color(0xFF1F2532),
     border: Color(0xFF2C3342),
+    controlBorder: Color(0xFF69748A),
     ink: Color(0xFFEEF1F7),
     muted: Color(0xFFA1AABB),
     accentSoft: Color(0xFF17352E),
+    onNotice: AppColors.navy,
     shadow: Color(0x66000000),
   );
 
@@ -93,18 +112,22 @@ class AppPalette extends ThemeExtension<AppPalette> {
     Color? surface,
     Color? surfaceMuted,
     Color? border,
+    Color? controlBorder,
     Color? ink,
     Color? muted,
     Color? accentSoft,
+    Color? onNotice,
     Color? shadow,
   }) => AppPalette(
     background: background ?? this.background,
     surface: surface ?? this.surface,
     surfaceMuted: surfaceMuted ?? this.surfaceMuted,
     border: border ?? this.border,
+    controlBorder: controlBorder ?? this.controlBorder,
     ink: ink ?? this.ink,
     muted: muted ?? this.muted,
     accentSoft: accentSoft ?? this.accentSoft,
+    onNotice: onNotice ?? this.onNotice,
     shadow: shadow ?? this.shadow,
   );
 
@@ -116,9 +139,11 @@ class AppPalette extends ThemeExtension<AppPalette> {
       surface: Color.lerp(surface, other.surface, t)!,
       surfaceMuted: Color.lerp(surfaceMuted, other.surfaceMuted, t)!,
       border: Color.lerp(border, other.border, t)!,
+      controlBorder: Color.lerp(controlBorder, other.controlBorder, t)!,
       ink: Color.lerp(ink, other.ink, t)!,
       muted: Color.lerp(muted, other.muted, t)!,
       accentSoft: Color.lerp(accentSoft, other.accentSoft, t)!,
+      onNotice: Color.lerp(onNotice, other.onNotice, t)!,
       shadow: Color.lerp(shadow, other.shadow, t)!,
     );
   }
@@ -135,7 +160,26 @@ extension AppPaletteX on BuildContext {
       Theme.of(this).extension<AppPalette>() ?? AppPalette.light;
 }
 
-ThemeData buildAppTheme([Brightness brightness = Brightness.light]) {
+/// Returns the app's [ThemeData] for [brightness], built once and reused.
+///
+/// Building it is not free (`ColorScheme.fromSeed` plus every component
+/// theme: ~660 us per call in the JIT test runner, see CN-20260921-003), and
+/// worse, `MaterialApp` and `Theme.of` keep their localized-text-theme cache
+/// keyed by the `ThemeData` *identity*, so a fresh instance on every rebuild
+/// of `ChambeayaApp` or of the worker shell's theme wrapper discards that
+/// cache. The result depends only on [brightness] and on
+/// [defaultTargetPlatform] (which `ThemeData` reads for its platform-specific
+/// defaults), so both form the cache key; in production the platform never
+/// changes, so there are exactly two instances for the whole process.
+ThemeData buildAppTheme([Brightness brightness = Brightness.light]) =>
+    _themeCache.putIfAbsent(
+      (brightness, defaultTargetPlatform),
+      () => _createAppTheme(brightness),
+    );
+
+final _themeCache = <(Brightness, TargetPlatform), ThemeData>{};
+
+ThemeData _createAppTheme(Brightness brightness) {
   final isDark = brightness == Brightness.dark;
   final palette = isDark ? AppPalette.dark : AppPalette.light;
   final colorScheme = ColorScheme.fromSeed(
@@ -146,7 +190,7 @@ ThemeData buildAppTheme([Brightness brightness = Brightness.light]) {
   );
   final inputBorder = OutlineInputBorder(
     borderRadius: BorderRadius.circular(14),
-    borderSide: BorderSide(color: palette.border),
+    borderSide: BorderSide(color: palette.controlBorder),
   );
 
   return ThemeData(
@@ -232,7 +276,7 @@ ThemeData buildAppTheme([Brightness brightness = Brightness.light]) {
     chipTheme: ChipThemeData(
       backgroundColor: palette.surface,
       selectedColor: palette.accentSoft,
-      side: BorderSide(color: palette.border),
+      side: BorderSide(color: palette.controlBorder),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
       labelStyle: TextStyle(
         color: palette.ink,
