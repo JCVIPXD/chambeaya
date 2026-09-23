@@ -1,10 +1,10 @@
 # Flujo de trabajo de agentes
 
-- Usa solamente los agentes `implementador-sonnet`, `auditor-opus` y `planificador-opus` (definidos en `.claude/agents/`). No crear agentes adicionales sin autorización explícita del usuario.
+- Usa solamente los agentes `implementador-sonnet` y `auditor-opus` (definidos en `.claude/agents/`). No crear agentes adicionales sin autorización explícita del usuario.
 - Ejecuta `implementador-sonnet` (modelo Sonnet 5) para análisis de alcance, código, pruebas y correcciones.
-- Ejecuta `auditor-opus` (modelo Opus) después de cada implementación terminada, y para revisar/actualizar la documentación de `docs/`.
-- Ejecuta `planificador-opus` (modelo Opus) **solo cuando el usuario lo ordena explícitamente**, para convertir un objetivo en uno o más alcances que `implementador-sonnet` seguirá. No se invoca automáticamente como parte del ciclo normal. Sus planes se escriben en `.claude/plans/`, nunca en `docs/`.
-- Trabaja en secuencia: (opcional) Planificador propone alcance; Sonnet implementa y registra; Opus audita y documenta; Sonnet corrige si es necesario; Opus reaudita.
+- Ejecuta `auditor-opus` (modelo Opus 5.5) después de cada implementación terminada, y para revisar/actualizar la documentación de `docs/`.
+- La planificación se hace con el modo plan nativo de Claude Code; no existe un agente planificador.
+- Trabaja en secuencia: (opcional) plan en modo plan nativo; Sonnet implementa y registra; Opus audita y documenta; Sonnet corrige si es necesario; Opus reaudita.
 - `docs/PROGRESO.md` es el único registro operativo vigente. No crees diarios, bitácoras ni archivos de avance adicionales.
 - Registra únicamente hitos terminados: una implementación validada o una auditoría concluida. No registres actividad parcial.
 - Cada entrada es inmutable y debe incluir ID, fecha, agente, tipo, estado, alcance, archivos, decisiones, validaciones, riesgos y siguiente paso.
