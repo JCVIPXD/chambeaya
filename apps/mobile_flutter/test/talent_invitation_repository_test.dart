@@ -8,6 +8,12 @@ void main() {
   test(
     'HTTP repository lists invitations with the worker session token',
     () async {
+      // `isRespondable` compara `expiresAt` con el reloj real: la fecha debe
+      // ser relativa a "ahora" para que la prueba no caduque con el tiempo.
+      final futureExpiry = DateTime.now()
+          .add(const Duration(days: 7))
+          .toUtc()
+          .toIso8601String();
       final client = _ScriptedClient({
         '/api/workers/me/talent-invitations': (request) =>
             http.StreamedResponse(
@@ -18,7 +24,7 @@ void main() {
                       'id': 'invitation-1',
                       'status': 'PENDING',
                       'message': 'Queremos contar contigo',
-                      'expiresAt': '2026-09-23T00:00:00.000Z',
+                      'expiresAt': futureExpiry,
                       'respondedAt': null,
                       'createdAt': '2026-09-16T00:00:00.000Z',
                       'shift': {

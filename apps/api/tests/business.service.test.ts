@@ -782,6 +782,32 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
       expect(paymentUpsert).not.toHaveBeenCalled();
     });
 
+    // BAJO-2 de CN-20260923-001: el rastro de auditoría debe nombrar lo que
+    // hizo ESTA llamada (cerrar sin pago), no decir que se confirmó trabajo.
+    it('el evento UPDATED de una reapertura disparada por "Cerrar sin pago" dice que se cerró sin pago, y el de una confirmación sigue diciendo que se confirmó el trabajo', async () => {
+      const multiSeat = { ...closedShift, requiredWorkers: 2 };
+      const closedWithoutPay = scenario({
+        shiftRow: multiSeat,
+        source: 'NO_SHOW',
+        assignmentsAfterUpdate: [{ status: 'COMPLETED' }, { status: 'CANCELLED' }],
+      });
+      await closedWithoutPay.service.resolveAssignment(session, 'shift-1', 'assignment-1', 'CANCELLED');
+      const closedDetail = closedWithoutPay.shiftEventCreate.mock.calls
+        .map(([args]) => args.data)
+        .find((data) => data.type === 'UPDATED')?.detail as string;
+      expect(closedDetail).toContain('pasó de CANCELLED a COMPLETED');
+      expect(closedDetail).toContain('al cerrar la empresa sin pago la asignación assignment-1');
+      expect(closedDetail).not.toContain('al confirmar la empresa el trabajo');
+
+      const confirmed = scenario({ shiftRow: multiSeat, assignmentsAfterUpdate: [{ status: 'COMPLETED' }, { status: 'COMPLETED' }] });
+      await confirmed.service.resolveAssignment(session, 'shift-1', 'assignment-1', 'COMPLETED');
+      const confirmedDetail = confirmed.shiftEventCreate.mock.calls
+        .map(([args]) => args.data)
+        .find((data) => data.type === 'UPDATED')?.detail as string;
+      expect(confirmedDetail).toContain('al confirmar la empresa el trabajo de la asignación assignment-1');
+      expect(confirmedDetail).not.toContain('sin pago');
+    });
+
     it('no reabre (sigue CANCELLED) cuando esta llamada resuelve CANCELLED y ningún otro cupo completó', async () => {
       const multiSeat = { ...closedShift, requiredWorkers: 2 };
       const { service, shiftUpdate, cancellationFindFirst } = scenario({

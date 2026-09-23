@@ -54,6 +54,79 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260923-003 — Auditoría de `CN-20260923-002` (corrección de BAJO-1 a BAJO-4 de `CN-20260923-001` y fixture vencido de Flutter)
+
+- Fecha: 2026-09-23 17:40 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260923-002` (corrige `CN-20260923-001`, auditoría de `CN-20260922-013`).
+- Alcance: el diff sin commitear sobre `HEAD` `7e19dcc` (rama `codex/simplificacion-radical`), acotado a los diez archivos que declara `002`: `apps/api/src/modules/operations/shift-state.ts`, `apps/api/src/modules/business/business.service.ts`, `apps/web/app/page.tsx`, `apps/api/tests/shift-state.test.ts`, `apps/api/tests/business.service.test.ts`, `apps/web/e2e/assignment-resolution.spec.ts`, `apps/mobile_flutter/test/talent_invitation_repository_test.dart`, `docs/reference/api.md`, `apps/web/e2e/README.md` y `docs/PROGRESO.md`. También revisé `apps/web/e2e/fixtures/shift-assignments.ts` (regla simulada), `talent_invitation_repository.dart` (`isRespondable`), el esquema de `ShiftEvent` y los consumidores del texto de `detail`.
+- Veredicto: **APROBADO**. Sin hallazgos críticos, altos ni medios. Dos bajos de documentación, que corregí yo, y dos observaciones informativas que no bloquean.
+- Decisiones:
+  1. **El código de producción solo cambió lo declarado.** `shift-state.ts`: solo comentarios (JSDoc y el comentario de la rama `COMPLETED`); la línea de `pending` y el resto del cuerpo son idénticos a `HEAD`. `business.service.ts`: solo el texto de `detail` del `ShiftEvent` `UPDATED`, elegido por `outcome`. Ninguna condición, escritura ni orden de operaciones cambia. La rama `COMPLETED` conserva el texto literal de `HEAD`. `page.tsx`: solo el aviso condicional (`shiftCancelled &&`) en la confirmación de "Cerrar sin pago". Los espacios quedan bien en los dos casos: "pago. Esta acción…" y "pago. Este turno… Esta acción…".
+  2. **El texto nuevo de BAJO-2 es veraz.** "Con otro cupo ya completado" siempre es cierto cuando se emite: el evento solo se crea si `recalculated === 'COMPLETED'`, eso exige al menos una asignación `COMPLETED`, y la que resuelve esta llamada quedó `CANCELLED`. `detail` es `TEXT` (migración `20260824184056`), así que no hay límite de longitud. Los únicos consumidores del texto (`e2e-real/assignment-resolution.spec.ts:89` y dos aserciones de `business.service.test.ts`) buscan `pasó de CANCELLED a COMPLETED`, que se conserva.
+  3. **No cambiar la regla de BAJO-1 es correcto.** Un `NO_SHOW` sin resolver es una decisión pendiente real de la empresa (puede generar un `Payment`), y `resolve` no depende del estado del turno. Mientras siga pendiente, el turno queda `CHECKED_IN`, pero la acción sobre esa asignación sigue visible en el panel, así que el turno no queda fantasma. Resuelto el original, el turno cierra. Es lo que recomendó `CN-20260923-001`. La prueba nueva fija además el caso con `endsAt` vencido, que se queda `CHECKED_IN`.
+  4. **Flutter.** `futureExpiry = DateTime.now() + 7 días` en UTC. La prueba sigue exigiendo `isRespondable == true` en la `PENDING` y `false` en la `DECLINED`, así que no se debilitó. Solo dejó de depender del reloj. Las otras fechas fijas del archivo (`ACCEPTED`/`DECLINED`, y el repositorio demo, que ya usa `DateTime.now()`) no influyen en `isRespondable`.
+- Hallazgos:
+  - Críticos, altos y medios: ninguno.
+  - **BAJO-1 (documentación, corregido por mí): `apps/web/e2e/README.md` describía una regla vieja del fixture.** La frase "el fixture simula la regla de la API: confirmar `COMPLETED` reabre … solo si todos los cupos quedan trabajados, y no toca … ni el cierre sin pago" seguía describiendo la regla anterior a `013`. `002` corrigió la frase contigua, pero no esta. La reescribí según `fixtures/shift-assignments.ts:232-250`: cualquiera de los dos `outcome` reabre en cuanto no queda ningún cupo pendiente y al menos uno completó. También corregí el conteo: decía "20 casos" y `--list` da 44 = 22 por proyecto.
+  - **BAJO-2 (documentación, corregido por mí): `docs/product/project-master-plan.md`, pendiente #1, daba como abiertos los cuatro bajos.** `002` declaró "sin cambios" en ese archivo. Lo actualicé: los bajos quedan cerrados en `002` (auditado aquí) y el fixture de Flutter, corregido. Los pendientes (a) y (b) siguen igual.
+  - **Informativo (no bloquea; para `implementador-sonnet` si retoma el archivo):** en `apps/web/e2e/assignment-resolution.spec.ts`, el comentario "Cerrar sin pago no reabre nada" del caso "cerrar sin pago cierra la asignación" solo es cierto en ese fixture de un cupo sin otro completado. Desde `013`, cerrar sin pago sí puede reabrir. La aserción es correcta; solo el comentario es impreciso.
+  - **Informativo:** ninguna prueba de Flutter cubre una invitación `PENDING` ya vencida (`isRespondable == false` por fecha). Es un hueco previo a este cambio, no introducido por él, y podría cubrirse con `DateTime.now() - 1 día`.
+- Documentación: `docs/guides/` no describe este comportamiento. En `client-demo.md` solo aparece el botón "Cerrar sin pago", sin el aviso ni la regla, así que no requiere cambios. `docs/reference/api.md` está coherente con el código: el texto del evento según `outcome` y el aviso de "Cerrar sin pago" en el turno cancelado, que no aparece con el turno sin cancelar. En `docs/product/project-master-plan.md` actualicé el pendiente #1 (BAJO-2). `apps/web/e2e/README.md` está corregido (BAJO-1).
+- Validaciones (corridas propias, resultado literal):
+  - `apps/api`: `npm test` → `Test Files 20 passed (20)`, `Tests 199 passed (199)`. `npx tsc --noEmit` → `TSC_API=0`.
+  - Mutación de BAJO-2: con `business.service.ts` de `HEAD`, `vitest run tests/business.service.test.ts` → `Tests 1 failed | 42 passed (43)`. El único fallo es el caso nuevo del evento `UPDATED`. Restaurado; `md5sum -c` → `OK`.
+  - Mutación de BAJO-1: quité `NO_SHOW`/`ABANDONED` de `pending` en `deriveShiftStatus`, lo que reproduce el comportamiento anterior del reemplazo. `vitest run tests/shift-state.test.ts` → `Tests 2 failed | 20 passed (22)`: fallan el caso nuevo y el caso multi-cupo de `013`. La prueba de BAJO-1 no es tautológica y detecta una regresión de la regla. Contra `HEAD` pasa, como corresponde a una prueba de caracterización: solo cambiaron comentarios. Restaurado; `md5sum -c` → `OK`.
+  - Integración contra PostgreSQL real: contenedor `cumplenow-db-1` `Up (healthy)`. Usé `DATABASE_URL` derivada del `.env` (host `127.0.0.1:5433`, base `chambeaya_test`, credenciales no impresas) y `CHAMBEAYA_INTEGRATION_TESTS=true`. `npx prisma migrate deploy` → `24 migrations found`, `No pending migrations to apply.` `npm run test:integration` → `Test Files 3 passed (3)`, `Tests 8 passed (8)`. No toqué la base de desarrollo.
+  - `apps/web`: `npx tsc --noEmit` → `TSC_WEB=0`. `npx playwright test e2e/assignment-resolution.spec.ts` → `44 passed (1.5m)`.
+  - Mutación de BAJO-3: con `page.tsx` de `HEAD`, `-g "cerrar sin pago" --project=chromium-desktop` → `1 failed | 2 passed`. Falla "cerrar sin pago cierra la asignación" con `Expected substring: "Este turno figura como cancelado"`. Restaurado; `md5sum -c` → `OK`.
+  - `apps/mobile_flutter`: `flutter test` → `+140: All tests passed!`. `flutter analyze` → `10 issues found`, los diez `info` preexistentes, sin `warning` ni `error`.
+  - Limpieza: el build de Playwright modificó `apps/web/next-env.d.ts`; lo restauré con `git checkout`. Borré `apps/web/test-results`. No quedan archivos temporales en el árbol. No toqué `CLAUDE.md` ni `.claude/agents/` y no hice commit.
+- Riesgos:
+  - `NO_EJECUTADA`: `npm run test:web:admin-real`. El cambio de `page.tsx` es texto condicional que esa suite no ejercita en un turno cancelado con "Cerrar sin pago"; sus aserciones sobre el evento (`pasó de CANCELLED a COMPLETED`) no dependen del texto nuevo. Riesgo bajo.
+  - `NO_EJECUTADA` contra base real: el texto nuevo del evento `UPDATED` en la rama `CANCELLED`. Solo se verificó con Prisma simulado. La ruta de código es la misma que `CN-20260923-001` ejecutó contra PostgreSQL (caso ii de su sonda); solo cambia el literal, sobre una columna `TEXT`.
+  - No verifiqué con una mutación la aserción negativa del aviso ("turno sin cancelar no lo muestra"). Es una comprobación directa con `not.toContainText`, y la condición `shiftCancelled &&` es la misma que ya usa el aviso de `COMPLETED`.
+  - Siguen abiertos, fuera de alcance: (a) reemplazo tras `NO_SHOW` sin posibilidad de check-in, (b) `404` al confirmar tras el primer check-in en multi-cupo, ALTO-1 del Dockerfile/Prisma, y la falta de una suite permanente multi-cupo contra base real.
+- Siguiente paso: ninguno bloqueante. `CN-20260923-002` queda cerrado y, con él, los bajos de `CN-20260922-013`. El usuario decide si abre un alcance para (a) y (b). Opcional para `implementador-sonnet`: las dos observaciones informativas.
+
+### CN-20260923-002 — Corrección de los cuatro hallazgos BAJO de `CN-20260922-013` y del fixture vencido de Flutter
+
+- Fecha: 2026-09-23 16:45 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260923-001` (auditoría de `CN-20260922-013`: BAJO-1 a BAJO-4 y fuera de alcance (c)); implementación original `CN-20260922-013`.
+- Alcance: cierre de los cuatro bajos y del fallo de prueba de Flutter, sin cambiar reglas de negocio.
+  1. BAJO-1: `shift-state.test.ts` fija con un caso nuevo el comportamiento vigente en un turno de un cupo: un reemplazo `COMPLETED` mientras el `NO_SHOW` original sigue sin resolver deja el turno `CHECKED_IN` (también con `endsAt` vencido); resuelto el original a `CANCELLED`, el turno pasa a `COMPLETED`. El comentario "comportamiento sin cambios" de `deriveShiftStatus` se corrigió para declarar este cambio.
+  2. BAJO-2: el detalle del `ShiftEvent` `UPDATED` de la reapertura (`resolveAssignment`) depende del `outcome`: `COMPLETED` conserva "al confirmar la empresa el trabajo de la asignación X"; `CANCELLED` dice "al cerrar la empresa sin pago la asignación X (...), sin quedar ninguna asignación pendiente de decisión y con otro cupo ya completado". Caso nuevo en `business.service.test.ts` que cubre ambos textos.
+  3. BAJO-3: la confirmación de "Cerrar sin pago" en un turno que figura cancelado (`AssignmentResolutionPanel`, `apps/web/app/page.tsx`) avisa que el turno puede pasar a completado (si ya no queda ningún cupo pendiente y otro ya quedó confirmado) o seguir cancelado (si lo canceló la empresa), sin prometer el resultado. Con el turno sin cancelar no aparece. Cubierto en `apps/web/e2e/assignment-resolution.spec.ts`.
+  4. BAJO-4: JSDoc de `deriveShiftStatus` actualizado a la regla vigente.
+  5. Fixture de Flutter: `talent_invitation_repository_test.dart` usaba `expiresAt: 2026-09-23T00:00Z` fija; ahora es `DateTime.now() + 7 días`, así la prueba no caduca con el reloj. Sin cambios en código de producto.
+- Archivos:
+  - Código: `apps/api/src/modules/operations/shift-state.ts` (solo comentarios), `apps/api/src/modules/business/business.service.ts` (texto del detalle de `ShiftEvent`), `apps/web/app/page.tsx` (aviso).
+  - Pruebas: `apps/api/tests/shift-state.test.ts`, `apps/api/tests/business.service.test.ts`, `apps/web/e2e/assignment-resolution.spec.ts`, `apps/mobile_flutter/test/talent_invitation_repository_test.dart`.
+  - Docs: `docs/reference/api.md` (aviso de "Cerrar sin pago" y texto del evento), `apps/web/e2e/README.md` (descripción del aviso; corregí de paso la frase que aún decía "todos sus cupos"), `docs/PROGRESO.md`.
+- Decisiones:
+  - BAJO-1: revisé la regla y no vi un defecto real. `pending` incluye `NO_SHOW`/`ABANDONED` sin resolver; el original queda visible y accionable en el panel (misma fila), así que el turno no queda fantasma. No cambié la regla: solo la fijé con prueba y corregí el comentario.
+  - BAJO-2: solo cambia el texto del detalle; ninguna condición ni escritura. El caso `COMPLETED` conserva su texto literal (las aserciones previas `stringContaining('pasó de CANCELLED a COMPLETED')` y la de `e2e-real` siguen válidas).
+  - BAJO-3: el aviso reutiliza el prefijo "Este turno figura como cancelado" del aviso de `COMPLETED` y es condicional por la misma razón (el panel no sabe si fue vencimiento o cancelación de la empresa).
+  - Fixture Flutter: fecha relativa a `DateTime.now()` (no reloj inyectado) porque `isRespondable` lee el reloj real en producción y no se debía tocar. Las otras fechas fijas del archivo pertenecen a invitaciones `DECLINED`/`ACCEPTED`, cuyo resultado no depende del reloj; las dejé.
+  - Fuera de alcance, no tocado: (a) reemplazo tras `NO_SHOW` sin check-in, (b) 404 al confirmar tras el primer check-in en multi-cupo, ALTO-1 del Dockerfile/Prisma. Sin cambios en `docs/product/project-master-plan.md` (esos pendientes no se movieron).
+- Validaciones (resultado literal):
+  - `apps/api`: `npm test` → `Test Files 20 passed (20)`, `Tests 199 passed (199)` (197 previos + 2 casos nuevos). `npx tsc --noEmit` → `TSC_API=0`.
+  - Mutación propia: con `business.service.ts` de `HEAD` → `tests/business.service.test.ts (43 tests | 1 failed)`, solo el caso nuevo de BAJO-2; restaurado. El caso de BAJO-1 es de caracterización (el código de producción no cambió), así que también pasa contra `HEAD`, como corresponde.
+  - Integración contra PostgreSQL real: contenedor `cumplenow-db-1` `Up 21 minutes (healthy)`; `DATABASE_URL` apuntada a `chambeaya_test` (host `127.0.0.1:5433`, credenciales del `.env`, no impresas) y `CHAMBEAYA_INTEGRATION_TESTS=true`. `npx prisma migrate deploy` → `No pending migrations to apply.` `npm run test:integration` → `Test Files 3 passed (3)`, `Tests 8 passed (8)`. La base de desarrollo no se tocó.
+  - `apps/web`: `npx tsc --noEmit` → `TSC_WEB=0`. `npx playwright test e2e/assignment-resolution.spec.ts` → `44 passed (1.5m)`. Mutación propia: con `page.tsx` de `HEAD`, el caso "cerrar sin pago cierra la asignación" (desktop) falla con `Expected substring: "Este turno figura como cancelado"`; restaurado.
+  - `apps/mobile_flutter`: `flutter test` → `All tests passed!` (`+140`; antes `+139 -1`). `flutter analyze` → `10 issues found` (los mismos diez `info` preexistentes).
+  - Limpieza: `apps/web/next-env.d.ts` restaurado con `git checkout` tras Playwright; borré `apps/web/test-results` (residuo de la mutación, ignorado por git). Sin archivos temporales ni commit.
+- Riesgos:
+  - `NO_EJECUTADA`: la suite real del panel (`npm run test:web:admin-real`). El cambio de `page.tsx` solo agrega texto a la confirmación de "Cerrar sin pago", que esa suite no ejercita en un turno cancelado; el resto del panel no cambió. Se cubrió contra la API simulada (44/44).
+  - El texto nuevo del evento `UPDATED` de la rama `CANCELLED` se verificó solo con Prisma simulado, no contra base real (el campo `detail` es texto libre).
+  - Siguen abiertos y fuera de alcance: (a), (b), ALTO-1 del Dockerfile/Prisma, y la falta de una prueba permanente contra base real del escenario multi-cupo.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260923-002` (diff acotado a los archivos listados). Alcance aparte, si el usuario lo decide: (a) y (b).
+
 ### CN-20260923-001 — Auditoría de `CN-20260922-013` (turnos multi-cupo parcialmente cubiertos)
 
 - Fecha: 2026-09-23 11:45 (America/Lima)

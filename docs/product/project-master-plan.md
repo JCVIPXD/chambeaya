@@ -793,13 +793,17 @@ Pendientes conocidos, por prioridad sugerida:
 1. **Turnos multi-cupo parcialmente cubiertos** (`CN-20260918-004`, `CN-20260920-006`):
    **cerrado: implementado en `CN-20260922-013` y aprobado en la auditoría
    `CN-20260923-001`**, que ejecutó el escenario contra API y PostgreSQL reales con una
-   sonda desechable (ver abajo). Quedan abiertos cuatro hallazgos bajos de esa auditoría:
-   una prueba que fije el caso "cupo reemplazado con su `NO_SHOW` original sin resolver"
-   (ahora queda `CHECKED_IN` hasta resolverlo; antes pasaba a `COMPLETED`), el texto del
-   `ShiftEvent` `UPDATED` cuando la reapertura la dispara un "Cerrar sin pago", el aviso de
-   "Cerrar sin pago" en un turno cancelado y el comentario desactualizado de
-   `deriveShiftStatus`. La misma auditoría encontró dos problemas previos, fuera de ese
-   alcance y sin corregir: (a) un reemplazo aceptado después de un `NO_SHOW` nunca puede
+   sonda desechable (ver abajo). Sus cuatro hallazgos bajos quedaron **cerrados en
+   `CN-20260923-002`** (auditado en `CN-20260923-003`): una prueba fija el caso "cupo
+   reemplazado con su `NO_SHOW` original sin resolver" (queda `CHECKED_IN` hasta
+   resolverlo; antes pasaba a `COMPLETED`; la regla no se cambió), el `ShiftEvent`
+   `UPDATED` de la reapertura nombra "cerrar sin pago" cuando esa fue la acción, el aviso de
+   "Cerrar sin pago" en un turno cancelado explica que puede pasar a completado, y el
+   comentario de `deriveShiftStatus` describe la regla vigente. El mismo cierre corrigió el
+   fixture de `apps/mobile_flutter/test/talent_invitation_repository_test.dart`, que
+   fallaba por una fecha fija vencida (hallazgo (c) de `CN-20260923-001`). La auditoría
+   `CN-20260923-001` encontró además dos problemas previos, fuera de ese alcance y sin
+   corregir: (a) un reemplazo aceptado después de un `NO_SHOW` nunca puede
    hacer check-in, porque la ventana se mide desde `startsAt` (ya cerrada) y la asignación
    nueva pasa a `NO_SHOW` al primer toque; solo cobra si la empresa lo confirma a mano; y
    (b) en un turno multi-cupo, en cuanto un trabajador hace check-in el turno pasa a

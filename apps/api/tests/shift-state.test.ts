@@ -106,6 +106,18 @@ describe('shared operational state machine', () => {
     ])).toBe('CHECKED_IN');
   });
 
+  // BAJO-1 de CN-20260923-001: fija un cambio de comportamiento de 013 en un
+  // turno de UN cupo. Un reemplazo completado mientras el NO_SHOW original
+  // sigue sin resolver no cierra el turno: queda CHECKED_IN hasta que la
+  // empresa resuelva el original (antes pasaba a COMPLETED). Una vez
+  // resuelto, cierra.
+  it('keeps a single-seat shift CHECKED_IN when a replacement completed while the original NO_SHOW is still unresolved, and closes it once resolved', () => {
+    const completed = { status: 'COMPLETED' as const, checkedInAt: new Date(), checkedOutAt: new Date() };
+    expect(deriveShiftStatus('CHECKED_IN', 1, [{ status: 'NO_SHOW' }, completed])).toBe('CHECKED_IN');
+    expect(deriveShiftStatus('CHECKED_IN', 1, [{ status: 'CANCELLED' }, completed])).toBe('COMPLETED');
+    expect(deriveShiftStatus('CHECKED_IN', 1, [{ status: 'NO_SHOW' }, completed], { endsAt: new Date('2026-09-18T00:00:00.000Z') }, new Date('2026-09-18T01:00:00.000Z'))).toBe('CHECKED_IN');
+  });
+
   it('closes a multi-seat shift as CANCELLED once every seat is resolved, none completed, and endsAt already passed', () => {
     const pastEndsAt = { endsAt: new Date('2026-09-18T00:00:00.000Z') };
     const now = new Date('2026-09-18T01:00:00.000Z');

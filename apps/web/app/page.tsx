@@ -3666,8 +3666,15 @@ function AssignmentResolutionPanel({
             ) : (
               <>
                 <strong>¿Cerrar la asignación de {workerName} sin pago?</strong>{" "}
-                No se registrará ninguna obligación de pago. Esta acción no se
-                puede deshacer.
+                No se registrará ninguna obligación de pago.
+                {shiftCancelled &&
+                  // Cerrar sin pago puede reabrir el turno a completado si ya
+                  // no queda ningún cupo pendiente de decisión y otro cupo
+                  // ya se confirmó como trabajado (CN-20260922-013); el panel
+                  // no sabe cuál es el caso, así que no promete el resultado
+                  // (BAJO-3 de CN-20260923-001).
+                  " Este turno figura como cancelado. Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado si al cerrar esta asignación ya no queda ningún cupo pendiente de tu decisión y otro cupo ya quedó confirmado como trabajado; si lo cancelaste tú, seguirá cancelado."}{" "}
+                Esta acción no se puede deshacer.
               </>
             )}
           </p>

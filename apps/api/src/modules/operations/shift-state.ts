@@ -105,9 +105,12 @@ export function isTerminalShift(status: OperationalShiftStatus) {
 }
 
 /**
- * Derives the aggregate shift state from persisted assignments. A multi-seat
- * shift stays in progress after the first check-in until every non-cancelled
- * assignment has completed.
+ * Derives the aggregate shift state from persisted assignments. A shift stays
+ * in progress after the first check-in until no assignment is left pending a
+ * decision (none `ASSIGNED`, none `NO_SHOW`/`ABANDONED` still unresolved) and
+ * at least one completed; seats resolved to `CANCELLED` no longer block the
+ * close (CN-20260922-013). If none completed, it reopens (`PUBLISHED`) or,
+ * past `endsAt`, closes as `CANCELLED`.
  */
 export function deriveShiftStatus(
   current: OperationalShiftStatus,
@@ -146,7 +149,12 @@ export function deriveShiftStatus(
   // parcialmente cubiertos" del plan maestro; contexto en CN-20260918-004 y
   // CN-20260920-004/005/006) o `CANCELLED` (que sugeriría que no pasó nada).
   // Esto cubre también, sin caso especial, el turno de un solo cupo
-  // totalmente completado (comportamiento sin cambios).
+  // totalmente completado. Un cambio de comportamiento alcanzable en un
+  // turno de un cupo: si el reemplazo se completa mientras el `NO_SHOW`
+  // original sigue sin resolver, el turno se mantiene `CHECKED_IN` hasta que
+  // la empresa resuelva el original (antes pasaba a `COMPLETED`); es
+  // coherente con la regla "ninguna decisión pendiente" y lo fija una prueba
+  // (BAJO-1 de CN-20260923-001).
   const pending = assignments.some((assignment) => ['ASSIGNED', 'NO_SHOW', 'ABANDONED'].includes(assignment.status));
   const completedCount = assignments.filter((assignment) => assignment.status === 'COMPLETED').length;
   if (!pending && completedCount > 0) return 'COMPLETED';

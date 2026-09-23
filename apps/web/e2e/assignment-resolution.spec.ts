@@ -121,6 +121,8 @@ test.describe('asignación NO_SHOW', () => {
     await expect(ana.getByText('¿Cerrar la asignación de Ana Pérez sin pago?')).toBeVisible();
     await expect(ana).toContainText('No se registrará ninguna obligación de pago');
     await expect(ana).not.toContainText('pago pendiente de');
+    // Turno sin cancelar: la confirmación no lleva el aviso del turno cancelado.
+    await expect(ana).not.toContainText(CANCELLED_NOTICE);
     expect(server.resolveCalls).toEqual([]);
 
     await ana.getByLabel('Motivo (opcional)').fill('Nunca llegó y no avisó');
@@ -206,6 +208,13 @@ test.describe('asignación ABANDONED', () => {
     const luis = row(page, 'Luis Rojas');
 
     await luis.getByRole('button', { name: closeAction('Luis Rojas'), exact: true }).click();
+    // BAJO-3 de CN-20260923-001: en un turno que figura cancelado, cerrar sin
+    // pago también avisa que el turno puede pasar a completado (o seguir
+    // cancelado si lo canceló la empresa), sin prometer el resultado.
+    await expect(luis).toContainText('No se registrará ninguna obligación de pago');
+    await expect(luis).toContainText(CANCELLED_NOTICE);
+    for (const phrase of CLOSE_NOTICE_ALL_CASES) await expect(luis).toContainText(phrase);
+    await expect(luis).not.toContainText('pago pendiente de');
     await luis.getByRole('button', { name: yesCloseAction('Luis Rojas'), exact: true }).click();
 
     await expect(page.locator('.toast')).toContainText('Asignación de Luis Rojas cerrada sin pago');
@@ -230,6 +239,13 @@ const CANCELLED_NOTICE_ALL_CASES = [
   'Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado en cuanto ya no quede ningún cupo pendiente de tu decisión y al menos uno haya quedado confirmado como trabajado',
   'si lo cancelaste tú, seguirá cancelado',
   'En todos los casos el pago pendiente se registra',
+];
+// Aviso de "Cerrar sin pago" en un turno que figura cancelado (BAJO-3 de
+// CN-20260923-001): cerrar sin pago puede completar el turno si otro cupo ya
+// estaba confirmado y no queda ninguno pendiente.
+const CLOSE_NOTICE_ALL_CASES = [
+  'pasará a completado si al cerrar esta asignación ya no queda ningún cupo pendiente de tu decisión y otro cupo ya quedó confirmado como trabajado',
+  'si lo cancelaste tú, seguirá cancelado',
 ];
 // Textos anteriores: prometían que el turno seguiría cancelado o que "se
 // actualizará al confirmar", algo que en multi-cupo no siempre ocurre.

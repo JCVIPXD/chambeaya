@@ -466,13 +466,19 @@ export class DatabaseBusinessService implements BusinessOperations {
       if (current.status === 'CANCELLED' && nextShiftStatus !== 'CANCELLED') {
         // Rastro de la única transición que saca a un turno de `CANCELLED`
         // (solo hacia `COMPLETED`).
+        // El texto depende de qué resolvió ESTA llamada: la reapertura la
+        // puede disparar un "Cerrar sin pago" cuando otro cupo ya había
+        // completado antes (BAJO-2 de CN-20260923-001).
+        const trigger = outcome === 'COMPLETED'
+          ? `al confirmar la empresa el trabajo de la asignación ${assignment.id} (${sourceLabel})`
+          : `al cerrar la empresa sin pago la asignación ${assignment.id} (${sourceLabel}), sin quedar ninguna asignación pendiente de decisión y con otro cupo ya completado`;
         await tx.shiftEvent.create({
           data: {
             shiftId: owned.id,
             actorId: session.userId,
             actorRole: 'BUSINESS',
             type: 'UPDATED',
-            detail: `El turno pasó de CANCELLED a ${nextShiftStatus} al confirmar la empresa el trabajo de la asignación ${assignment.id} (${sourceLabel}); el cierre por vencimiento no era una cancelación de la empresa`,
+            detail: `El turno pasó de CANCELLED a ${nextShiftStatus} ${trigger}; el cierre por vencimiento no era una cancelación de la empresa`,
           },
         });
       }

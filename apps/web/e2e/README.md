@@ -73,7 +73,7 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    (defecto de copy preexistente, registrado en `CN-20260918-012`).
 
 8. Cierre manual de asignaciones `NO_SHOW` / `ABANDONED`
-   (`assignment-resolution.spec.ts`, 20 casos): en `Turnos` → `Postulaciones` la
+   (`assignment-resolution.spec.ts`, 22 casos por proyecto): en `Turnos` → `Postulaciones` la
    asignación varada muestra "No se presentó a tiempo" o "Sin salida registrada" con
    "Confirmar que sí trabajó" y "Cerrar sin pago". Elegir una acción solo abre una
    confirmación (ninguna llamada a `POST .../resolve` hasta el "Sí, ..."; "Volver"
@@ -85,13 +85,15 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    de 1-2 caracteres se rechaza en el panel sin llamar a la API) y no genera pago. Cubre
    `NO_SHOW` y `ABANDONED` con ambas acciones; un turno ya `CANCELLED` (aviso "Este turno figura como
    cancelado…" que no promete el resultado y explica los casos: cierre automático por
-   vencimiento, que pasa a completado solo cuando todos sus cupos quedan confirmados como
-   trabajados, y turno cancelado por la empresa o con algún cupo sin confirmar, que sigue
-   cancelado; el pago pendiente se registra en todos; también cuando el listado cargado
+   vencimiento, que pasa a completado en cuanto ya no queda ningún cupo pendiente de decisión y
+   al menos uno quedó confirmado como trabajado, y turno cancelado por la empresa, que sigue
+   cancelado; el pago pendiente se registra en todos; "Cerrar sin pago" sobre un turno
+   cancelado muestra el mismo aviso (y no lo muestra con el turno sin cancelar); también cuando el listado cargado
    antes lo traía sin cancelar y hay que releerlo; el fixture simula la regla de la API:
-   confirmar `COMPLETED` reabre el cierre por vencimiento a `COMPLETED` solo si todos los
-   cupos quedan trabajados, y no toca (sigue `CANCELLED`) uno cancelado por la empresa, uno
-   con algún cupo sin cerrar ni el cierre sin pago; en un turno de dos cupos el turno sigue
+   resolver un cupo (con cualquiera de los dos `outcome`) reabre el cierre por vencimiento a
+   `COMPLETED` en cuanto ya no queda ningún cupo pendiente de decisión y al menos uno
+   completó, y no toca (sigue `CANCELLED`) uno cancelado por la empresa, uno con algún cupo
+   sin resolver ni uno en el que ningún cupo completó; en un turno de dos cupos el turno sigue
    cancelado y el aviso sigue en la segunda fila tras confirmar la primera, y pasa a
    completado al confirmar la segunda); errores 500 (aviso amable, la confirmación sigue abierta y
    se puede reintentar), 400 `ASSIGNMENT_NOT_RESOLVABLE` y 404 `ASSIGNMENT_NOT_FOUND` (aviso
