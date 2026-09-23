@@ -417,7 +417,13 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
         workerId,
         shiftId,
         status: 'ASSIGNED',
-        shift: { status: { in: ['PUBLISHED', 'ASSIGNED'] }, endsAt: { gt: new Date() } },
+        // La confirmación depende de la asignación propia, no del estado
+        // agregado del turno: en un turno multi-cupo, cuando otro trabajador
+        // ya hizo check-in el turno está `CHECKED_IN` y los demás asignados
+        // deben poder confirmar (y luego hacer su check-in) igual. Solo los
+        // turnos terminales (`COMPLETED`/`CANCELLED`) quedan excluidos
+        // (CN-20260923-006).
+        shift: { status: { notIn: ['COMPLETED', 'CANCELLED'] }, endsAt: { gt: new Date() } },
       },
       include: { shift: { include: { company: true } }, application: true },
     });
@@ -451,6 +457,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
     id: string;
     shiftId: string;
     status: string;
+    assignedAt?: Date | null;
     checkedInAt: Date | null;
     checkedOutAt: Date | null;
     shift: { status: string; startsAt: Date; endsAt: Date; requiredWorkers: number };
@@ -508,7 +515,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
     // arriba (la asignación pasa a `NO_SHOW` y este método ya retornó
     // `ASSIGNMENT_NOT_ACTIONABLE`): a este punto solo puede quedar la
     // violación por llegar demasiado temprano.
-    if (checkInWindowViolation(assignment.shift) === 'TOO_EARLY') throw new MarketplaceError('CHECK_IN_TOO_EARLY', 409);
+    if (checkInWindowViolation(assignment.shift, new Date(), assignment.assignedAt) === 'TOO_EARLY') throw new MarketplaceError('CHECK_IN_TOO_EARLY', 409);
     if (!assignment.checkInCredential || credential.trim() !== assignment.checkInCredential) throw new MarketplaceError('INVALID_CHECK_IN', 400);
     const checkedInAt = new Date();
     await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {

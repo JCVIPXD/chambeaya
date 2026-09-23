@@ -10,6 +10,12 @@ export type OperationalAssignmentStatus = 'ASSIGNED' | 'CANCELLED' | 'COMPLETED'
 
 export interface AssignmentSnapshot {
   status: OperationalAssignmentStatus;
+  /**
+   * Momento en que se creó la asignación (lo fija el servidor al aceptar la
+   * postulación; ningún endpoint lo modifica). Opcional: si falta, la ventana
+   * de check-in se cuenta solo desde `startsAt`.
+   */
+  assignedAt?: Date | string | null;
   workerConfirmedAt?: Date | string | null;
   checkedInAt?: Date | string | null;
   checkedOutAt?: Date | string | null;
@@ -25,6 +31,15 @@ export const CHECK_IN_EARLY_TOLERANCE_MS = 30 * 60 * 1000;
 /** Cuánto después de `startsAt` se sigue permitiendo el check-in antes de que
  * la asignación se considere `NO_SHOW` la próxima vez que se resuelva. */
 export const CHECK_IN_LATE_LIMIT_MS = 60 * 60 * 1000;
+/**
+ * Margen de check-in para una asignación creada DESPUÉS de `startsAt` (un
+ * reemplazo tras un `NO_SHOW`, o una aceptación tardía con el turno ya en
+ * curso): se cuenta desde `assignedAt`, porque la ventana relativa a
+ * `startsAt` ya venció y la asignación nueva pasaría a `NO_SHOW` en su primer
+ * toque sin que el trabajador tuviera tiempo de enterarse, confirmar y llegar
+ * (CN-20260923-006). No afecta a las asignaciones creadas antes de `startsAt`.
+ */
+export const LATE_ASSIGNMENT_CHECK_IN_GRACE_MS = 60 * 60 * 1000;
 /** Cuánto después de `endsAt` se tolera un check-in sin check-out antes de
  * que la asignación se considere `ABANDONED`. */
 export const CHECK_OUT_ABANDONED_GRACE_MS = 60 * 60 * 1000;
@@ -32,20 +47,38 @@ export const CHECK_OUT_ABANDONED_GRACE_MS = 60 * 60 * 1000;
 export type CheckInWindowViolation = 'TOO_EARLY' | 'TOO_LATE';
 
 /**
- * Ventana de tiempo válida para hacer check-in, relativa a `startsAt`. No
- * depende de `endsAt`: un turno corto puede tener su ventana de check-in más
- * angosta que su propia duración, lo cual es correcto (llegar muy tarde a un
- * turno corto también debe rechazarse).
+ * Ventana de tiempo válida para hacer check-in: se abre 30 minutos antes de
+ * `startsAt` y se cierra 60 minutos después de `startsAt`. No depende de
+ * `endsAt`: un turno corto puede tener su ventana de check-in más angosta que
+ * su propia duración, lo cual es correcto (llegar muy tarde a un turno corto
+ * también debe rechazarse; el guard contra `endsAt` vive en `checkIn`).
+ *
+ * Si se informa `assignedAt` y la asignación se creó después de `startsAt`
+ * (reemplazo tras un `NO_SHOW`, aceptación tardía), el cierre se extiende a
+ * `assignedAt + LATE_ASSIGNMENT_CHECK_IN_GRACE_MS`, sin pasar de `endsAt` si
+ * se conoce (después de `endsAt` ya no se puede hacer check-in, así que esa
+ * asignación no debe quedar `ASSIGNED` indefinidamente: pasa a `NO_SHOW` y la
+ * empresa puede resolverla). Una asignación creada antes de `startsAt` conserva
+ * exactamente la ventana original (CN-20260923-006).
  */
 export function checkInWindowViolation(
-  shift: Pick<ShiftTimingSnapshot, 'startsAt'>,
+  shift: Pick<ShiftTimingSnapshot, 'startsAt'> & Partial<Pick<ShiftTimingSnapshot, 'endsAt'>>,
   now: Date = new Date(),
+  assignedAt?: Date | string | null,
 ): CheckInWindowViolation | null {
-  const startsAt = new Date(shift.startsAt);
-  const opensAt = new Date(startsAt.getTime() - CHECK_IN_EARLY_TOLERANCE_MS);
-  const closesAt = new Date(startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS);
-  if (now < opensAt) return 'TOO_EARLY';
-  if (now > closesAt) return 'TOO_LATE';
+  const startsAtMs = new Date(shift.startsAt).getTime();
+  const opensAtMs = startsAtMs - CHECK_IN_EARLY_TOLERANCE_MS;
+  let closesAtMs = startsAtMs + CHECK_IN_LATE_LIMIT_MS;
+  if (assignedAt != null) {
+    const assignedAtMs = new Date(assignedAt).getTime();
+    if (assignedAtMs > startsAtMs) {
+      let lateClosesAtMs = assignedAtMs + LATE_ASSIGNMENT_CHECK_IN_GRACE_MS;
+      if (shift.endsAt != null) lateClosesAtMs = Math.min(lateClosesAtMs, new Date(shift.endsAt).getTime());
+      closesAtMs = Math.max(closesAtMs, lateClosesAtMs);
+    }
+  }
+  if (now.getTime() < opensAtMs) return 'TOO_EARLY';
+  if (now.getTime() > closesAtMs) return 'TOO_LATE';
   return null;
 }
 
@@ -73,7 +106,7 @@ export function resolveAssignmentLifecycle(
     return { status: assignment.status, changed: false };
   }
   if (!assignment.checkedInAt) {
-    if (checkInWindowViolation(shift, now) === 'TOO_LATE') {
+    if (checkInWindowViolation(shift, now, assignment.assignedAt) === 'TOO_LATE') {
       return { status: 'NO_SHOW', changed: true };
     }
     return { status: 'ASSIGNED', changed: false };

@@ -4,6 +4,7 @@ import {
   CHECK_IN_EARLY_TOLERANCE_MS,
   CHECK_IN_LATE_LIMIT_MS,
   CHECK_OUT_ABANDONED_GRACE_MS,
+  LATE_ASSIGNMENT_CHECK_IN_GRACE_MS,
   checkInWindowViolation,
   deriveShiftStatus,
   nextOperationalAction,
@@ -159,6 +160,42 @@ describe('checkInWindowViolation', () => {
     expect(checkInWindowViolation({ startsAt }, new Date(startsAt.getTime() - CHECK_IN_EARLY_TOLERANCE_MS - 1))).toBe('TOO_EARLY');
     expect(checkInWindowViolation({ startsAt }, new Date(startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1))).toBe('TOO_LATE');
   });
+
+  describe('assignment created after startsAt (replacement, CN-20260923-006)', () => {
+    const startsAt = new Date('2026-09-18T18:00:00.000Z');
+    // Reemplazo aceptado 3 horas después de `startsAt`: la ventana original
+    // (startsAt + 60 min) hace rato que venció.
+    const assignedAt = new Date(startsAt.getTime() + 3 * 60 * 60 * 1000);
+
+    it('measures the closing of the window from assignedAt when the assignment was created after startsAt', () => {
+      expect(checkInWindowViolation({ startsAt }, assignedAt, assignedAt)).toBeNull();
+      expect(checkInWindowViolation({ startsAt }, new Date(assignedAt.getTime() + LATE_ASSIGNMENT_CHECK_IN_GRACE_MS), assignedAt)).toBeNull();
+    });
+
+    it('still closes the window once the grace counted from assignedAt is over', () => {
+      expect(checkInWindowViolation({ startsAt }, new Date(assignedAt.getTime() + LATE_ASSIGNMENT_CHECK_IN_GRACE_MS + 1), assignedAt)).toBe('TOO_LATE');
+    });
+
+    it('keeps rejecting the same instant when no assignedAt is provided (window counted only from startsAt)', () => {
+      expect(checkInWindowViolation({ startsAt }, assignedAt)).toBe('TOO_LATE');
+    });
+
+    it('caps the extended window at endsAt when it is known, so a late assignment cannot stay open past the end of the shift', () => {
+      const endsAt = new Date(assignedAt.getTime() + 10 * 60 * 1000);
+      expect(checkInWindowViolation({ startsAt, endsAt }, endsAt, assignedAt)).toBeNull();
+      expect(checkInWindowViolation({ startsAt, endsAt }, new Date(endsAt.getTime() + 1), assignedAt)).toBe('TOO_LATE');
+    });
+
+    it('does not weaken the window of an assignment created before startsAt, whatever its assignedAt', () => {
+      const early = new Date(startsAt.getTime() - 5 * 60 * 60 * 1000);
+      const justBefore = new Date(startsAt.getTime() - 1);
+      for (const created of [early, justBefore, startsAt]) {
+        expect(checkInWindowViolation({ startsAt }, new Date(startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS), created)).toBeNull();
+        expect(checkInWindowViolation({ startsAt }, new Date(startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1), created)).toBe('TOO_LATE');
+        expect(checkInWindowViolation({ startsAt }, new Date(startsAt.getTime() - CHECK_IN_EARLY_TOLERANCE_MS - 1), created)).toBe('TOO_EARLY');
+      }
+    });
+  });
 });
 
 describe('resolveAssignmentLifecycle', () => {
@@ -171,6 +208,26 @@ describe('resolveAssignmentLifecycle', () => {
   it('flags a never-checked-in assignment as NO_SHOW once its window closes', () => {
     const now = new Date(shift.startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1);
     expect(resolveAssignmentLifecycle({ status: 'ASSIGNED' }, shift, now)).toEqual({ status: 'NO_SHOW', changed: true });
+  });
+
+  it('does not flag as NO_SHOW a replacement created after startsAt while its own grace from assignedAt is open, and flags it once that grace is over (CN-20260923-006)', () => {
+    const assignedAt = new Date(shift.startsAt.getTime() + 2 * 60 * 60 * 1000);
+    const insideGrace = new Date(assignedAt.getTime() + 10 * 60 * 1000);
+    expect(resolveAssignmentLifecycle({ status: 'ASSIGNED', assignedAt }, shift, insideGrace)).toEqual({ status: 'ASSIGNED', changed: false });
+    const afterGrace = new Date(assignedAt.getTime() + LATE_ASSIGNMENT_CHECK_IN_GRACE_MS + 1);
+    expect(resolveAssignmentLifecycle({ status: 'ASSIGNED', assignedAt }, shift, afterGrace)).toEqual({ status: 'NO_SHOW', changed: true });
+  });
+
+  it('flags NO_SHOW a late assignment once endsAt passes even if its own grace from assignedAt is still open (nobody can check in after endsAt)', () => {
+    const assignedAt = new Date(shift.endsAt.getTime() - 10 * 60 * 1000);
+    const now = new Date(shift.endsAt.getTime() + 1);
+    expect(resolveAssignmentLifecycle({ status: 'ASSIGNED', assignedAt }, shift, now)).toEqual({ status: 'NO_SHOW', changed: true });
+  });
+
+  it('still flags NO_SHOW an assignment created before startsAt at the original deadline', () => {
+    const assignedAt = new Date(shift.startsAt.getTime() - 60 * 60 * 1000);
+    const now = new Date(shift.startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1);
+    expect(resolveAssignmentLifecycle({ status: 'ASSIGNED', assignedAt }, shift, now)).toEqual({ status: 'NO_SHOW', changed: true });
   });
 
   it('leaves a checked-in assignment untouched before the post-endsAt grace period elapses', () => {

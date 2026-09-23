@@ -219,7 +219,7 @@ empresa fija (`empresa.e2e@chambeaya.test`, mismos valores en
 empieza hace 90 minutos y termina 12 segundos después de crearse; el fixture registra un
 trabajador, lo postula y lo acepta, y el caso espera a que el turno venza (con el reloj
 real) antes de abrir el panel, de modo que la API detecta el `NO_SHOW` con el turno ya
-vencido y lo cierra como `CANCELLED`. Por eso cada caso tarda unos 16 s. **Con ese
+vencido y lo cierra como `CANCELLED`. (La asignación se crea con el turno ya iniciado: su margen de check-in se cuenta desde que se asignó pero nunca pasa de `endsAt`, así que al vencer el turno sin check-in queda `NO_SHOW`; ver `CN-20260923-006`.) Por eso cada caso tarda unos 16 s. **Con ese
 turno cerrado, confirmar el trabajo deja la asignación `COMPLETED` con su pago y el
 turno `COMPLETED` (ya no `CANCELLED`), con un `ShiftEvent` `UPDATED` de la transición;
 cerrar sin pago deja el turno `CANCELLED`.** (Este caso real es de un solo cupo, así que

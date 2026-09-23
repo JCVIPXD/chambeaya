@@ -31,8 +31,11 @@ type Fixtures = {
    * real (turno, postulación de un trabajador recién registrado y aceptación).
    * No hay endpoint que permita crear una asignación ya `NO_SHOW`, y tampoco
    * uno que deje `startsAt` en el pasado y `endsAt` ya vencido: por eso el
-   * turno empieza hace 90 minutos (fuera de la ventana de check-in de 60) y
-   * termina unos segundos después de crearse; la prueba espera a que venza.
+   * turno empieza hace 90 minutos y termina unos segundos después de crearse;
+   * la prueba espera a que venza. La asignación se crea con el turno ya
+   * iniciado, así que su margen de check-in se cuenta desde que se asignó
+   * (`LATE_ASSIGNMENT_CHECK_IN_GRACE_MS`, CN-20260923-006) pero nunca pasa de
+   * `endsAt`: al vencer el turno sin check-in, la asignación pasa a `NO_SHOW`.
    */
   strandedShift: StrandedShift;
 };

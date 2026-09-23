@@ -803,12 +803,30 @@ Pendientes conocidos, por prioridad sugerida:
    fixture de `apps/mobile_flutter/test/talent_invitation_repository_test.dart`, que
    fallaba por una fecha fija vencida (hallazgo (c) de `CN-20260923-001`). La auditoría
    `CN-20260923-001` encontró además dos problemas previos, fuera de ese alcance y sin
-   corregir: (a) un reemplazo aceptado después de un `NO_SHOW` nunca puede
-   hacer check-in, porque la ventana se mide desde `startsAt` (ya cerrada) y la asignación
-   nueva pasa a `NO_SHOW` al primer toque; solo cobra si la empresa lo confirma a mano; y
-   (b) en un turno multi-cupo, en cuanto un trabajador hace check-in el turno pasa a
-   `CHECKED_IN` y `POST /api/shifts/:id/confirm` responde `404 ASSIGNMENT_NOT_FOUND` a los
-   asignados que aún no habían confirmado, así que tampoco pueden hacer check-in.
+   corregir: (a) un reemplazo aceptado después de un `NO_SHOW` nunca podía
+   hacer check-in, porque la ventana se medía desde `startsAt` (ya cerrada) y la asignación
+   nueva pasaba a `NO_SHOW` al primer toque; y (b) en un turno multi-cupo, en cuanto un
+   trabajador hacía check-in el turno pasaba a `CHECKED_IN` y `POST /api/shifts/:id/confirm`
+   respondía `404 ASSIGNMENT_NOT_FOUND` a los asignados que aún no habían confirmado, así
+   que tampoco podían hacer check-in. **Ambos quedaron corregidos en `CN-20260923-006`
+   (aprobado en la auditoría `CN-20260923-007`)**: la ventana de una asignación creada después de `startsAt`
+   se cuenta 60 minutos desde su `assignedAt` (sin pasar de `endsAt`), y `confirm` ya no
+   depende de que el turno esté `CHECKED_IN`; hay pruebas unitarias y una suite de
+   integración permanente (`apps/api/tests/integration/assignment-checkin-lifecycle.integration.test.ts`)
+   con el multi-cupo y el reemplazo contra PostgreSQL real. Queda abierta una decisión
+   relacionada, no cubierta por (a) ni (b): la empresa no puede aceptar a un postulante en
+   un turno `CHECKED_IN` (`SHIFT_NOT_ASSIGNABLE`), así que en un multi-cupo con un check-in
+   vigente un cupo vacante por `NO_SHOW` no se puede reponer con un reemplazo. Permitirlo
+   no se limita a `decideShiftApplication` (que tendría que recalcular el estado con
+   `deriveShiftStatus` en vez de fijarlo en `ASSIGNED`/`PUBLISHED`): `POST
+   /api/shifts/:id/applications` y el listado del marketplace solo admiten turnos
+   `PUBLISHED`, así que un turno `CHECKED_IN` tampoco recibe postulantes nuevos. El riesgo
+   principal es degradar un turno con presencia registrada a `ASSIGNED`/`PUBLISHED`:
+   `updateShift` solo se bloquea por el estado `CHECKED_IN` (a diferencia de `cancelShift`,
+   no revisa `checkedInAt`), así que la empresa podría volver a editar horario y cupos de un
+   turno ya en curso. Recomendación de la auditoría `CN-20260923-007`: abrirlo solo como un
+   alcance propio, con esas tres piezas y pruebas negativas de que el turno sigue
+   `CHECKED_IN` y no editable tras aceptar el reemplazo.
    Texto original del cierre: `deriveShiftStatus` ahora distingue una asignación
    `NO_SHOW`/`ABANDONED` todavía sin resolver (sigue bloqueando el cierre del turno) de una
    que la empresa ya resolvió explícitamente como `CANCELLED` (ya no bloquea): un turno
@@ -827,8 +845,10 @@ Pendientes conocidos, por prioridad sugerida:
    de que el propio trabajador completó su turno, lo que ahora puede ser falso en un
    multi-cupo parcial. El riesgo que declaraba el cierre (escenario no ejecutado contra
    base real) lo cerró la auditoría: la sonda no quedó en el repositorio, así que
-   `apps/api/tests/integration` y `apps/web/e2e-real` siguen sin un escenario multi-cupo
-   permanente.
+   `apps/api/tests/integration` y `apps/web/e2e-real` seguían sin un escenario multi-cupo
+   permanente. `CN-20260923-006` agrega en `apps/api/tests/integration` una suite permanente
+   del ciclo de check-in por asignación (multi-cupo con un check-in previo y reemplazo tras
+   un `NO_SHOW`); `apps/web/e2e-real` sigue sin un caso multi-cupo.
 2. **Indicadores de carga que todavía parpadean** (pendientes declarados en
    `CN-20260921-007` y confirmados en su auditoría `CN-20260921-008`): (a) **cerrado** en
    `CN-20260922-003` (auditado en `CN-20260922-007`) y completado en `CN-20260922-010`
@@ -928,7 +948,9 @@ Pendientes conocidos, por prioridad sugerida:
 Sin verificar de extremo a extremo: dos sesiones simultáneas; `ABANDONED`, multi-cupo y
 la cancelación de la empresa con `cancelShift` seguida de `resolve` sí se ejecutaron
 contra API y PostgreSQL reales en la auditoría `CN-20260923-001`, pero con una sonda
-desechable, no con una suite permanente del repositorio (la corrida de `CN-20260920-007`
+desechable; el multi-cupo con check-in previo y el reemplazo tras `NO_SHOW` ya tienen desde
+`CN-20260923-006` una suite permanente contra PostgreSQL en `apps/api/tests/integration`,
+y `ABANDONED` y la cancelación de la empresa con `resolve` siguen sin ella (la corrida de `CN-20260920-007`
 solo ejerce el camino en que **no** existe el `ShiftCancellation` con `actorRole: BUSINESS`);
 `demo:seed`/`demo:smoke` con estos cambios, la app Flutter contra una API real y en
 dispositivo, y la pantalla web en un móvil físico. De `CN-20260921-005` falta además abrir
