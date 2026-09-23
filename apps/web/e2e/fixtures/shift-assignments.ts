@@ -50,8 +50,11 @@ export function buildApplication(input: {
   assignmentStatus: AssignmentStatus;
   shiftId?: string;
   hasCv?: boolean;
+  /** `PENDING` deja la postulación sin asignación (aceptar/rechazar). Por defecto `ACCEPTED`. */
+  applicationStatus?: ShiftApplicationRecord['status'];
 }): ShiftApplicationRecord {
   const shiftId = input.shiftId ?? 'shift-resolution-1';
+  const pendingReview = input.applicationStatus === 'PENDING';
   const assignment: AssignmentRecord = {
     id: `assignment-${input.id}`,
     status: input.assignmentStatus,
@@ -64,17 +67,22 @@ export function buildApplication(input: {
     id: input.id,
     shiftId,
     workerId: `worker-${input.id}`,
-    status: 'ACCEPTED',
+    status: input.applicationStatus ?? 'ACCEPTED',
     createdAt: '2026-09-17T10:00:00.000Z',
     updatedAt: '2026-09-17T10:00:00.000Z',
     screeningAnswers: null,
     worker: { id: `worker-${input.id}`, name: input.workerName, email: `${input.id}@example.test`, identifier: '70000000', hasCv: input.hasCv ?? false },
-    assignment,
-    nextAction: nextActionByStatus[input.assignmentStatus],
+    assignment: pendingReview ? null : assignment,
+    nextAction: pendingReview
+      ? { actor: 'BUSINESS', code: 'REVIEW_APPLICATION', label: 'Revisa la postulación' }
+      : nextActionByStatus[input.assignmentStatus],
   };
 }
 
-type ResolveResponse = { status: number; json: unknown };
+// `hang`: la petición nunca se responde (hasta que se cierra la página); sirve
+// para probar el timeout de `request()`.
+type ResolveResponse = { status: number; json: unknown } | { hang: true };
+export type DecideCall = { shiftId: string; applicationId: string; body: { decision: string; reason?: string } };
 export type ResolveCall = { shiftId: string; assignmentId: string; body: { outcome: string; reason?: string } };
 
 export type ShiftAssignmentsServer = {
@@ -91,8 +99,17 @@ export type ShiftAssignmentsServer = {
    * API real ante una asignación `NO_SHOW`/`ABANDONED`.
    */
   resolveResponses: ResolveResponse[];
+  /** Cuerpos recibidos por `PATCH .../applications/:id` (aceptar/rechazar), en orden. */
+  decideCalls: DecideCall[];
   /**
-   * Retiene la próxima lectura `GET` del tipo indicado: el cuerpo se fija al
+   * Cantidad de próximas lecturas `GET .../applications` del turno principal
+   * que responden `500` (el sondeo de 4 s también cuenta). Se decrementa en
+   * cada lectura fallida; `Infinity` mantiene la falla hasta que se ponga en 0.
+   */
+  failApplications: number;
+  /**
+   * Retiene la próxima respuesta del tipo indicado (lectura `GET`, o la decisión
+   * `PATCH` de aceptar/rechazar con `'decide'`): el cuerpo se fija al
    * llegar la petición (es lo que el servidor "leyó" en ese instante) pero la
    * respuesta no se entrega hasta `release()`. Permite reproducir una lectura
    * emitida antes de una escritura que llega después del refresco posterior.
@@ -100,7 +117,7 @@ export type ShiftAssignmentsServer = {
   holdNext: (kind: HoldableRead) => HeldRead;
 };
 
-export type HoldableRead = 'shift' | 'applications' | 'payments';
+export type HoldableRead = 'shift' | 'applications' | 'payments' | 'decide';
 export type HeldRead = {
   /** Se resuelve cuando la lectura retenida ya llegó al servidor simulado. */
   reached: Promise<void>;
@@ -151,6 +168,11 @@ export async function installShiftAssignmentsApi(
      * `COMPLETED`; el cancelado por la empresa nunca se reabre.
      */
     cancelledByCompany?: boolean;
+    /**
+     * Otros turnos de la empresa (aparecen en el listado y responden su propia
+     * lectura y sus postulaciones) para probar el cambio de turno.
+     */
+    otherShifts?: { shift: ShiftRecord; applications: ShiftApplicationRecord[] }[];
   },
 ): Promise<ShiftAssignmentsServer> {
   const server: ShiftAssignmentsServer = {
@@ -160,6 +182,8 @@ export async function installShiftAssignmentsApi(
     resolveCalls: [],
     log: [],
     resolveResponses: [],
+    decideCalls: [],
+    failApplications: 0,
     holdNext: (kind) => {
       let markReached!: () => void;
       let markDelivered!: () => void;
@@ -171,7 +195,7 @@ export async function installShiftAssignmentsApi(
       return { reached, delivered, release };
     },
   };
-  const holds: Record<HoldableRead, Hold[]> = { shift: [], applications: [], payments: [] };
+  const holds: Record<HoldableRead, Hold[]> = { shift: [], applications: [], payments: [], decide: [] };
   const shiftPath = `/api/business/shifts/${input.shift.id}`;
 
   // Responde una lectura; si hay una retención armada para ese tipo, la
@@ -189,20 +213,51 @@ export async function installShiftAssignmentsApi(
     hold.markDelivered();
   };
 
+  const otherShiftFor = (pathname: string) =>
+    (input.otherShifts ?? []).find(
+      (other) => pathname === `/api/business/shifts/${other.shift.id}` || pathname === `/api/business/shifts/${other.shift.id}/applications`,
+    );
+
   await page.route((url) => url.pathname.startsWith('/api/business/'), async (route) => {
     const request = route.request();
     const { pathname } = new URL(request.url());
     const method = request.method();
+    const decideMatch = pathname.match(new RegExp(`^${shiftPath}/applications/([^/]+)$`));
     const resolveMatch = pathname.match(new RegExp(`^${shiftPath}/assignments/([^/]+)/resolve$`));
 
     if (method === 'GET' && pathname === '/api/business/shifts') {
       server.log.push(`${method} ${pathname}`);
-      await route.fulfill({ json: [{ ...server.shift, status: input.listedStatus ?? server.shift.status }] });
+      await route.fulfill({
+        json: [
+          { ...server.shift, status: input.listedStatus ?? server.shift.status },
+          ...(input.otherShifts ?? []).map((other) => other.shift),
+        ],
+      });
+    } else if (method === 'GET' && otherShiftFor(pathname)) {
+      server.log.push(`${method} ${pathname}`);
+      const other = otherShiftFor(pathname)!;
+      await route.fulfill({ json: pathname.endsWith('/applications') ? other.applications : other.shift });
+    } else if (method === 'PATCH' && decideMatch) {
+      server.log.push(`${method} ${pathname}`);
+      const body = request.postDataJSON() as DecideCall['body'];
+      server.decideCalls.push({ shiftId: input.shift.id, applicationId: decideMatch[1], body });
+      const application = server.applications.find((item) => item.id === decideMatch[1]);
+      if (!application) {
+        await route.fulfill({ status: 404, json: { error: 'APPLICATION_NOT_FOUND' } });
+        return;
+      }
+      application.status = body.decision as ShiftApplicationRecord['status'];
+      await answerRead(route, 'decide', application);
     } else if (method === 'GET' && pathname === shiftPath) {
       server.log.push(`${method} ${pathname}`);
       await answerRead(route, 'shift', server.shift);
     } else if (method === 'GET' && pathname === `${shiftPath}/applications`) {
       server.log.push(`${method} ${pathname}`);
+      if (server.failApplications > 0) {
+        server.failApplications -= 1;
+        await route.fulfill({ status: 500, json: { error: 'INTERNAL_ERROR' } });
+        return;
+      }
       await answerRead(route, 'applications', server.applications);
     } else if (method === 'GET' && pathname === '/api/business/payments') {
       server.log.push(`${method} ${pathname}`);
@@ -213,6 +268,10 @@ export async function installShiftAssignmentsApi(
       const body = request.postDataJSON() as ResolveCall['body'];
       server.resolveCalls.push({ shiftId: input.shift.id, assignmentId, body });
       const forced = server.resolveResponses.shift();
+      if (forced && 'hang' in forced) {
+        await new Promise<void>((resolve) => page.once('close', () => resolve()));
+        return;
+      }
       if (forced) {
         await route.fulfill({ status: forced.status, json: forced.json });
         return;

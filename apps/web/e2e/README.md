@@ -73,7 +73,7 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    (defecto de copy preexistente, registrado en `CN-20260918-012`).
 
 8. Cierre manual de asignaciones `NO_SHOW` / `ABANDONED`
-   (`assignment-resolution.spec.ts`, 22 casos por proyecto): en `Turnos` → `Postulaciones` la
+   (`assignment-resolution.spec.ts`, 27 casos por proyecto, uno solo en escritorio): en `Turnos` → `Postulaciones` la
    asignación varada muestra "No se presentó a tiempo" o "Sin salida registrada" con
    "Confirmar que sí trabajó" y "Cerrar sin pago". Elegir una acción solo abre una
    confirmación (ninguna llamada a `POST .../resolve` hasta el "Sí, ..."; "Volver"
@@ -109,8 +109,20 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    y los botones de la confirmación ("Sí, confirmar trabajo de X", "Sí, cerrar sin pago la
    asignación de X", "Volver sin cerrar la asignación de X") llevan el nombre del
    trabajador, con el foco inicial en "Volver". Para provocar estas carreras la API con
-   estado ofrece `server.holdNext('applications' | 'payments' | 'shift')`, que retiene la
-   próxima lectura (con el cuerpo que el servidor leyó al llegar) hasta `release()`. La API con estado vive en
+   estado ofrece `server.holdNext('applications' | 'payments' | 'shift' | 'decide')`, que retiene la
+   próxima respuesta (con el cuerpo que el servidor leyó al llegar) hasta `release()`. Tres
+   comportamientos de robustez del panel se prueban con el reloj de la página adelantado
+   (`page.clock.fastForward`, sin esperar el sondeo de 4 s ni el timeout de 15 s): (a) un
+   sondeo de postulaciones que falla (`server.failApplications`) con la lista ya en pantalla
+   la conserva y muestra un aviso `role="alert"` sin reemplazarla, y se recupera solo; si la
+   falla es la primera carga (sin datos previos) sigue mostrando el estado de error; (b) una
+   petición que nunca responde (`server.holdNext('payments')`, o `server.resolveResponses.push({ hang: true })`)
+   vence a los 15 s (`REQUEST_TIMEOUT_MS` de `lib/business-api.ts`) y libera "Guardando…"
+   (toast de "cierre registrado, pero no pudimos actualizar toda la pantalla", o error con la
+   confirmación abierta y reintento); (c) aceptar una postulación y cambiar de turno mientras
+   se guarda no repone la lista de ese turno en el otro (solo escritorio: en pantallas
+   angostas `.row-action` está oculto por CSS, preexistente, así que el panel móvil no ofrece
+   aceptar ni rechazar). "Guardando…" además vive en una región `role="status"`. La API con estado vive en
    `fixtures/shift-assignments.ts` (`installShiftAssignmentsApi`, `page.route` sobre el
    fixture base). La contraparte contra API y PostgreSQL reales está en `e2e-real/` (ver
    más abajo).
@@ -156,7 +168,7 @@ siempre con Chromium; no es una prueba en un teléfono físico):
     en la API (`apps/api/tests/applicant_cv.routes.test.ts` y
     `apps/api/tests/integration/applicant-cv.integration.test.ts`).
 
-Noventa ejecuciones en total (45 casos × escritorio y móvil). Cada una tiene su navegador aislado y su estado de
+104 ejecuciones en total según `npx playwright test --list` (52 casos × escritorio y móvil; una se omite en móvil). Cada una tiene su navegador aislado y su estado de
 API propio. Una petición API no prevista, una petición externa o un error
 JavaScript sin capturar hacen fallar la prueba. No se permiten reintentos que
 oculten fallos.

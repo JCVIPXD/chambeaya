@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import { REQUEST_TIMEOUT_MS } from '../lib/business-api';
 import { account, expect, test } from './fixtures/business-api';
 import {
   buildApplication,
@@ -220,7 +221,10 @@ test.describe('asignación ABANDONED', () => {
     await expect(page.locator('.toast')).toContainText('Asignación de Luis Rojas cerrada sin pago');
     expect(server.resolveCalls[0].body.outcome).toBe('CANCELLED');
     expect(server.payments).toEqual([]);
-    // Cerrar sin pago no reabre nada: el turno cancelado sigue igual.
+    // En este fixture (un solo cupo, sin otro cupo completado) cerrar sin pago
+    // no reabre nada: el turno cancelado sigue igual. En un multi-cupo con otro
+    // cupo ya completado y ninguno pendiente sí lo reabriría a COMPLETED
+    // (CN-20260922-013); eso lo cubre el caso de reapertura más abajo.
     expect(server.shift.status).toBe('CANCELLED');
     await expect(luis.getByText('Sin salida registrada')).toHaveCount(0);
   });
@@ -635,6 +639,11 @@ test.describe('lecturas obsoletas y refresco tras el cierre', () => {
     await expect(saving).toBeVisible();
     await expect(saving).toBeDisabled();
     await expect(saving).toHaveText('Guardando…');
+    // Región viva (`role="status"`): un lector de pantalla anuncia el estado,
+    // no solo el cambio de nombre del botón (BAJO-3 de CN-20260920-002).
+    const savingStatus = ana.getByRole('status');
+    await expect(savingStatus).toHaveText('Guardando el cierre de Ana Pérez…');
+    await expect(savingStatus).toHaveAttribute('aria-live', 'polite');
     await expect(ana.getByText('¿Confirmas que Ana Pérez sí trabajó este turno?')).toBeVisible();
     await expect(openingActions).toHaveCount(0);
     await page.waitForTimeout(300);
@@ -669,5 +678,165 @@ test.describe('lecturas obsoletas y refresco tras el cierre', () => {
     refresh.release();
     await expect(ana.locator('.assignment-resolution')).toHaveCount(0);
     await expect(ana.getByText('Proceso cerrado')).toBeVisible();
+  });
+});
+
+test.describe('sondeo de postulaciones que falla', () => {
+  // El sondeo (4 s) corre con el reloj de la página; se adelanta en vez de esperar.
+  const POLL_MS = 4500;
+
+  test('con datos en pantalla, un sondeo fallido conserva la lista, avisa sin bloquearla y se recupera solo', async ({ page, isMobile }) => {
+    await page.clock.install();
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift({ requiredWorkers: 2, confirmedWorkers: 1 }),
+      applications: [
+        buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' }),
+        buildApplication({ id: 'app-luis', workerName: 'Luis Rojas', assignmentStatus: 'ASSIGNED' }),
+      ],
+    });
+    await openShifts(page, isMobile);
+    await expect(page.locator('.application-row')).toHaveCount(2);
+    await expect(page.locator('.application-count')).toHaveText('2 postulaciones');
+
+    server.failApplications = Number.POSITIVE_INFINITY;
+    await page.clock.fastForward(POLL_MS);
+    const notice = page.locator('.application-stale-notice');
+    await expect(notice).toContainText('No pudimos actualizar las postulaciones');
+    await expect(notice).toHaveAttribute('role', 'alert');
+    // La lista sigue ahí, con sus acciones, y no aparece el estado de error a pantalla completa.
+    await expect(page.locator('.application-row')).toHaveCount(2);
+    await expect(row(page, 'Ana Pérez').getByRole('button', { name: confirmAction('Ana Pérez'), exact: true })).toBeVisible();
+    await expect(page.locator('.application-error')).toHaveCount(0);
+    await expect(page.locator('.application-count')).toHaveText('2 postulaciones');
+
+    // Otro sondeo fallido: la lista sigue sin parpadear.
+    await page.clock.fastForward(POLL_MS);
+    await expect(page.locator('.application-row')).toHaveCount(2);
+    await expect(notice).toHaveCount(1);
+
+    // Vuelve la red: el siguiente sondeo quita el aviso y conserva la lista.
+    server.failApplications = 0;
+    await page.clock.fastForward(POLL_MS);
+    await expect(notice).toHaveCount(0);
+    await expect(page.locator('.application-row')).toHaveCount(2);
+  });
+
+  test('sin datos previos (primera carga) el fallo sigue mostrando el estado de error y el siguiente sondeo lo recupera', async ({ page, isMobile }) => {
+    await page.clock.install();
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift(),
+      applications: [buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' })],
+    });
+    server.failApplications = 1;
+    await openShifts(page, isMobile);
+
+    const errorState = page.locator('.application-error');
+    await expect(errorState).toContainText('No pudimos cargar las postulaciones');
+    await expect(errorState).toHaveAttribute('role', 'alert');
+    await expect(page.locator('.application-count')).toHaveText('No disponibles');
+    await expect(page.locator('.application-row')).toHaveCount(0);
+    await expect(page.locator('.application-stale-notice')).toHaveCount(0);
+
+    await page.clock.fastForward(POLL_MS);
+    await expect(errorState).toHaveCount(0);
+    await expect(row(page, 'Ana Pérez')).toBeVisible();
+  });
+});
+
+test.describe('peticiones colgadas', () => {
+  test('una lectura del refresco que nunca responde vence por timeout y libera "Guardando…"', async ({ page, isMobile }) => {
+    await page.clock.install();
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift(),
+      applications: [buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' })],
+    });
+    await openShifts(page, isMobile);
+    const ana = row(page, 'Ana Pérez');
+    // La lectura de pagos del refresco posterior al cierre no se entrega nunca.
+    server.holdNext('payments');
+
+    await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
+    await expect(ana.getByRole('button', { name: 'Guardando el cierre de Ana Pérez', exact: true })).toBeDisabled();
+    expect(server.resolveCalls).toHaveLength(1);
+
+    // Pasado el tope de `request()`, la lectura se aborta y la pantalla se libera.
+    await page.clock.fastForward(REQUEST_TIMEOUT_MS + 1000);
+    await expect(page.locator('.toast')).toContainText('El cierre quedó registrado, pero no pudimos actualizar toda la pantalla');
+    await expect(ana.locator('.assignment-resolution')).toHaveCount(0);
+    // El cierre sí llegó al servidor una sola vez.
+    expect(server.resolveCalls).toHaveLength(1);
+    expect(server.applications[0].assignment!.status).toBe('COMPLETED');
+  });
+
+  test('un cierre que nunca responde vence por timeout, muestra el error y permite reintentar', async ({ page, isMobile }) => {
+    await page.clock.install();
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift(),
+      applications: [buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' })],
+    });
+    server.resolveResponses.push({ hang: true });
+    await openShifts(page, isMobile);
+    const ana = row(page, 'Ana Pérez');
+
+    await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
+    await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
+    await expect(ana.getByRole('button', { name: 'Guardando el cierre de Ana Pérez', exact: true })).toBeDisabled();
+
+    await page.clock.fastForward(REQUEST_TIMEOUT_MS + 1000);
+    await expect(ana.getByRole('alert')).toContainText('No pudimos registrar el cierre');
+    // Ya no está ocupado: la confirmación sigue abierta y se puede reintentar.
+    const retry = ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true });
+    await expect(retry).toBeEnabled();
+    await retry.click();
+    await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
+    expect(server.resolveCalls).toHaveLength(2);
+  });
+});
+
+test.describe('decidir una postulación y cambiar de turno', () => {
+  test('la respuesta de la decisión no repone la lista de otro turno si se cambió de turno mientras se guardaba', async ({ page, isMobile }) => {
+    // Preexistente: en pantallas angostas `.row-action` es `display: none`
+    // (globals.css, media query móvil), así que el panel no ofrece aceptar ni
+    // rechazar desde el móvil; el caso solo es alcanzable en escritorio.
+    test.skip(Boolean(isMobile), 'aceptar/rechazar no se muestra en el panel móvil');
+    const otherShift = buildShift({ id: 'shift-resolution-2', title: 'Cocinero de apoyo' });
+    const server = await installShiftAssignmentsApi(page, {
+      shift: buildShift({ status: 'PUBLISHED' }),
+      applications: [
+        buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'ASSIGNED', applicationStatus: 'PENDING' }),
+      ],
+      otherShifts: [
+        {
+          shift: otherShift,
+          applications: [
+            buildApplication({ id: 'app-luis', workerName: 'Luis Rojas', assignmentStatus: 'ASSIGNED', shiftId: otherShift.id }),
+          ],
+        },
+      ],
+    });
+    await openShifts(page, isMobile);
+    await expect(row(page, 'Ana Pérez')).toBeVisible();
+    const decision = server.holdNext('decide');
+
+    await page.getByRole('button', { name: 'Aceptar a Ana Pérez', exact: true }).click();
+    await decision.reached;
+
+    // Mientras la decisión se guarda, la empresa abre el otro turno.
+    await page.locator('.managed-shift').filter({ hasText: 'Cocinero de apoyo' }).click();
+    await expect(row(page, 'Luis Rojas')).toBeVisible();
+    await expect(row(page, 'Ana Pérez')).toHaveCount(0);
+
+    decision.release();
+    await decision.delivered;
+    await expect(page.locator('.toast')).toContainText('Postulación aceptada');
+    await page.waitForTimeout(600);
+
+    // Sin reintentos automáticos: el siguiente sondeo (4 s) repararía la lista
+    // y ocultaría que la respuesta del turno anterior se aplicó.
+    expect(server.decideCalls).toHaveLength(1);
+    expect(await row(page, 'Luis Rojas').count()).toBe(1);
+    expect(await row(page, 'Ana Pérez').count()).toBe(0);
+    expect(await page.locator('.application-row').count()).toBe(1);
   });
 });

@@ -560,7 +560,10 @@ export default function HomePage() {
         }
       } catch {
         if (!cancelled && acceptResponse(sequence, request)) {
-          setShiftApplications([]);
+          // Un sondeo fallido no borra lo que ya está en pantalla (un bache de
+          // red haría parpadear la lista cada 4 s): se conservan los datos
+          // previos y solo se muestra el aviso. Sin datos previos (primera
+          // carga), la lista ya está vacía y se muestra el estado de error.
           setApplicationsError(
             "No pudimos cargar las postulaciones de este turno. Inténtalo nuevamente en unos segundos.",
           );
@@ -1118,6 +1121,7 @@ export default function HomePage() {
     decision: "ACCEPTED" | "REJECTED",
   ) {
     if (!session || !selectedShift) return;
+    const shiftId = selectedShift.id;
     let reason: string | undefined;
     if (decision === "REJECTED") {
       const entered = window.prompt(
@@ -1133,7 +1137,7 @@ export default function HomePage() {
     try {
       await businessApi.applications.decide(
         session.token,
-        selectedShift.id,
+        shiftId,
         applicationId,
         decision,
         reason,
@@ -1144,15 +1148,23 @@ export default function HomePage() {
       invalidateInFlight(sequence);
       const request = issueRequest(sequence);
       const [updatedShift, applications, pending] = await Promise.all([
-        businessApi.shifts.get(session.token, selectedShift.id),
-        businessApi.applications.list(session.token, selectedShift.id),
+        businessApi.shifts.get(session.token, shiftId),
+        businessApi.applications.list(session.token, shiftId),
         businessApi.applications.pending(session.token),
       ]);
       const mapped = mapShift(updatedShift);
       setShifts((current) =>
         current.map((item) => (item.id === mapped.id ? mapped : item)),
       );
-      if (acceptResponse(sequence, request)) setShiftApplications(applications);
+      // Si mientras tanto se cambió de turno (o de vista), la lista visible ya
+      // es de otro turno: la respuesta de este no se le aplica (BAJO-2 de
+      // CN-20260920-004). El turno y los pendientes sí se actualizan.
+      if (
+        selectedShiftIdRef.current === shiftId &&
+        acceptResponse(sequence, request)
+      ) {
+        setShiftApplications(applications);
+      }
       setPendingApplications(pending);
       showToast(
         decision === "ACCEPTED"
@@ -1231,9 +1243,33 @@ export default function HomePage() {
     }
     setResolutionBusy(true);
     setResolutionError(null);
+    // `finally`: el estado "ocupado" se libera pase lo que pase (error, 401,
+    // excepción inesperada o una petición que venció por timeout), para que
+    // ninguna fila quede fija en "Guardando…" (BAJO-1 de CN-20260920-002).
+    try {
+      await performResolution(
+        session.token,
+        shiftId,
+        assignmentId,
+        outcome,
+        reason,
+        workerName,
+      );
+    } finally {
+      setResolutionBusy(false);
+    }
+  }
+  async function performResolution(
+    token: string,
+    shiftId: string,
+    assignmentId: string,
+    outcome: AssignmentResolutionOutcome,
+    reason: string,
+    workerName: string,
+  ) {
     try {
       await businessApi.assignments.resolve(
-        session.token,
+        token,
         shiftId,
         assignmentId,
         outcome,
@@ -1242,7 +1278,6 @@ export default function HomePage() {
     } catch (error) {
       const code = error instanceof ApiError ? error.code : null;
       if (error instanceof ApiError && error.status === 401) {
-        setResolutionBusy(false);
         await logout();
         return;
       }
@@ -1262,7 +1297,7 @@ export default function HomePage() {
             ? "Esta asignación ya no está pendiente de cierre; puede que ya se haya cerrado. Actualizamos la lista."
             : "No encontramos esta asignación en el turno. Actualizamos la lista.",
         );
-        await refreshAfterResolution(session.token, shiftId);
+        await refreshAfterResolution(token, shiftId);
         setResolution(null);
         setResolutionReason("");
       } else {
@@ -1272,17 +1307,15 @@ export default function HomePage() {
             : "No pudimos registrar el cierre. Revisa tu conexión e inténtalo nuevamente.",
         );
       }
-      setResolutionBusy(false);
       return;
     }
     // El cierre ya está confirmado. La confirmación (y su "Guardando…") se
     // mantiene hasta que termine el refresco: si se quitara antes, la fila
     // volvería a mostrar las acciones de apertura, deshabilitadas y sin
     // indicador, hasta que llegaran las lecturas.
-    const refreshed = await refreshAfterResolution(session.token, shiftId);
+    const refreshed = await refreshAfterResolution(token, shiftId);
     setResolution(null);
     setResolutionReason("");
-    setResolutionBusy(false);
     if (!refreshed) {
       showToast(
         "El cierre quedó registrado, pero no pudimos actualizar toda la pantalla. Vuelve a abrir el turno para verlo.",
@@ -1700,7 +1733,7 @@ export default function HomePage() {
                   <span className="application-count" aria-live="polite">
                     {applicationsLoading || !applicationsMatchSelectedShift
                       ? "Actualizando…"
-                      : applicationsError
+                      : applicationsError && shiftApplications.length === 0
                         ? "No disponibles"
                         : `${shiftApplications.length} ${shiftApplications.length === 1 ? "postulación" : "postulaciones"}`}
                   </span>
@@ -1711,11 +1744,23 @@ export default function HomePage() {
                     applicationsLoading || !applicationsMatchSelectedShift
                   }
                 >
+                  {!applicationsLoading &&
+                    applicationsMatchSelectedShift &&
+                    applicationsError &&
+                    shiftApplications.length > 0 && (
+                      // Datos previos conservados tras un sondeo fallido: el
+                      // aviso no reemplaza la lista.
+                      <p className="application-stale-notice" role="alert">
+                        <AlertTriangle size={14} /> No pudimos actualizar las
+                        postulaciones; mostramos la última lista cargada.
+                        Reintentaremos en unos segundos.
+                      </p>
+                    )}
                   {applicationsLoading || !applicationsMatchSelectedShift ? (
                     <p className="empty-inline" role="status">
                       Cargando postulaciones…
                     </p>
-                  ) : applicationsError ? (
+                  ) : applicationsError && shiftApplications.length === 0 ? (
                     <div className="empty-state application-error" role="alert">
                       <AlertTriangle size={24} />
                       <strong>No pudimos cargar las postulaciones</strong>
@@ -3696,6 +3741,15 @@ function AssignmentResolutionPanel({
               {error}
             </p>
           )}
+          {/* Región viva siempre montada: un lector de pantalla anuncia el
+              cambio a "Guardando…" solo si la región ya existía vacía. */}
+          <p
+            className="assignment-resolution-saving"
+            role="status"
+            aria-live="polite"
+          >
+            {busy ? `Guardando el cierre de ${workerName}…` : ""}
+          </p>
           <div className="assignment-resolution-actions">
             <button
               className={

@@ -867,14 +867,35 @@ Pendientes conocidos, por prioridad sugerida:
    en `CN-20260922-008`): `_poll` de `WorkerMessagesPage` asigna `SynchronousFuture(...)` en
    vez de `Future.value(...)`, así que `FutureBuilder` observa `ConnectionState.done` antes
    de construir el fotograma y ya no pinta el indicador sobre la lista en cada sondeo de
-   4 s. (c) En el panel web, un sondeo de postulaciones que **falla** con datos
-   en pantalla vacía la lista y muestra el error (`apps/web/app/page.tsx`, `catch` de
-   `refreshApplications`): no ocurre cada 4 s, pero un bache de red sí parpadea; corregirlo
-   cambia el contrato de errores de esa vista y de `assignment-resolution.spec.ts`. (d) El
-   sondeo de Flutter se pausa con la pestaña oculta, pero **no** con la aplicación en
-   segundo plano (no hay `AppLifecycleState`).
-3. **`resolutionBusy` no se libera con una petición colgada** (BAJO-1 de `CN-20260920-002`,
-   causa raíz preexistente): `submitResolution` es el único sitio que lo pone a `false` y
+   4 s. (c) **cerrado en `CN-20260923-008`** (aprobado por la auditoría `CN-20260923-009`): en el panel web, un
+   sondeo de postulaciones que falla con datos en pantalla ya no vacía la lista: conserva lo
+   que se ve y muestra un aviso `role="alert"` sobre ella (`apps/web/app/page.tsx`); sin
+   datos previos (primera carga) sigue mostrando el estado de error a pantalla completa.
+   (d) **cerrado en `CN-20260923-008`** (aprobado por la auditoría `CN-20260923-009`): el sondeo de Flutter ya no corre con la aplicación
+   en segundo plano (mixin `ForegroundPolling`, `lib/features/marketplace/foreground_polling.dart`,
+   con `WidgetsBindingObserver`): cancela el temporizador en `paused`/`hidden`/`detached` y,
+   al volver, lo rearma y ejecuta un sondeo inmediato; `inactive` (superposición transitoria,
+   ventana sin foco en escritorio) se trata como primer plano. Lo usan "Mis postulaciones",
+   "Mensajes" y la hoja de conversación abierta. Queda sin cubrir por pruebas de widget
+   el caso "la página se monta con la app ya en segundo plano": con los fotogramas
+   desactivados en `paused`/`hidden` el binding de pruebas no construye el widget (la
+   auditoría lo verificó por lectura: `startForegroundPolling` no arma el temporizador si el
+   estado inicial es de segundo plano y `stopForegroundPolling` lo cancela y quita el
+   observador; falta probarlo en un dispositivo real).
+3. **Cerrado en `CN-20260923-008` (aprobado por la auditoría `CN-20260923-009`): `resolutionBusy` no se liberaba con
+   una petición colgada** (BAJO-1, BAJO-2 y BAJO-3 de `CN-20260920-002`/`004`).
+   `request()` de `apps/web/lib/business-api.ts` ahora aborta con `AbortController` a los 15 s
+   (`REQUEST_TIMEOUT_MS`; lanza `ApiError(0, 'REQUEST_TIMEOUT')`), `submitResolution` libera
+   `resolutionBusy` en un `finally`, `decideApplication` ya no aplica su lectura a un turno que
+   dejó de ser el seleccionado (`selectedShiftIdRef`) y "Guardando…" tiene una región
+   `role="status"` `aria-live="polite"`. Riesgo aceptado en la auditoría `CN-20260923-009`:
+   el timeout aplica a todas las peticiones del panel, incluidas las escrituras no
+   idempotentes (crear turno, enviar mensaje, crear invitación, editar la empresa); si una
+   vence pero el servidor sí la procesó, el panel muestra un error y un reintento manual
+   puede duplicarla (un turno o un mensaje repetido). `resolve` y aceptar/rechazar no se
+   duplican (la API responde `400` al segundo intento). Se conserva abajo el texto original
+   del hallazgo.
+   Texto original: `resolutionBusy` no se libera con una petición colgada (causa raíz preexistente): `submitResolution` es el único sitio que lo pone a `false` y
    `request()` de `apps/web/lib/business-api.ts` no usa `AbortSignal` ni timeout, así que
    una lectura del refresco que nunca responde deja la confirmación fija en "Guardando…"
    con todos sus botones deshabilitados, y al cambiar de vista o de turno ninguna fila
@@ -883,8 +904,14 @@ Pendientes conocidos, por prioridad sugerida:
    un timeout en `request()`. Del mismo cierre siguen abiertos BAJO-2 (`decideApplication`
    no comprueba `selectedShiftIdRef` antes de aplicar la respuesta) y BAJO-3 (el estado
    "Guardando…" no tiene región `aria-live`).
-4. **Garantías declaradas de la transacción de `resolveAssignment`** (BAJO-1 y BAJO-2 de
-   `CN-20260920-004`): `cancelShift` abre su `$transaction` sin `isolationLevel`, así que
+4. **Cerrado en `CN-20260923-008` (aprobado por la auditoría `CN-20260923-009`): garantías declaradas de la
+   transacción de `resolveAssignment`** (BAJO-1 y BAJO-2 de `CN-20260920-004`).
+   `cancelShift` ahora usa `withSerializableRetry` + `isolationLevel: 'Serializable'` y relee el
+   turno y los check-ins dentro de la transacción; `resolveAssignment` relee la asignación y el
+   turno (`current`) dentro de la suya, así que un reintento ya no reutiliza lecturas previas.
+   Fijado con una suite de integración real (`shift-cancel-resolve-race.integration.test.ts`:
+   12 rondas simultáneas; contra el código anterior falla en la primera ronda con
+   `cancel=200 resolve=200`). Texto original del hallazgo: `cancelShift` abre su `$transaction` sin `isolationLevel`, así que
    la lectura de `ShiftCancellation` dentro de la transacción `Serializable` de
    `resolveAssignment` no está aislada por el motor frente a una cancelación concurrente
    (la ventana es estrecha y no pierde datos: el conflicto de escritura sobre `Shift` sí se
@@ -944,13 +971,27 @@ Pendientes conocidos, por prioridad sugerida:
 11. **Fuera de este ciclo**: la duplicación `CompanyWorkerContact` frente a
     `WorkerTalentProfile` y el rediseño de `main.dart` (inyección de dependencias, tema y
     sesión).
+12. **El panel web de empresa en pantallas angostas no permite aceptar ni rechazar
+    postulaciones** (preexistente desde el commit inicial; declarado en `CN-20260923-008` y
+    confirmado en su auditoría `CN-20260923-009`). `apps/web/app/globals.css`, media query
+    `@media (max-width: 700px)`, oculta `.row-action { display: none; }`, y los únicos botones
+    que llaman a `decideApplication` ("Aceptar a …" / "Rechazar a …" en `Turnos` →
+    `Postulaciones`) usan esa clase. A 700 px o menos la empresa ve las postulaciones
+    `PENDING` pero no puede decidirlas; el cierre de `NO_SHOW`/`ABANDONED` sí está disponible
+    (usa otras clases). Por eso el caso e2e de la guarda `selectedShiftIdRef` de
+    `decideApplication` se omite en el proyecto móvil (`test.skip`). Requiere una decisión de
+    producto/diseño (mostrar las acciones en móvil con un área táctil adecuada, o declarar el
+    panel de empresa solo para escritorio); la misma regla también oculta otras acciones de
+    fila (por ejemplo la del encabezado del chat), que conviene revisar juntas.
 
 Sin verificar de extremo a extremo: dos sesiones simultáneas; `ABANDONED`, multi-cupo y
 la cancelación de la empresa con `cancelShift` seguida de `resolve` sí se ejecutaron
 contra API y PostgreSQL reales en la auditoría `CN-20260923-001`, pero con una sonda
 desechable; el multi-cupo con check-in previo y el reemplazo tras `NO_SHOW` ya tienen desde
 `CN-20260923-006` una suite permanente contra PostgreSQL en `apps/api/tests/integration`,
-y `ABANDONED` y la cancelación de la empresa con `resolve` siguen sin ella (la corrida de `CN-20260920-007`
+y desde `CN-20260923-008` la carrera simultánea entre `cancelShift` y `resolve` sobre un
+`NO_SHOW` también (`shift-cancel-resolve-race.integration.test.ts`); `ABANDONED` y la
+reapertura bloqueada por una cancelación previa de la empresa siguen sin ella (la corrida de `CN-20260920-007`
 solo ejerce el camino en que **no** existe el `ShiftCancellation` con `actorRole: BUSINESS`);
 `demo:seed`/`demo:smoke` con estos cambios, la app Flutter contra una API real y en
 dispositivo, y la pantalla web en un móvil físico. De `CN-20260921-005` falta además abrir

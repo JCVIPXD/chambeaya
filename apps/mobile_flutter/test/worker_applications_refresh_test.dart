@@ -355,6 +355,55 @@ void main() {
     await _unmount(tester);
   });
 
+  // Pendiente #2d del plan maestro: el sondeo se pausaba con la pestaña oculta,
+  // pero seguía corriendo con la aplicación en segundo plano.
+  testWidgets('polling stops while the app is in the background and catches up '
+      'as soon as it returns to the foreground', (tester) async {
+    addTearDown(() => _goForeground(tester));
+    final repository = _Repository();
+    await _pumpPage(tester, repository);
+    expect(repository.stateCalls, 1);
+
+    await _tick(tester);
+    expect(repository.stateCalls, 2, reason: 'foreground: normal polling');
+
+    _goBackground(tester);
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    expect(repository.stateCalls, 2, reason: 'no polling in the background');
+
+    _goForeground(tester);
+    await tester.pump();
+    expect(repository.stateCalls, 3, reason: 'immediate catch-up on resume');
+
+    await _tick(tester);
+    expect(repository.stateCalls, 4, reason: 'regular polling resumes');
+    await _unmount(tester);
+  });
+
+  testWidgets('hidden counts as background, but inactive (a transient overlay) '
+      'keeps polling', (tester) async {
+    addTearDown(() => _goForeground(tester));
+    final repository = _Repository();
+    await _pumpPage(tester, repository);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await _tick(tester);
+    expect(repository.stateCalls, 2, reason: 'inactive still polls');
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump(const Duration(seconds: 3));
+    expect(repository.stateCalls, 2, reason: 'hidden: no polling');
+
+    _goForeground(tester);
+    await tester.pump();
+    expect(repository.stateCalls, 3);
+    await _unmount(tester);
+  });
+
   testWidgets('inside the real WorkerShell the hidden Postulaciones tab does '
       'not poll, and the visible one does', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
@@ -521,6 +570,28 @@ Future<void> _tick(WidgetTester tester) async {
   await tester.pump(const Duration(seconds: 3));
   await tester.pump();
   await tester.pump();
+}
+
+/// The OS moves the app to the background through `inactive` and `hidden`, and
+/// back through `inactive` (the framework asserts on skipped transitions).
+void _goBackground(WidgetTester tester) {
+  for (final state in [
+    AppLifecycleState.inactive,
+    AppLifecycleState.hidden,
+    AppLifecycleState.paused,
+  ]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+  }
+}
+
+void _goForeground(WidgetTester tester) {
+  for (final state in [
+    AppLifecycleState.hidden,
+    AppLifecycleState.inactive,
+    AppLifecycleState.resumed,
+  ]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+  }
 }
 
 // Unmounts the page so its periodic timer is cancelled by `dispose` before the

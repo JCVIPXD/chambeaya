@@ -319,6 +319,111 @@ void main() {
       await _unmount(tester);
     },
   );
+
+  // Pendiente #2d del plan maestro: el sondeo de mensajes tampoco debe correr
+  // con la aplicación en segundo plano.
+  testWidgets(
+    'the message poll stops while the app is in the background and catches up '
+    'on resume; inactive keeps polling',
+    (tester) async {
+      addTearDown(() => _goForeground(tester));
+      final repository = _HoldableConversationsRepository()
+        ..data = [_conversation('c1', 'Restaurante La Mar')];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerMessagesPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(repository.calls, 1);
+
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      await tester.pump();
+      expect(repository.calls, 2, reason: 'foreground: normal polling');
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      await tester.pump();
+      expect(repository.calls, 3, reason: 'inactive still polls');
+
+      _goBackground(tester);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 4));
+      expect(repository.calls, 3, reason: 'no polling in the background');
+
+      _goForeground(tester);
+      await tester.pump();
+      await tester.pump();
+      expect(repository.calls, 4, reason: 'immediate catch-up on resume');
+
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      await tester.pump();
+      expect(repository.calls, 5, reason: 'regular polling resumes');
+      await _unmount(tester);
+    },
+  );
+
+  testWidgets(
+    'an open conversation stops polling its messages in the background and '
+    'catches up on resume',
+    (tester) async {
+      addTearDown(() => _goForeground(tester));
+      final repository = _HoldableConversationsRepository()
+        ..data = [_conversation('c1', 'Restaurante La Mar')];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerMessagesPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restaurante La Mar'));
+      await tester.pumpAndSettle();
+      final opened = repository.conversationCalls;
+      expect(opened, greaterThanOrEqualTo(1), reason: 'the sheet loaded');
+
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      expect(repository.conversationCalls, opened + 1);
+
+      _goBackground(tester);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 4));
+      expect(repository.conversationCalls, opened + 1);
+
+      _goForeground(tester);
+      await tester.pump();
+      await tester.pump();
+      expect(repository.conversationCalls, opened + 2);
+      await _unmount(tester);
+    },
+  );
+}
+
+/// The OS moves the app to the background through `inactive` and `hidden`, and
+/// back through `inactive` (the framework asserts on skipped transitions).
+void _goBackground(WidgetTester tester) {
+  for (final state in [
+    AppLifecycleState.inactive,
+    AppLifecycleState.hidden,
+    AppLifecycleState.paused,
+  ]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+  }
+}
+
+void _goForeground(WidgetTester tester) {
+  for (final state in [
+    AppLifecycleState.hidden,
+    AppLifecycleState.inactive,
+    AppLifecycleState.resumed,
+  ]) {
+    tester.binding.handleAppLifecycleStateChanged(state);
+  }
 }
 
 // Unmounts the page so its periodic refresh timer is cancelled by `dispose`
@@ -360,7 +465,14 @@ class _HoldableConversationsRepository extends DemoWorkerMarketplaceRepository {
   List<WorkerConversationRecord> data = const [];
   var hold = false;
   var calls = 0;
+  var conversationCalls = 0;
   final pending = <Completer<List<WorkerConversationRecord>>>[];
+
+  @override
+  Future<WorkerConversationRecord> workerConversation(String conversationId) {
+    conversationCalls++;
+    return Future.value(data.firstWhere((item) => item.id == conversationId));
+  }
 
   @override
   Future<List<WorkerConversationRecord>> workerConversations() {

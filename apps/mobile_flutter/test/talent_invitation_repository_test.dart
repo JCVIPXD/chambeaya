@@ -171,6 +171,43 @@ void main() {
       );
     },
   );
+
+  // Hueco previo (informativo de CN-20260923-003): ninguna prueba cubría una
+  // invitación `PENDING` cuya fecha ya venció. `isRespondable` depende del reloj
+  // real, así que las fechas son relativas a "ahora".
+  test('a PENDING invitation whose expiresAt already passed is not respondable, '
+      'whatever the status says', () {
+    Map<String, dynamic> json(String status, DateTime expiresAt) => {
+      'id': 'invitation-1',
+      'status': status,
+      'message': null,
+      'expiresAt': expiresAt.toUtc().toIso8601String(),
+      'respondedAt': null,
+      'createdAt': '2026-09-01T00:00:00.000Z',
+      'shift': null,
+      'companyId': 'company-1',
+      'companyName': 'Restaurante La Mar',
+    };
+    final now = DateTime.now();
+
+    final expiredYesterday = TalentInvitation.fromJson(
+      json('PENDING', now.subtract(const Duration(days: 1))),
+    );
+    final expiredSecondsAgo = TalentInvitation.fromJson(
+      json('PENDING', now.subtract(const Duration(seconds: 5))),
+    );
+    final stillOpen = TalentInvitation.fromJson(
+      json('PENDING', now.add(const Duration(days: 1))),
+    );
+
+    expect(expiredYesterday.status, 'PENDING');
+    expect(expiredYesterday.isRespondable, isFalse);
+    expect(expiredSecondsAgo.isRespondable, isFalse);
+    // Control: the same invitation with a future date is respondable, so the
+    // date (not the status) is what closes the expired ones.
+    expect(stillOpen.isRespondable, isTrue);
+  });
+
 }
 
 class _ScriptedClient extends http.BaseClient {

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
 import '../discovery/discovery_models.dart';
+import 'foreground_polling.dart';
 import 'marketplace_data.dart';
 import 'marketplace_repository.dart';
 
@@ -30,8 +31,15 @@ class WorkerApplicationsPage extends StatefulWidget {
   State<WorkerApplicationsPage> createState() => _WorkerApplicationsPageState();
 }
 
-class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
+class _WorkerApplicationsPageState extends State<WorkerApplicationsPage>
+    with ForegroundPolling<WorkerApplicationsPage> {
   static const _pollInterval = Duration(seconds: 3);
+
+  @override
+  Duration get pollInterval => _pollInterval;
+
+  @override
+  void onPollTick() => _poll();
 
   /// A single failed background refresh is usually a network blip that the
   /// next tick (3 s later) fixes: a notice that appeared and vanished that
@@ -62,7 +70,6 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
   // result, so the poll is skipped.
   var _tabVisible = true;
   ValueListenable<TickerModeData>? _tickerMode;
-  Timer? _refreshTimer;
   final Set<String> _confirmed = {};
   final Set<String> _checkedIn = {};
   final Set<String> _checkedOut = {};
@@ -75,8 +82,9 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
     // Decisions are made from the business panel, so there is no local user
     // action that can invalidate this view. Poll while the shell keeps this
     // page alive in its IndexedStack to reflect accept/reject decisions
-    // without requiring a full reload.
-    _refreshTimer = Timer.periodic(_pollInterval, (_) => _poll());
+    // without requiring a full reload. The timer only runs while the app is in
+    // the foreground (see `ForegroundPolling`).
+    startForegroundPolling();
   }
 
   @override
@@ -126,7 +134,7 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
+    stopForegroundPolling();
     _tickerMode?.removeListener(_onTickerModeChanged);
     super.dispose();
   }
@@ -141,7 +149,7 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
   }
 
   void _poll() {
-    if (!mounted || !_tabVisible || _requestPending) return;
+    if (!mounted || !_tabVisible || !appInForeground || _requestPending) return;
     unawaited(_refresh());
   }
 
@@ -707,10 +715,17 @@ class WorkerMessagesPage extends StatefulWidget {
   State<WorkerMessagesPage> createState() => _WorkerMessagesPageState();
 }
 
-class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
+class _WorkerMessagesPageState extends State<WorkerMessagesPage>
+    with ForegroundPolling<WorkerMessagesPage> {
   late Future<List<WorkerConversationRecord>> _loading;
-  Timer? _refreshTimer;
   var _refreshing = false;
+
+  @override
+  Duration get pollInterval => const Duration(seconds: 4);
+
+  @override
+  void onPollTick() => unawaited(_poll());
+
   // True while the last background refresh failed. The list already on screen
   // is kept as is; the flag only drives a discreet notice and is cleared by
   // the next successful refresh.
@@ -725,14 +740,12 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
       // itself via `FutureBuilder`), so this needs `setState` to repaint it.
       if (mounted) setState(() => _refreshing = false);
     });
-    _refreshTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (mounted) _poll();
-    });
+    startForegroundPolling();
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
+    stopForegroundPolling();
     super.dispose();
   }
 
@@ -976,26 +989,33 @@ class _ConversationSheet extends StatefulWidget {
   State<_ConversationSheet> createState() => _ConversationSheetState();
 }
 
-class _ConversationSheetState extends State<_ConversationSheet> {
+class _ConversationSheetState extends State<_ConversationSheet>
+    with ForegroundPolling<_ConversationSheet> {
   WorkerConversationRecord? _conversation;
   final _composer = TextEditingController();
-  Timer? _refreshTimer;
   var _loading = true;
   var _sending = false;
   var _refreshing = false;
   String? _error;
+
+  @override
+  Duration get pollInterval => const Duration(seconds: 4);
+
+  @override
+  void onPollTick() {
+    if (mounted && !_loading && !_sending) unawaited(_load());
+  }
+
   @override
   void initState() {
     super.initState();
     _load();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (mounted && !_loading && !_sending) _load();
-    });
+    startForegroundPolling();
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
+    stopForegroundPolling();
     _composer.dispose();
     super.dispose();
   }

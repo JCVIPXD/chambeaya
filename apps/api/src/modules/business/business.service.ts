@@ -179,11 +179,21 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async cancelShift(session: AuthSession, id: string, reason: string) {
     if (reason.trim().length < 3) throw new BusinessValidationError('INVALID_CANCELLATION_REASON');
-    const shift = await this.ownedShift(session, id);
-    if (isTerminalShift(shift.status) || shift.status === 'CHECKED_IN') throw new BusinessValidationError('SHIFT_NOT_CANCELLABLE');
-    const checkedIn = await this.prisma.shiftAssignment.count({ where: { shiftId: shift.id, checkedInAt: { not: null } } });
-    if (checkedIn > 0) throw new BusinessValidationError('SHIFT_NOT_CANCELLABLE');
-    return this.prisma.$transaction(async (tx) => {
+    // Solo comprueba la propiedad (404 si el turno no es de la empresa); el
+    // estado y las asignaciones se leen DENTRO de la transacción reintentable.
+    const owned = await this.ownedShift(session, id);
+    // `Serializable` + reintento (BAJO-1 y BAJO-2 de CN-20260920-004): antes esta
+    // transacción no tenía aislamiento y los guards se evaluaban fuera de ella,
+    // así que un `resolveAssignment` concurrente (que también es Serializable)
+    // podía leer un estado que la cancelación estaba a punto de cambiar. Con el
+    // mismo aislamiento el motor detecta el conflicto (`P2034`) y el reintento
+    // vuelve a leer el turno y las asignaciones, no reutiliza una lectura previa.
+    return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      const shift = await tx.shift.findUnique({ where: { id: owned.id } });
+      if (!shift) throw new BusinessRecordNotFoundError('SHIFT_NOT_FOUND');
+      if (isTerminalShift(shift.status) || shift.status === 'CHECKED_IN') throw new BusinessValidationError('SHIFT_NOT_CANCELLABLE');
+      const checkedIn = await tx.shiftAssignment.count({ where: { shiftId: shift.id, checkedInAt: { not: null } } });
+      if (checkedIn > 0) throw new BusinessValidationError('SHIFT_NOT_CANCELLABLE');
       // Incluye `NO_SHOW` junto con `ASSIGNED` (punto 3 de CN-20260922-013):
       // una asignación `NO_SHOW` sin resolver sobrevivía intacta a la
       // cancelación del turno completo (el guard de `checkedInAt` de arriba
@@ -197,7 +207,7 @@ export class DatabaseBusinessService implements BusinessOperations {
       await tx.shiftCancellation.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', reason: reason.trim() } });
       await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'CANCELLED', detail: reason.trim() } });
       return tx.shift.update({ where: { id: shift.id }, data: { status: 'CANCELLED', confirmedWorkers: 0 }, include: { company: true } });
-    });
+    }, { isolationLevel: 'Serializable' }));
   }
 
   async getSubscription(session: AuthSession) {
@@ -342,17 +352,14 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async resolveAssignment(session: AuthSession, shiftId: string, assignmentId: string, outcome: AssignmentResolutionOutcome, reason?: string) {
     const owned = await this.ownedShift(session, shiftId);
-    // `current` es el turno ya puesto al día por el ciclo de vida (si esa
-    // llamada marcó `NO_SHOW`/`ABANDONED` y cerró el turno como `CANCELLED`, aquí
-    // ya figura `CANCELLED`). `owned` es la lectura previa y puede estar
-    // obsoleta: nunca debe ser la base del cálculo del estado del turno (BAJO-5
-    // de CN-20260918-004).
-    const { shift: current } = await this.resolveShiftAssignmentsLifecycle(owned);
-    const assignment = await this.prisma.shiftAssignment.findFirst({
-      where: { id: assignmentId, shiftId: owned.id },
-      include: { shift: { include: { company: true } } },
-    });
-    if (!assignment) throw new BusinessRecordNotFoundError('ASSIGNMENT_NOT_FOUND');
+    // Pone al día el ciclo de vida (`NO_SHOW`/`ABANDONED`, y el cierre del turno
+    // como `CANCELLED` si corresponde) en su propia transacción. Su resultado
+    // NO se usa como base del cálculo: `owned` y ese resultado son lecturas
+    // previas que pueden quedar obsoletas (BAJO-5 de CN-20260918-004) y, sobre
+    // todo, un reintento de la transacción de abajo (`P2034`) las reutilizaría
+    // tal cual (BAJO-2 de CN-20260920-004). La asignación y el turno (`current`)
+    // se leen dentro de la transacción reintentable.
+    await this.resolveShiftAssignmentsLifecycle(owned);
     // Una asignación `ABANDONED` (hizo check-in, nunca hizo check-out, ya
     // pasó el margen) o `NO_SHOW` (nunca hizo check-in, ventana cerrada)
     // admite este cierre manual: son las dos situaciones donde el sistema
@@ -365,9 +372,23 @@ export class DatabaseBusinessService implements BusinessOperations {
     // check-in a tiempo (por ejemplo, un problema con la app o la señal).
     // `ASSIGNED` sigue su curso normal; `COMPLETED`/`CANCELLED` ya están
     // cerradas.
-    const sourceStatus = assignment.status;
-    if (!['ABANDONED', 'NO_SHOW'].includes(sourceStatus)) throw new BusinessValidationError('ASSIGNMENT_NOT_RESOLVABLE');
     return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      // Lectura DENTRO de la transacción (y por tanto en cada reintento): si una
+      // cancelación del turno (`cancelShift`) o otra resolución concurrente
+      // cambió la asignación, el reintento la ve y responde
+      // `ASSIGNMENT_NOT_RESOLVABLE` en vez de pisarla (y generar un pago sobre un
+      // turno ya cancelado).
+      const assignment = await tx.shiftAssignment.findFirst({
+        where: { id: assignmentId, shiftId: owned.id },
+        include: { shift: { include: { company: true } } },
+      });
+      if (!assignment) throw new BusinessRecordNotFoundError('ASSIGNMENT_NOT_FOUND');
+      const sourceStatus = assignment.status;
+      if (!['ABANDONED', 'NO_SHOW'].includes(sourceStatus)) throw new BusinessValidationError('ASSIGNMENT_NOT_RESOLVABLE');
+      // `current`: el turno ya puesto al día por el ciclo de vida (si marcó
+      // `NO_SHOW`/`ABANDONED` y cerró el turno como `CANCELLED`, aquí ya figura
+      // `CANCELLED`), releído en cada intento.
+      const current = assignment.shift;
       const completedAt = new Date();
       const updated = await tx.shiftAssignment.update({
         where: { id: assignment.id },

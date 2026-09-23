@@ -185,21 +185,46 @@ export class ApiError extends Error {
   }
 }
 
+// Tiempo máximo de una petición (incluida la lectura del cuerpo). Sin un tope,
+// una petición que nunca responde deja colgado a quien la espera: por ejemplo el
+// estado "Guardando…" del cierre de una asignación (BAJO-1 de CN-20260920-002).
+// Al vencer se aborta y se lanza `ApiError(0, 'REQUEST_TIMEOUT')`.
+export const REQUEST_TIMEOUT_MS = 15_000;
+
 async function request<T>(path: string, options: RequestInit & { token?: string } = {}): Promise<T> {
-  const { token, headers, ...init } = options;
-  const response = await fetch(`${apiUrl}${path}`, {
-    ...init,
-    headers: {
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...headers,
-    },
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({})) as { error?: string };
-    throw new ApiError(response.status, payload.error ?? 'REQUEST_FAILED');
+  const { token, headers, signal: callerSignal, ...init } = options;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  const abortWithCaller = () => controller.abort();
+  if (callerSignal?.aborted) controller.abort();
+  else callerSignal?.addEventListener('abort', abortWithCaller, { once: true });
+  try {
+    const response = await fetch(`${apiUrl}${path}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...headers,
+      },
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      throw new ApiError(response.status, payload.error ?? 'REQUEST_FAILED');
+    }
+    // `await` a propósito: el temporizador también cubre la lectura del cuerpo.
+    return response.status === 204 ? undefined as T : await (response.json() as Promise<T>);
+  } catch (error) {
+    if (timedOut) throw new ApiError(0, 'REQUEST_TIMEOUT');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', abortWithCaller);
   }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 
 export const authApi = {

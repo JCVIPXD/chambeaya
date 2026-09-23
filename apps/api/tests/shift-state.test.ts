@@ -186,6 +186,25 @@ describe('checkInWindowViolation', () => {
       expect(checkInWindowViolation({ startsAt, endsAt }, new Date(endsAt.getTime() + 1), assignedAt)).toBe('TOO_LATE');
     });
 
+    // BAJO-2 de CN-20260923-007: la rama `max(startsAt + 60 min, ...)`. En un
+    // turno de menos de 60 minutos con una asignación tardía, el tope de
+    // `endsAt` deja el margen extendido por debajo de la ventana original
+    // (`startsAt + 60 min`); el `max` impide que la asignación tardía tenga una
+    // ventana MÁS angosta que la de una creada a tiempo. Sin él, la ventana
+    // se cerraría en `endsAt` en vez de en `startsAt + 60 min`.
+    it('never closes a late assignment window before the original startsAt + 60 min, even in a shift shorter than that', () => {
+      const shortShift = { startsAt, endsAt: new Date(startsAt.getTime() + 30 * 60 * 1000) };
+      const lateAssignedAt = new Date(startsAt.getTime() + 10 * 60 * 1000);
+      // Entre `endsAt` (startsAt + 30) y `startsAt + 60`: sigue abierta por el `max`.
+      const afterEnd = new Date(startsAt.getTime() + 45 * 60 * 1000);
+      expect(checkInWindowViolation(shortShift, afterEnd, lateAssignedAt)).toBeNull();
+      expect(checkInWindowViolation(shortShift, new Date(startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS), lateAssignedAt)).toBeNull();
+      expect(checkInWindowViolation(shortShift, new Date(startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1), lateAssignedAt)).toBe('TOO_LATE');
+      // Igual que la ventana de una asignación creada a tiempo en el mismo turno.
+      const onTime = new Date(startsAt.getTime() - 60 * 60 * 1000);
+      expect(checkInWindowViolation(shortShift, afterEnd, onTime)).toBeNull();
+    });
+
     it('does not weaken the window of an assignment created before startsAt, whatever its assignedAt', () => {
       const early = new Date(startsAt.getTime() - 5 * 60 * 60 * 1000);
       const justBefore = new Date(startsAt.getTime() - 1);
@@ -222,6 +241,15 @@ describe('resolveAssignmentLifecycle', () => {
     const assignedAt = new Date(shift.endsAt.getTime() - 10 * 60 * 1000);
     const now = new Date(shift.endsAt.getTime() + 1);
     expect(resolveAssignmentLifecycle({ status: 'ASSIGNED', assignedAt }, shift, now)).toEqual({ status: 'NO_SHOW', changed: true });
+  });
+
+  it('keeps a late assignment in a shift shorter than 60 minutes ASSIGNED until startsAt + 60 min, not only until endsAt (BAJO-2 de CN-20260923-007)', () => {
+    const shortShift = { startsAt: shift.startsAt, endsAt: new Date(shift.startsAt.getTime() + 30 * 60 * 1000) };
+    const assignedAt = new Date(shift.startsAt.getTime() + 10 * 60 * 1000);
+    const betweenEndAndOriginalDeadline = new Date(shift.startsAt.getTime() + 45 * 60 * 1000);
+    expect(resolveAssignmentLifecycle({ status: 'ASSIGNED', assignedAt }, shortShift, betweenEndAndOriginalDeadline)).toEqual({ status: 'ASSIGNED', changed: false });
+    const afterOriginalDeadline = new Date(shift.startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1);
+    expect(resolveAssignmentLifecycle({ status: 'ASSIGNED', assignedAt }, shortShift, afterOriginalDeadline)).toEqual({ status: 'NO_SHOW', changed: true });
   });
 
   it('still flags NO_SHOW an assignment created before startsAt at the original deadline', () => {

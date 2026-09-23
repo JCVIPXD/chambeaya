@@ -54,6 +54,144 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260923-009 — Auditoría de `CN-20260923-008` (Alcance D: robustez del panel web, sondeo de Flutter en primer plano, `cancelShift`/`resolveAssignment` Serializable y notas menores)
+
+- Fecha: 2026-09-23 13:58 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260923-008`.
+- Alcance: revisión independiente del diff sin commitear sobre `0045435` (16 archivos modificados y 2 nuevos). Revisé primero corrección, concurrencia y pérdida de datos en la API, después el panel web y el mixin de Flutter. Repetí todas las validaciones declaradas y las mutaciones, más una propia (quitar `Serializable` de `cancelShift`). Medí también qué ramas de la carrera ejerce realmente la suite de integración.
+- Archivos:
+  - Revisados: `apps/api/src/modules/business/business.service.ts` (`cancelShift`, `resolveAssignment`, `decideShiftApplication`, `withSerializableRetry`), `apps/api/src/modules/operations/shift-state.ts`, `apps/api/tests/business.service.test.ts`, `apps/api/tests/shift-state.test.ts`, `apps/api/tests/integration/shift-cancel-resolve-race.integration.test.ts`, `apps/web/lib/business-api.ts`, `apps/web/app/page.tsx`, `apps/web/app/globals.css`, `apps/web/e2e/assignment-resolution.spec.ts`, `apps/web/e2e/fixtures/shift-assignments.ts`, `apps/web/e2e/README.md`, `apps/mobile_flutter/lib/features/marketplace/foreground_polling.dart`, `apps/mobile_flutter/lib/features/marketplace/worker_secondary_pages.dart`, `apps/mobile_flutter/lib/features/profile/talent_invitation_repository.dart` y las tres pruebas de Flutter modificadas.
+  - Modificados por la auditoría (solo documentación):
+    - `docs/reference/api.md`: alcance real de la suite de la carrera y `500` cuando se agotan los reintentos `P2034`; timeout de 15 s, `finally`, región `role="status"` y aviso de sondeo fallido en la interfaz de `resolve`.
+    - `docs/product/project-master-plan.md`: pendientes 2(c), 2(d), 3 y 4 pasan de "pendiente de auditoría" a "aprobado por `CN-20260923-009`"; riesgo aceptado del timeout en escrituras no idempotentes; pendiente nuevo 12 (aceptar/rechazar en el panel móvil); "Sin verificar" actualizado con la suite nueva.
+    - `docs/guides/client-demo.md`: los sondeos se pausan en segundo plano.
+  - No se tocó código de producción, pruebas, `CLAUDE.md` ni `.claude/agents/`.
+- Decisiones (hallazgos):
+  - Críticos, altos y medios: ninguno.
+  - **Verificación del punto 1 (API):**
+    - `cancelShift`: solo `ownedShift` (propiedad, `404`) queda fuera de la transacción. El estado del turno y el conteo de check-ins se leen con `tx` dentro de `withSerializableRetry` con `isolationLevel: 'Serializable'`. Siguen cancelándose `ASSIGNED` y `NO_SHOW` (`CN-20260922-013`), y los eventos, `ShiftCancellation` y códigos de error no cambian.
+    - `resolveAssignment`: el ciclo de vida corre antes, en su propia transacción. La asignación y `current` (`assignment.shift`) se leen con `tx` en cada intento, y ninguna lectura previa entra en el cálculo. `owned` solo aporta `id`, que es inmutable.
+    - La relectura cierra el escenario que declaró el implementador: el reintento ve `CANCELLED` y responde `400 ASSIGNMENT_NOT_RESOLVABLE` sin `Payment` ni `shift.update`.
+    - `BusinessValidationError` y `BusinessRecordNotFoundError` no se reintentan. `withSerializableRetry` solo reintenta `P2034`, con un máximo de 3 intentos.
+    - La reapertura (`deriveShiftStatus`, `ShiftCancellation` con `actorRole: BUSINESS`) queda intacta.
+  - **BAJO-1 (pruebas; documentado, no bloquea):** la carrera real casi siempre la gana la cancelación. En dos corridas con registro de resultados, 23 de 24 rondas fueron `cancel` y 1 fue `resolve`.
+    - Contra el código de `HEAD` falla en la ronda 1 (3 de 3 corridas), así que fija la relectura de `resolve`.
+    - Quitar solo `{ isolationLevel: 'Serializable' }` de `cancelShift` **sobrevivió a 4 corridas** de la suite real. Ese aislamiento lo fija la prueba unitaria `opens its transaction with Serializable isolation`.
+    - El aislamiento es necesario. Sin él, `updateMany` en `READ COMMITTED` saltaría la fila ya `COMPLETED` y el `shift.update` final dejaría el turno `CANCELLED` con un pago. `api.md` lo aclara ahora.
+    - Sugerencia para otro ciclo: una variante que retrase a propósito la cancelación (o un `pg_sleep` en una sonda) para ejercer la rama en que gana `resolve`.
+  - **BAJO-2 (web; riesgo aceptado y documentado):** el timeout de 15 s aplica a todas las escrituras del panel, no solo a `resolve`.
+    - Si una escritura no idempotente vence pero el servidor la procesó, un reintento manual puede duplicarla. Pasa con `shifts.create`, `conversations.createMessage`, `talent.invitations.create` y la edición de empresa.
+    - `resolve` y `decide` no duplican: la API responde `400 ASSIGNMENT_NOT_RESOLVABLE` o `400 APPLICATION_ALREADY_DECIDED`, lo verifiqué en el código.
+    - Antes la petición quedaba colgada sin límite, y el usuario podía recargar y repetir igual. El riesgo cambia de forma más que de tamaño, así que no bloquea.
+    - Ninguna petición legítima de `request()` sube archivos: todas llevan JSON. La descarga de CV usa su propio `fetch` y `admin-api.ts` no cambia. Queda registrado en el plan maestro, pendiente 3.
+  - **BAJO-3 (web, caso borde):** si el temporizador vence mientras se lee el cuerpo de una respuesta de error (`!response.ok`), el `catch` sustituye el `ApiError(status)` real por `ApiError(0, 'REQUEST_TIMEOUT')`.
+    - Ejemplo: un `401` cuyo cuerpo tarda más de 15 s no dispararía el cierre de sesión.
+    - Requiere un servidor que envíe las cabeceras y retenga el cuerpo. Es improbable y no se corrige en este ciclo.
+    - Sugerencia: marcar `timedOut` solo cuando el error proviene del aborto, o conservar el `ApiError` ya construido.
+  - **Otras verificaciones de la web:**
+    - `clearTimeout` y `removeEventListener` están en el `finally`.
+    - Una `signal` abortada por el llamador relanza el `AbortError` original, no `REQUEST_TIMEOUT`, y hoy ningún llamador pasa `signal`. El desmontaje no aborta peticiones: el efecto usa `cancelled`.
+    - El sondeo cada 4 s con un timeout de 15 s puede tener hasta ~4 lecturas en vuelo. Ya ocurría sin timeout, y `acceptResponse` ordena las respuestas.
+    - Al cambiar de turno el efecto vacía `shiftApplications`, así que el aviso de datos conservados nunca muestra la lista de otro turno.
+    - `performResolution` y el `finally` preservan los caminos previos (401, `ASSIGNMENT_NOT_RESOLVABLE`, refresco parcial).
+  - **Verificación del punto 3 (Flutter):**
+    - `stopForegroundPolling` cancela el `Timer` y quita el observador en los tres `dispose`.
+    - El temporizador y la reanudación comprueban `mounted` y `_appInForeground`.
+    - Al volver pasa por `hidden` → `inactive` → `resumed`: se sondea una sola vez, en `inactive`, porque `resumed` ya no cambia `_appInForeground`. No hay doble sondeo.
+    - `startForegroundPolling` no arma el temporizador si el estado inicial es de segundo plano. Un `lifecycleState` nulo cuenta como primer plano.
+    - Los dos casos sin prueba de widget (montar y desmontar en segundo plano) quedan cubiertos por lectura. El riesgo es bajo: en el peor caso habría un sondeo de más o de menos al cambiar de estado.
+    - No queda ningún `Timer.periodic` fuera del mixin en `lib/`.
+  - **Punto 4 (notas menores):**
+    - El comentario del e2e es correcto.
+    - La prueba de invitación usa fechas relativas y tiene control positivo. Muta bien: `isRespondable` sin fecha la hace fallar.
+    - Las dos pruebas de la rama `max` fallan sin `Math.max` (`2 failed | 70 passed` sobre los dos archivos unitarios). Cierran BAJO-2 de `CN-20260923-007`.
+  - **Punto 5 (hallazgo preexistente):** confirmado. `@media (max-width: 700px) { .row-action { display: none; } }` (`globals.css`, línea 429, presente desde el commit inicial `e192110`) oculta los únicos botones que llaman a `decideApplication`. No lo introdujo este ciclo, así que no es un hallazgo de esta auditoría. Queda como pendiente de producto/diseño número 12 del plan maestro, que antes no estaba.
+- Validaciones (resultado literal, ejecutadas por la auditoría):
+  - **API:**
+    - `npm test` → `Test Files 20 passed (20)`, `Tests 236 passed (236)`.
+    - `npx tsc -p tsconfig.json --noEmit` → `TSC_API=0`.
+  - **Integración contra PostgreSQL real** (`cumplenow-db-1` healthy, `127.0.0.1:5433`, base `chambeaya_test`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la base de desarrollo):
+    - `npx prisma migrate deploy` → `No pending migrations to apply.`
+    - `npm run test:integration` → `Test Files 5 passed (5)`, `Tests 13 passed (13)`.
+    - La suite de la carrera pasó 8 corridas más con el código nuevo (6 + 2 con registro: `cancel,resolve,cancel×10` y `cancel×12`).
+  - **Mutaciones de la API** (todas restauradas y comprobadas con `cmp`):
+    - `HEAD` en `business.service.ts` → la carrera falla 3 de 3 corridas con `round 1: cancel=200 resolve=200: expected 200 to be 400`; `business.service.test.ts` → `16 failed | 38 passed (54)`.
+    - Sin `Serializable` en `cancelShift` → la carrera pasa 4 de 4 (ver BAJO-1).
+    - Sin `Math.max` → `2 failed | 70 passed (72)`.
+  - **Web:**
+    - `npx tsc --noEmit` → `TSC_WEB=0`.
+    - `npx playwright test` (suite completa) → `1 skipped`, `103 passed (2.7m)`.
+    - `npm run test:web:admin-real` (con `CHAMBEAYA_E2E_REAL_TESTS=true` y `CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (44.6s)`.
+  - **Mutaciones de la web** (escritorio):
+    - Vaciar la lista en el `catch` y quitar la guarda `selectedShiftIdRef` → fallan el caso de datos conservados y el de cambio de turno; los otros 3 pasan.
+    - Temporizador de `setTimeout` a 2·10⁹ ms → fallan los 2 casos de timeout.
+    - Nota de método: mutar la constante `REQUEST_TIMEOUT_MS` no sirve de mutación, porque la prueba la importa y adelanta el reloj con el mismo valor.
+  - **Flutter:**
+    - `flutter test` → `+145: All tests passed!`.
+    - `flutter analyze` → `10 issues found`, todos `info` preexistentes.
+    - Mixin con `_onLifecycleChanged` que retorna siempre → `+24 -4` (4 fallos).
+    - `isRespondable` sin fecha → falla el caso de invitación vencida.
+  - **Limpieza:**
+    - Borrados la copia temporal de la prueba de carrera, `apps/web/test-results` y las copias de `/tmp`.
+    - `apps/web/next-env.d.ts` restaurado con `git checkout`.
+    - `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`.
+    - `git diff --shortstat` sin cambios respecto del inicio en el código (`16 files changed, 962 insertions(+), 107 deletions(-)` antes de editar la documentación). Sin commit.
+- Riesgos:
+  - BAJO-1, BAJO-2 y BAJO-3 abiertos y documentados (ver arriba).
+  - Si los 3 intentos `P2034` se agotan, la API responde `500` (preexistente y común a todas las transacciones serializables).
+  - `NO_EJECUTADA`:
+    - La app Flutter en un dispositivo real, con el ciclo de vida real del sistema operativo, y contra la API real.
+    - El paso real de 15 s del timeout contra una API real con latencia alta.
+    - El panel web en un móvil físico.
+    - La rama en que `resolve` gana la carrera solo se observó 1 vez en 24 rondas.
+- Siguiente paso: `CN-20260923-008` queda cerrado. Opcional, en un ciclo futuro y a cargo de `implementador-sonnet`: BAJO-3 (conservar el `ApiError` real si el aborto ocurre al leer el cuerpo de un error), una variante determinista de la carrera en que gane `resolve`, y la decisión de producto del pendiente 12 (aceptar/rechazar en el panel móvil).
+
+### CN-20260923-008 — Robustez de bajo riesgo: panel web (sondeo, timeout, `selectedShiftIdRef`, `aria-live`), sondeo de Flutter con la app en segundo plano, `cancelShift` Serializable y notas menores (Alcance D)
+
+- Fecha: 2026-09-23 13:45 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260923-003` (informativos: comentario del e2e y prueba de invitación `PENDING` vencida), `CN-20260923-007` (BAJO-2: rama `max` sin prueba), `CN-20260920-002` (BAJO-1 y BAJO-3) y `CN-20260920-004` (BAJO-1 y BAJO-2 de la transacción de `resolveAssignment`, y BAJO-2 de `decideApplication`); pendientes 2(c), 2(d), 3 y 4 del plan maestro.
+- Alcance:
+  - **Análisis de alcance (lectura del código y del plan maestro antes de editar).** Todas las piezas pedidas eran viables y de bajo riesgo; ninguna se dejó fuera. Decisión de producto: ninguna. Donde el enunciado era ambiguo ("calcular `current` dentro de la transacción reintentable"), `current` solo existe en `resolveAssignment`; lo apliqué ahí y además a `cancelShift` (sus guards de estado y check-in se releen dentro de la transacción). Sin cambios en la credencial de check-in, `WalletMovement`, textos de piloto, reposición de cupos en turnos `CHECKED_IN` ni Dockerfile/lockfile.
+  - **1. Panel web.** (a) Un sondeo de postulaciones que falla con datos en pantalla los conserva: el `catch` ya no vacía `shiftApplications` y se muestra un aviso `role="alert"` (`.application-stale-notice`) sobre la lista; sin datos previos (primera carga) sigue el estado de error a pantalla completa. (b) `request()` aborta con `AbortController` a los 15 s (`REQUEST_TIMEOUT_MS`), respeta una `signal` del llamador y lanza `ApiError(0, 'REQUEST_TIMEOUT')`; el temporizador cubre también la lectura del cuerpo. `submitResolution` libera `resolutionBusy` en un `finally` (el cuerpo con los `catch` pasó a `performResolution`). (c) `decideApplication` captura `shiftId` y solo aplica la lista si `selectedShiftIdRef.current === shiftId`. (d) "Guardando…" tiene una región `role="status"` `aria-live="polite"` siempre montada (clase `.assignment-resolution-saving`, oculta visualmente y fuera de la rejilla para no añadir un hueco).
+  - **2. Flutter.** Nuevo mixin `ForegroundPolling` (`lib/features/marketplace/foreground_polling.dart`, `WidgetsBindingObserver`): cancela el temporizador en `paused`/`hidden`/`detached`, y al volver lo rearma y ejecuta un sondeo inmediato; `inactive` cuenta como primer plano. Lo usan `WorkerApplicationsPage`, `WorkerMessagesPage` y la hoja `_ConversationSheet` (los tres sondeos periódicos de `worker_secondary_pages.dart`).
+  - **3. API.** `cancelShift` usa `withSerializableRetry` + `isolationLevel: 'Serializable'` y relee el turno y los check-ins dentro de la transacción. `resolveAssignment` relee la asignación (con el turno, que es `current`) dentro de su transacción reintentable; `resolveShiftAssignmentsLifecycle` sigue corriendo antes, en su propia transacción, solo por su efecto. La semántica de `CN-20260922-013` no cambia (`cancelShift` sigue cancelando `ASSIGNED` y `NO_SHOW`).
+  - **4. Notas menores.** (i) Comentario corregido en `assignment-resolution.spec.ts`. (ii) Prueba nueva de Flutter de una invitación `PENDING` con `expiresAt` vencido (fechas relativas al reloj) con control positivo. (iii) Dos pruebas de la rama `max(startsAt + 60 min, …)` en `shift-state.test.ts` (`checkInWindowViolation` y `resolveAssignmentLifecycle` en un turno de 30 minutos con asignación tardía).
+- Archivos:
+  - API: `apps/api/src/modules/business/business.service.ts`; pruebas `apps/api/tests/business.service.test.ts` (los mocks de transacción de `resolveAssignment`/`cancelShift` leen ahora dentro de la transacción; 11 casos nuevos), `apps/api/tests/shift-state.test.ts` (2 casos), y **nueva** `apps/api/tests/integration/shift-cancel-resolve-race.integration.test.ts`.
+  - Web: `apps/web/app/page.tsx`, `apps/web/app/globals.css`, `apps/web/lib/business-api.ts`; e2e `apps/web/e2e/assignment-resolution.spec.ts` (5 casos nuevos por proyecto y una aserción de `role="status"`), `apps/web/e2e/fixtures/shift-assignments.ts` (`failApplications`, `holdNext('decide')`, `resolveResponses` con `hang`, `otherShifts`, `applicationStatus: 'PENDING'`), `apps/web/e2e/README.md`.
+  - Flutter: `apps/mobile_flutter/lib/features/marketplace/foreground_polling.dart` (nuevo), `apps/mobile_flutter/lib/features/marketplace/worker_secondary_pages.dart`, `apps/mobile_flutter/test/worker_applications_refresh_test.dart` (2 casos), `apps/mobile_flutter/test/worker_messages_page_test.dart` (2 casos), `apps/mobile_flutter/test/talent_invitation_repository_test.dart` (1 caso).
+  - Docs: `docs/reference/api.md` (concurrencia entre `resolve` y `cancel`), `docs/product/project-master-plan.md` (pendientes 2(c), 2(d), 3 y 4 marcados cerrados en esta entrada, pendientes de auditoría).
+  - No se tocó: esquema/migraciones, Dockerfile/lockfile, `apps/web/next-env.d.ts` (restaurado con `git checkout` tras los builds de Playwright).
+- Decisiones:
+  1. **Timeout de 15 s** para todas las peticiones de `business-api.ts` (constante exportada). Una petición lenta legítima de más de 15 s ahora falla; el sondeo y el resto del panel ya toleraban fallos. La descarga de CV (`applications.cv`) usa su propio `fetch` y no se toca.
+  2. **`resolveAssignment` relee la asignación dentro de la transacción**, no solo `current`: sin eso un reintento tras perder contra `cancelShift` pisaba la asignación `CANCELLED` con `COMPLETED` y creaba un pago sobre un turno cancelado (el caso que reproduce la suite de integración contra el código anterior). Las comprobaciones `404 ASSIGNMENT_NOT_FOUND` y `400 ASSIGNMENT_NOT_RESOLVABLE` ahora ocurren dentro de la transacción; el contrato HTTP no cambia.
+  3. **`inactive` no pausa el sondeo de Flutter:** es transitorio (conmutador de apps, diálogos del sistema, ventana sin foco en escritorio) y la pantalla sigue visible.
+  4. **Región viva oculta visualmente** en vez de un texto visible: el botón ya muestra "Guardando…"; un texto visible duplicado añadiría ruido y un hueco en la rejilla.
+  5. **Hallazgo preexistente, no corregido:** en pantallas angostas `.row-action { display: none }` (`globals.css`, media query móvil), así que el panel móvil no ofrece aceptar ni rechazar postulaciones. Por eso el caso e2e de `decideApplication` se omite en móvil (`test.skip`), con el motivo en el código. Requiere una decisión de producto/diseño; queda como riesgo.
+- Validaciones (resultado literal):
+  - `apps/api`: `npm test` → `Test Files 20 passed (20)`, `Tests 236 passed (236)` (223 previos + 13). `npx tsc -p tsconfig.json --noEmit` → `TSC_API=0`. `apps/web`: `npx tsc --noEmit` → `TSC_WEB=0`.
+  - **Integración contra PostgreSQL real** (`cumplenow-db-1` `healthy`, `127.0.0.1:5433`, base `chambeaya_test`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la base de desarrollo): `npx prisma migrate deploy` → `No pending migrations to apply.`; `npm run test:integration` → `Test Files 5 passed (5)`, `Tests 13 passed (13)`. La suite nueva pasó 6 de 6 corridas seguidas (más la corrida completa) con el código nuevo. Terminadas las corridas, `TRUNCATE "User" CASCADE` y `select count(*) from "User"` → `0`.
+  - **Mutación de la carrera contra el código anterior** (`git show HEAD:apps/api/src/modules/business/business.service.ts` restaurado sobre el archivo, prueba nueva intacta): 3 de 3 corridas fallaron en la ronda 1 con `round 1: cancel=200 resolve=200: expected 200 to be 400`. Restaurado el archivo nuevo.
+  - **Mutación de las pruebas unitarias** (mismo cambio, `business.service.test.ts`): `Tests 16 failed | 38 passed (54)`: los 11 casos nuevos y los 5 mocks que ya leen dentro de la transacción. Con el código nuevo `54 passed`.
+  - **Mutación de la rama `max`** (`closesAtMs = lateClosesAtMs`, sin `Math.max`): `2 failed | 30 passed (32)` (las dos pruebas nuevas de `shift-state.test.ts`); con el código intacto `32 passed`. Restaurado (`git status` limpio sobre `shift-state.ts`).
+  - **Playwright**: `npx playwright test` (suite completa) → `1 skipped`, `103 passed (2.5m)` (`--list`: 104 pruebas en 7 archivos; el skip es el caso de `decideApplication` en móvil). `npm run test:web:admin-real` (base `chambeaya_test` vía `CHAMBEAYA_E2E_DATABASE_URL`) → `3 passed (42.7s)`.
+  - **Mutación de las pruebas web** (cuatro mutaciones a la vez sobre `page.tsx` y `business-api.ts`; `-g` de los cinco casos nuevos y del de "Guardando…", escritorio): `5 failed`, `1 passed`. Fallan: sondeo con datos en pantalla (vaciar la lista de nuevo), los dos casos de timeout (temporizador de 2·10⁹ ms), `decideApplication` (sin la guarda de `selectedShiftIdRef`) y la aserción de `role="status"` (sin la región); pasa el caso de primera carga, que no depende de las mutaciones. Los cambios se restauraron desde copias (`grep` de control).
+  - **Flutter**: `flutter test` → `+145: All tests passed!` (140 previos + 5). `flutter analyze` → `10 issues found`, todos `info` preexistentes (`curly_braces_in_flow_control_structures`). Mutación del mixin (`_onLifecycleChanged` que retorna siempre): `4 failed` (dos de mensajes y dos de postulaciones); mutación de `isRespondable` sin la fecha: falla el caso de la invitación vencida. Ambos restaurados.
+  - Limpieza: `apps/web/next-env.d.ts` restaurado con `git checkout`, `apps/web/test-results` borrado, scripts temporales de `/tmp` eliminados, sin commit.
+- Riesgos:
+  - **Cambio de comportamiento del timeout:** toda petición del panel que tarde más de 15 s se aborta (`REQUEST_TIMEOUT`). En un cierre de asignación, si el `POST` vence pero el servidor sí lo procesó, el reintento responde `400 ASSIGNMENT_NOT_RESOLVABLE` y el panel ya lo maneja (aviso y relectura). No se ejecutó contra una API real con latencia alta.
+  - **Preexistente:** el panel móvil no ofrece aceptar/rechazar (`.row-action` oculto por CSS); el caso e2e de la guarda de `decideApplication` solo corre en escritorio.
+  - **Sin cubrir por prueba de widget:** "la página se monta con la app ya en segundo plano" y "se desmonta estando en segundo plano" (con los fotogramas desactivados en `paused`/`hidden`, el binding de pruebas no construye ni desmonta el widget). Se cubren por lectura del mixin (`startForegroundPolling` no arma el temporizador si el estado inicial es de segundo plano; `stopForegroundPolling` lo cancela y quita el observador), no por ejecución.
+  - **`NO_EJECUTADA`:** la app Flutter en un dispositivo real (ciclo de vida del sistema operativo real) y contra la API real; el paso real de 15 s del timeout (los e2e adelantan el reloj de la página con `page.clock`). La carrera de integración es probabilística por naturaleza (12 rondas por corrida; 6 corridas verdes con el código nuevo y 3 rojas contra el anterior), no una prueba determinista.
+  - `resolveAssignment` ahora hace una lectura más dentro de una transacción `Serializable` (la asignación con el turno y la empresa); el costo es una consulta por cierre manual, un endpoint de baja frecuencia.
+- Siguiente paso: `auditor-opus` audita este ID y el diff sin commitear sobre `0045435` (archivos listados arriba), con foco en (1) la liberación de `resolutionBusy` y el timeout de `request()`, (2) la relectura dentro de la transacción de `resolveAssignment`/`cancelShift` y la semántica de `CN-20260922-013`, y (3) el mixin `ForegroundPolling` y su tratamiento de `inactive`.
+
 ### CN-20260923-007 — Auditoría de `CN-20260923-006` (ventana de check-in del reemplazo tardío y confirmación en multi-cupo `CHECKED_IN`)
 
 - Fecha: 2026-09-23 13:25 (America/Lima)
