@@ -4,6 +4,20 @@ El despliegue de producción usa `docker-compose.production.yml` y no modifica e
 flujo de desarrollo. Está pensado para un VPS o hosting que permita Docker
 Engine y Docker Compose v2.
 
+> **Limitación vigente (bloquea este procedimiento).** Con el
+> `package-lock.json` actual, la imagen de la API no se construye:
+> `package-lock.json` declara `prisma` y `@prisma/client` solo bajo
+> `apps/api/node_modules/…`, nunca en la raíz del monorepo, mientras que
+> `apps/api/Dockerfile.production` ejecuta `npx prisma generate` con
+> `WORKDIR /workspace` (falla con `sh: prisma: not found`, código 127) y su
+> etapa `runtime` copia únicamente `/workspace/node_modules`, de modo que
+> `@prisma/client` tampoco llegaría a la imagen final. Verificado en
+> `CN-20260922-001` (build real de Docker) y confirmado de forma independiente
+> en la auditoría `CN-20260922-005` (lectura del `package-lock.json`). Es un
+> defecto preexistente y todavía sin corregir; ver el pendiente 10 de
+> [Plan maestro de pendientes](../product/project-master-plan.md). La imagen del
+> panel web no está afectada: sus dependencias sí se elevan a la raíz.
+
 ## Primera instalación
 
 ```bash

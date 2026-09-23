@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:chambeaya_mobile/features/marketplace/marketplace_repository.dart';
 import 'package:chambeaya_mobile/features/marketplace/worker_secondary_pages.dart';
 import 'package:flutter/material.dart';
@@ -159,6 +161,164 @@ void main() {
       await _unmount(tester);
     },
   );
+
+  testWidgets('a poll does not paint a spinner frame in place of the list '
+      '(CN-20260921-008, MEDIO-3: SynchronousFuture instead of Future.value)', (
+    tester,
+  ) async {
+    final repository = _ScriptedConversationsRepository([
+      () async => [_conversation('c1', 'Restaurante La Mar')],
+      () async => [
+        _conversation('c1', 'Restaurante La Mar'),
+        _conversation('c2', 'Eventos Perú'),
+      ],
+    ]);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: WorkerMessagesPage(repository: repository)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Restaurante La Mar'), findsOneWidget);
+
+    // The 4-second timer fires `_poll`, which awaits the repository and
+    // then reassigns `_loading` to a new future for the same
+    // `FutureBuilder`. `tester.pump(duration)` both elapses the fake clock
+    // (firing the timer and running `_poll` up to and past that `await`)
+    // and draws the next frame in the same call, with no separate `pump()`
+    // needed in between (checked empirically: with the pre-fix
+    // `Future.value`, the spinner is already showing by this point, not
+    // one `pump()` later). A plain `Future`'s `.then` always defers via a
+    // microtask even when already resolved, so `FutureBuilder` sees a new
+    // future identity and reports `ConnectionState.waiting` for exactly
+    // this frame, painting a `CircularProgressIndicator` over the whole
+    // list. `SynchronousFuture.then` runs synchronously inside this same
+    // build, so this frame already shows the resolved list instead.
+    await tester.pump(const Duration(seconds: 4));
+
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('Restaurante La Mar'), findsOneWidget);
+
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Eventos Perú'), findsOneWidget);
+    await _unmount(tester);
+  });
+
+  testWidgets(
+    'tapping "Actualizar mensajes" while a refresh is already in flight still '
+    'shows a visible updating signal instead of a silent no-op '
+    '(CN-20260918-010, BAJO-2)',
+    (tester) async {
+      final repository = _HoldableConversationsRepository()
+        ..data = [_conversation('c1', 'Restaurante La Mar')];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerMessagesPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Restaurante La Mar'), findsOneWidget);
+      expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      // The automatic 4 s timer starts a refresh that the fake repository
+      // holds open, simulating one already in flight when the worker taps
+      // the button.
+      repository.hold = true;
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      expect(repository.pending, hasLength(1));
+
+      // The button already reflects the in-flight refresh...
+      expect(find.byIcon(Icons.refresh_rounded), findsNothing);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+
+      // ...and tapping it while that refresh is still in flight must not be a
+      // silent no-op: before this fix, `_poll` returning early on
+      // `_refreshing` left the tap with no visible reaction of any kind, and
+      // it must not start a second overlapping request either.
+      await tester.tap(find.byTooltip('Actualizar mensajes'));
+      await tester.pump();
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(
+        repository.calls,
+        2,
+        reason: 'initial load + the one held refresh; the tap started none',
+      );
+
+      repository.answer(0, [
+        _conversation('c1', 'Restaurante La Mar'),
+        _conversation('c2', 'Eventos Perú'),
+      ]);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('Eventos Perú'), findsOneWidget);
+      await _unmount(tester);
+    },
+  );
+
+  testWidgets(
+    'a second consecutive failed poll still turns the button icon back to '
+    'idle once the failure lands, instead of leaving it stuck showing '
+    '"updating" until the next poll starts '
+    '(CN-20260922-006, BAJO-1: unconditional setState in the catch)',
+    (tester) async {
+      final repository = _HoldableConversationsRepository()
+        ..data = [_conversation('c1', 'Restaurante La Mar')];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerMessagesPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+
+      // First failed poll. The "updating" frame is rendered (via its own
+      // `pump()`, forcing the widget to actually rebuild and paint the
+      // spinner) *before* the failure lands, so the rebuild that follows the
+      // failure -- not a leftover from the one that started the poll -- is
+      // what has to turn the icon back off. `_refreshFailed` goes from false
+      // to true here, so even the reverted buggy condition
+      // `mounted && !_refreshFailed` would still fire on this first failure;
+      // it does not yet discriminate the fix (see the second failure below).
+      repository.hold = true;
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      expect(repository.pending, hasLength(1));
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      repository.pending[0].completeError(StateError('sin conexión'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      // Second consecutive failure: `_refreshFailed` is already true when
+      // this poll's `catch` runs, so the reverted buggy condition
+      // `!_refreshFailed` would be false and `setState` would be skipped
+      // entirely -- `_refreshing` would only flip to `false` in the
+      // unconditional `finally`, a plain field write with no rebuild. Because
+      // the "updating" frame here is rendered (and settles: the widget is no
+      // longer dirty) *before* the failure completes, there is nothing left
+      // to pick up that field write once the failure lands, and the button
+      // would stay stuck showing the spinner until the next poll 4 s later.
+      // The fix's unconditional `if (mounted)` must still turn it back to
+      // idle right away.
+      repository.hold = true;
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump();
+      expect(repository.pending, hasLength(2));
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      repository.pending[1].completeError(StateError('sin conexión'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byIcon(Icons.refresh_rounded), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      await _unmount(tester);
+    },
+  );
 }
 
 // Unmounts the page so its periodic refresh timer is cancelled by `dispose`
@@ -190,4 +350,29 @@ class _ScriptedConversationsRepository extends DemoWorkerMarketplaceRepository {
     _calls++;
     return _script[index]();
   }
+}
+
+/// Serves [data] immediately, unless [hold] is true, in which case each
+/// `workerConversations()` call hangs on a `Completer` added to [pending]
+/// until the test [answer]s it. Used to put a refresh "in flight" on demand,
+/// the way the button's own visible-signal test needs.
+class _HoldableConversationsRepository extends DemoWorkerMarketplaceRepository {
+  List<WorkerConversationRecord> data = const [];
+  var hold = false;
+  var calls = 0;
+  final pending = <Completer<List<WorkerConversationRecord>>>[];
+
+  @override
+  Future<List<WorkerConversationRecord>> workerConversations() {
+    calls++;
+    if (hold) {
+      final completer = Completer<List<WorkerConversationRecord>>();
+      pending.add(completer);
+      return completer.future;
+    }
+    return Future.value(List.of(data));
+  }
+
+  void answer(int index, List<WorkerConversationRecord> value) =>
+      pending[index].complete(value);
 }

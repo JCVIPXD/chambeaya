@@ -185,6 +185,60 @@ void main() {
     },
   );
 
+  // CN-20260922-013 (pendiente #1 de "turnos multi-cupo parcialmente
+  // cubiertos"): la API ahora puede cerrar un turno multi-cupo `COMPLETED`
+  // aunque solo uno de sus cupos haya completado (el otro terminó
+  // `CANCELLED`). `completedShifts()` usaba `shift['status'] == 'COMPLETED'`
+  // como señal alternativa de que ESTE trabajador completó su turno; con la
+  // nueva semántica, eso mezcla el resultado agregado del turno con el
+  // resultado de este trabajador en particular. Un trabajador cuya propia
+  // asignación terminó `CANCELLED` no debe aparecer en su propio historial
+  // de turnos completados solo porque otro cupo sí completó.
+  test(
+    "HTTP repository does not surface a shift in the worker's own history as "
+    'completed when their own assignment was CANCELLED, even if the shift '
+    'closed COMPLETED because a different seat finished it (partial '
+    'multi-seat completion)',
+    () async {
+      final client = _JsonClient({
+        '/api/workers/applications': [
+          {
+            'id': 'application-partial',
+            'shiftId': 'shift-partial',
+            'status': 'ACCEPTED',
+            'createdAt': '2026-08-24T10:00:00Z',
+            'updatedAt': '2026-08-24T12:00:00Z',
+            'shift': {
+              'id': 'shift-partial',
+              'role': 'Turno multi-cupo',
+              'businessName': 'Empresa de prueba',
+              'dateLabel': 'Lun 24 ago · 10:00 – 12:00',
+              'workerPayCents': 10000,
+              'status': 'COMPLETED',
+              'industry': 'EVENTS',
+              'urgent': false,
+              'location': 'Lima',
+            },
+            'assignment': {
+              'id': 'assignment-partial',
+              'status': 'CANCELLED',
+              'checkInCredential': 'CUMPLE-TEST',
+              'checkedOutAt': null,
+            },
+          },
+        ],
+      });
+      final repository = HttpWorkerMarketplaceRepository(
+        client: client,
+        baseUri: Uri.parse('http://localhost:4000/api'),
+      );
+
+      final completed = await repository.completedShifts();
+
+      expect(completed, isEmpty);
+    },
+  );
+
   test('HTTP repository restores the persisted next worker action', () async {
     final client = _JsonClient({
       '/api/workers/applications': [

@@ -79,6 +79,51 @@ describe('shared operational state machine', () => {
     expect(deriveShiftStatus('ASSIGNED', 1, [{ status: 'NO_SHOW' }])).toBe('PUBLISHED');
   });
 
+  // CN-20260922-013: bug raíz de "turnos multi-cupo parcialmente cubiertos"
+  // (pendiente #1 de docs/product/project-master-plan.md, contexto en
+  // CN-20260918-004 y CN-20260920-004/005/006). `effective` excluía
+  // `CANCELLED`, `NO_SHOW` y `ABANDONED` por igual, sin distinguir una
+  // asignación NO_SHOW/ABANDONED todavía sin resolver (debe seguir
+  // bloqueando el cierre) de una que la empresa ya resolvió explícitamente
+  // como CANCELLED (ya no hay decisión pendiente sobre ese cupo). Con un
+  // cupo COMPLETED y el otro ya resuelto a CANCELLED, el turno debía cerrar
+  // COMPLETED (parcialmente cubierto), no quedar CHECKED_IN para siempre.
+  it('closes a multi-seat shift as COMPLETED once its only other seat was explicitly resolved to CANCELLED (no assignment left pending a human decision)', () => {
+    expect(deriveShiftStatus('CHECKED_IN', 2, [
+      { status: 'COMPLETED', checkedInAt: new Date(), checkedOutAt: new Date() },
+      { status: 'CANCELLED' },
+    ])).toBe('COMPLETED');
+  });
+
+  it('stays CHECKED_IN while a NO_SHOW/ABANDONED seat is still unresolved, even if another seat already completed', () => {
+    expect(deriveShiftStatus('CHECKED_IN', 2, [
+      { status: 'COMPLETED', checkedInAt: new Date(), checkedOutAt: new Date() },
+      { status: 'NO_SHOW' },
+    ])).toBe('CHECKED_IN');
+    expect(deriveShiftStatus('CHECKED_IN', 2, [
+      { status: 'COMPLETED', checkedInAt: new Date(), checkedOutAt: new Date() },
+      { status: 'ABANDONED', checkedInAt: new Date() },
+    ])).toBe('CHECKED_IN');
+  });
+
+  it('closes a multi-seat shift as CANCELLED once every seat is resolved, none completed, and endsAt already passed', () => {
+    const pastEndsAt = { endsAt: new Date('2026-09-18T00:00:00.000Z') };
+    const now = new Date('2026-09-18T01:00:00.000Z');
+    expect(deriveShiftStatus('CHECKED_IN', 2, [
+      { status: 'CANCELLED' },
+      { status: 'CANCELLED' },
+    ], pastEndsAt, now)).toBe('CANCELLED');
+  });
+
+  it('reopens a multi-seat shift to PUBLISHED (not CANCELLED) once every seat is resolved, none completed, but endsAt has not passed yet, so it can still be restaffed', () => {
+    const futureEndsAt = { endsAt: new Date('2026-09-19T00:00:00.000Z') };
+    const now = new Date('2026-09-18T01:00:00.000Z');
+    expect(deriveShiftStatus('CHECKED_IN', 2, [
+      { status: 'CANCELLED' },
+      { status: 'CANCELLED' },
+    ], futureEndsAt, now)).toBe('PUBLISHED');
+  });
+
   it('reports a closed, non-actionable next action for NO_SHOW and ABANDONED assignments', () => {
     expect(nextOperationalAction({
       shiftStatus: 'PUBLISHED', applicationStatus: 'ACCEPTED', assignment: { status: 'NO_SHOW' },

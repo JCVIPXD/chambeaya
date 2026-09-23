@@ -184,7 +184,15 @@ export class DatabaseBusinessService implements BusinessOperations {
     const checkedIn = await this.prisma.shiftAssignment.count({ where: { shiftId: shift.id, checkedInAt: { not: null } } });
     if (checkedIn > 0) throw new BusinessValidationError('SHIFT_NOT_CANCELLABLE');
     return this.prisma.$transaction(async (tx) => {
-      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: 'ASSIGNED' }, data: { status: 'CANCELLED' } });
+      // Incluye `NO_SHOW` junto con `ASSIGNED` (punto 3 de CN-20260922-013):
+      // una asignación `NO_SHOW` sin resolver sobrevivía intacta a la
+      // cancelación del turno completo (el guard de `checkedInAt` de arriba
+      // no la bloquea, porque `NO_SHOW` nunca hizo check-in) y seguía siendo
+      // resoluble vía `resolveAssignment` después, generando un `Payment`
+      // sobre un turno ya `CANCELLED`. `ABANDONED` no hace falta: exige
+      // `checkedInAt` no nulo, y ese mismo guard ya rechaza cancelar el
+      // turno si existe algún `checkedInAt` no nulo.
+      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: { in: ['ASSIGNED', 'NO_SHOW'] } }, data: { status: 'CANCELLED' } });
       await tx.shiftApplication.updateMany({ where: { shiftId: shift.id, status: { in: ['PENDING', 'ACCEPTED'] } }, data: { status: 'CANCELLED' } });
       await tx.shiftCancellation.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', reason: reason.trim() } });
       await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'CANCELLED', detail: reason.trim() } });
@@ -426,9 +434,21 @@ export class DatabaseBusinessService implements BusinessOperations {
       //    asignación con este rol, este criterio debe revisarse;
       //  - NO se reabre si el turno aún no venció (un cierre por vencimiento
       //    exige `endsAt <= ahora`);
-      //  - `CANCELLED` (cerrar sin pago) nunca reabre nada.
+      //  - `CANCELLED` (cerrar sin pago) nunca reabre nada por sí solo, pero
+      //    si YA no queda ninguna asignación pendiente de decisión y otro
+      //    cupo se había completado en una llamada anterior, el recálculo
+      //    puede dar `COMPLETED` igual (punto 2 de CN-20260922-013): antes,
+      //    esta rama exigía `outcome === 'COMPLETED'` de ESTA llamada en
+      //    particular, así que resolver el último cupo pendiente como
+      //    `CANCELLED` nunca intentaba el recálculo y el turno se quedaba
+      //    `CANCELLED` para siempre pese a que ya no había nada pendiente y
+      //    otro cupo sí había completado. Quitar esa condición es seguro: el
+      //    único requisito real para reabrir sigue siendo que `recalculated`
+      //    dé `COMPLETED` (ver el `if` de abajo), algo que con el cupo que
+      //    ESTA llamada resuelve a `CANCELLED` nunca puede ocurrir por sí
+      //    solo (haría falta otro cupo ya `COMPLETED`).
       let nextShiftStatus = deriveShiftStatus(current.status, current.requiredWorkers, assignments, current);
-      if (current.status === 'CANCELLED' && outcome === 'COMPLETED' && current.endsAt <= completedAt) {
+      if (current.status === 'CANCELLED' && current.endsAt <= completedAt) {
         // `deriveShiftStatus` solo distingue `CANCELLED` de cualquier otra
         // base: `PUBLISHED` es el valor neutro para que recalcule desde las
         // asignaciones.

@@ -18,7 +18,7 @@ WORKDIR /workspace
 COPY --from=build /workspace/node_modules ./node_modules
 COPY --from=build /workspace/package*.json ./
 COPY --from=build /workspace/apps/api/package.json ./apps/api/package.json
-COPY --from=build /workspace/apps/api/dist ./apps/api/dist
+COPY --from=build /workspace/apps/api/dist/src ./apps/api/dist/src
 COPY --from=build /workspace/apps/api/prisma ./apps/api/prisma
 
 WORKDIR /workspace/apps/api

@@ -229,18 +229,24 @@ export async function installShiftAssignmentsApi(
       application.assignment.status = body.outcome as AssignmentStatus;
       application.nextAction = nextActionByStatus[application.assignment.status];
       if (body.outcome === 'COMPLETED') server.payments.push(paymentFor(server.shift, application));
-      // Regla de la API (`resolveAssignment`, BAJO-5 de CN-20260918-004 y
-      // MEDIO-2 de CN-20260920-004): al confirmar `COMPLETED`, un turno que el
-      // ciclo de vencimiento cerró como `CANCELLED` pasa a `COMPLETED` solo si
-      // todos sus cupos quedan confirmados como trabajados; con algún cupo sin
-      // cerrar sigue `CANCELLED` (nunca `CHECKED_IN`: quedaría inalcanzable).
-      // Un turno cancelado por la empresa no se reabre; `CANCELLED` (cerrar sin
-      // pago) tampoco toca el turno.
-      if (body.outcome === 'COMPLETED' && !input.cancelledByCompany && server.shift.status === 'CANCELLED') {
-        const live = server.applications
+      // Regla de la API (`resolveAssignment`/`deriveShiftStatus`, BAJO-5 de
+      // CN-20260918-004 y CN-20260922-013): al resolver un cupo -con
+      // cualquiera de los dos `outcome`, no solo `COMPLETED`, porque el cupo
+      // que faltaba puede ser justo el que se cierra sin pago mientras otro
+      // ya había completado antes-, un turno que el ciclo de vencimiento
+      // cerró como `CANCELLED` pasa a `COMPLETED` en cuanto ya no queda
+      // ningún cupo pendiente de decisión (ninguna asignación
+      // `ASSIGNED`/`NO_SHOW`/`ABANDONED` sin resolver) y al menos uno terminó
+      // `COMPLETED`; los demás pueden haber cerrado `CANCELLED` sin pago, eso
+      // ya no bloquea la reapertura. Un turno cancelado por la empresa no se
+      // reabre; si ningún cupo completó, sigue `CANCELLED`.
+      if (!input.cancelledByCompany && server.shift.status === 'CANCELLED') {
+        const statuses = server.applications
           .map((item) => item.assignment?.status)
-          .filter((status) => status && !['CANCELLED', 'NO_SHOW', 'ABANDONED'].includes(status));
-        if (live.length >= server.shift.requiredWorkers && live.every((status) => status === 'COMPLETED')) server.shift.status = 'COMPLETED';
+          .filter((status): status is AssignmentStatus => Boolean(status));
+        const pending = statuses.some((status) => status === 'ASSIGNED' || status === 'NO_SHOW' || status === 'ABANDONED');
+        const completedCount = statuses.filter((status) => status === 'COMPLETED').length;
+        if (!pending && completedCount > 0) server.shift.status = 'COMPLETED';
       }
       await route.fulfill({
         json: { ...application.assignment, shiftId: input.shift.id, workerId: application.workerId, applicationId: application.id, assignedAt: '2026-09-17T10:00:00.000Z', completedAt: null },

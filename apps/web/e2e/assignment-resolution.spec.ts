@@ -219,15 +219,16 @@ test.describe('asignación ABANDONED', () => {
 
 // El turno vencido sin asignaciones viables lo cierra la API como `CANCELLED`
 // (ver docs/reference/api.md). Ese cierre automático se reabre al confirmar
-// que sí se trabajó, pero solo si todos sus cupos quedan confirmados como
-// trabajados (con un cupo sin cerrar seguiría inalcanzable en `CHECKED_IN`,
-// MEDIO-2 de CN-20260920-004); un turno que la propia empresa canceló no. El
-// panel no puede distinguir estos casos, así que el aviso no promete el
-// resultado y explica todos.
+// que sí se trabajó en cuanto ya no queda ningún cupo pendiente de decisión
+// (ninguna asignación ASSIGNED/NO_SHOW/ABANDONED sin resolver) y al menos uno
+// quedó confirmado como trabajado -los demás pueden haber cerrado sin pago,
+// eso ya no bloquea la reapertura (CN-20260922-013)-; un turno que la propia
+// empresa canceló no se reabre. El panel no puede distinguir estos casos, así
+// que el aviso no promete el resultado y explica todos.
 const CANCELLED_NOTICE = 'Este turno figura como cancelado';
 const CANCELLED_NOTICE_ALL_CASES = [
-  'Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado solo cuando todos sus cupos queden confirmados como trabajados',
-  'si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado',
+  'Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado en cuanto ya no quede ningún cupo pendiente de tu decisión y al menos uno haya quedado confirmado como trabajado',
+  'si lo cancelaste tú, seguirá cancelado',
   'En todos los casos el pago pendiente se registra',
 ];
 // Textos anteriores: prometían que el turno seguiría cancelado o que "se
@@ -276,7 +277,7 @@ test.describe('turno ya cerrado como cancelado', () => {
 
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
     await expect(ana).toContainText(CANCELLED_NOTICE);
-    await expect(ana).toContainText('si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado');
+    await expect(ana).toContainText('si lo cancelaste tú, seguirá cancelado');
     for (const old of OLD_NOTICES) await expect(ana).not.toContainText(old);
     expect(server.log).toContain('GET /api/business/shifts/shift-resolution-1');
   });
@@ -324,7 +325,7 @@ test.describe('turno ya cerrado como cancelado', () => {
     await luis.getByRole('button', { name: confirmAction('Luis Rojas'), exact: true }).click();
     await expect(luis.getByText('¿Confirmas que Luis Rojas sí trabajó este turno?')).toBeVisible();
     await expect(luis).toContainText(CANCELLED_NOTICE);
-    await expect(luis).toContainText('si queda algún cupo sin confirmar, seguirá cancelado');
+    await expect(luis).toContainText('pasará a completado en cuanto ya no quede ningún cupo pendiente de tu decisión');
 
     // Con el último cupo confirmado, todos los cupos quedan trabajados y el turno se completa.
     await luis.getByRole('button', { name: yesConfirmAction('Luis Rojas'), exact: true }).click();
@@ -332,6 +333,53 @@ test.describe('turno ya cerrado como cancelado', () => {
     expect(server.shift.status).toBe('COMPLETED');
     expect(server.payments).toHaveLength(2);
   });
+
+  // CN-20260922-013: un turno multi-cupo parcialmente cubierto (un cupo
+  // completó, el otro se cierra sin pago) debe llegar a `COMPLETED`, no
+  // quedarse `CANCELLED` para siempre. Cubre también el punto 2 del cierre:
+  // la reapertura debe intentarse aunque ESTA llamada resuelva `CANCELLED`,
+  // si otro cupo ya había completado antes (por eso se prueba en las dos
+  // órdenes posibles).
+  for (const order of ['completar primero', 'cerrar sin pago primero'] as const) {
+    test(`en un turno multi-cupo cerrado por vencimiento, un cupo completado y el otro cerrado sin pago dejan el turno COMPLETED (orden: ${order})`, async ({ page, isMobile }) => {
+      const server = await installShiftAssignmentsApi(page, {
+        shift: buildShift({ status: 'CANCELLED', requiredWorkers: 2 }),
+        applications: [
+          buildApplication({ id: 'app-ana', workerName: 'Ana Pérez', assignmentStatus: 'NO_SHOW' }),
+          buildApplication({ id: 'app-luis', workerName: 'Luis Rojas', assignmentStatus: 'ABANDONED' }),
+        ],
+      });
+      await openShifts(page, isMobile);
+      const ana = row(page, 'Ana Pérez');
+      const luis = row(page, 'Luis Rojas');
+
+      async function completeAna() {
+        await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
+        await ana.getByRole('button', { name: yesConfirmAction('Ana Pérez'), exact: true }).click();
+        await expect(page.locator('.toast')).toContainText('Trabajo de Ana Pérez confirmado');
+      }
+      async function closeLuisWithoutPay() {
+        await luis.getByRole('button', { name: closeAction('Luis Rojas'), exact: true }).click();
+        await luis.getByRole('button', { name: yesCloseAction('Luis Rojas'), exact: true }).click();
+        await expect(page.locator('.toast')).toContainText('Asignación de Luis Rojas cerrada sin pago');
+      }
+
+      if (order === 'completar primero') {
+        await completeAna();
+        expect(server.shift.status).toBe('CANCELLED'); // Luis sigue pendiente: no se reabre todavía.
+        await closeLuisWithoutPay();
+      } else {
+        await closeLuisWithoutPay();
+        expect(server.shift.status).toBe('CANCELLED'); // Ana sigue pendiente: no se reabre todavía.
+        await completeAna();
+      }
+
+      // Sin importar el orden, ya no queda ningún cupo pendiente y uno sí
+      // completó: el turno pasa a COMPLETED con un solo pago (el de Ana).
+      expect(server.shift.status).toBe('COMPLETED');
+      expect(server.payments).toHaveLength(1);
+    });
+  }
 
   test('un turno que la empresa canceló sigue cancelado tras confirmar: el pago se registra y el aviso sigue vigente', async ({ page, isMobile }) => {
     const server = await installShiftAssignmentsApi(page, {

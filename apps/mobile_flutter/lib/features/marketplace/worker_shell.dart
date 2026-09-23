@@ -91,8 +91,8 @@ class _WorkerShellState extends State<WorkerShell> {
         onApplicationChanged: () => setState(() => _applicationRevision++),
       ),
       WorkerApplicationsPage(
-        key: ValueKey(_applicationRevision),
         repository: widget.repository,
+        applicationRevision: _applicationRevision,
       ),
       WorkerMessagesPage(repository: widget.repository),
       ProfileHomePage(

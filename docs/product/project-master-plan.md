@@ -279,8 +279,9 @@ Objetivo: hacer confiable el recorrido desde la selección hasta el cierre.
   (auditados en `CN-20260920-004` y `CN-20260920-006`): confirmar el trabajo de un
   `NO_SHOW`/`ABANDONED` en un turno que el propio vencimiento había cerrado como
   `CANCELLED` ya **saca al turno de `CANCELLED`, y solo hacia `COMPLETED`**, es decir
-  cuando tras esa confirmación todos sus cupos quedan confirmados como trabajados; si
-  quedara algún cupo sin cerrar el turno **se mantiene `CANCELLED`** (terminal) en vez de
+  cuando tras esa confirmación todos sus cupos quedan confirmados como trabajados (regla
+  ampliada en `CN-20260922-013`: basta con que no quede ningún cupo pendiente de decisión y
+  al menos uno haya completado); si quedara algún cupo sin cerrar el turno **se mantiene `CANCELLED`** (terminal) en vez de
   reabrirse a `CHECKED_IN`, que lo dejaría inalcanzable. La transición deja un
   `ShiftEvent` `UPDATED`; un turno que la empresa canceló con `cancelShift` (se distingue
   por un `ShiftCancellation` con `actorRole: BUSINESS`), uno con `endsAt` futuro y el
@@ -290,11 +291,12 @@ Objetivo: hacer confiable el recorrido desde la selección hasta el cierre.
   Sigue pendiente: expiración y rotación de credenciales (la credencial no caduca y el
   propio trabajador la recibe del API, así que no prueba presencia); una ventana
   propia de check-out (hoy sigue siendo válido en cualquier momento tras el check-in,
-  hasta que el margen de 60 minutos tras `endsAt` marca la asignación `ABANDONED`); y el
-  **cierre de turnos multi-cupo parcialmente cubiertos** (si una asignación completó y
-  otra quedó `NO_SHOW`/`ABANDONED`/`CANCELLED`, el turno se queda en `CHECKED_IN`
-  aunque `endsAt` haya pasado, y solo sale de ahí pagando la asignación pendiente;
-  es comportamiento previo a estos estados, detallado en `docs/reference/api.md`).
+  hasta que el margen de 60 minutos tras `endsAt` marca la asignación `ABANDONED`). El
+  cierre de turnos multi-cupo parcialmente cubiertos ya no está pendiente: desde
+  `CN-20260922-013` (auditado en `CN-20260923-001`) el turno pasa a `COMPLETED` en cuanto no
+  queda ninguna asignación `ASSIGNED`/`NO_SHOW`/`ABANDONED` sin resolver y al menos una
+  completó, y la reapertura de un cierre por vencimiento sigue esa misma regla (detalle en
+  `docs/reference/api.md`).
 - **Aprobación y corrección de horas (P0).** Guardar horas propuestas, aprobación
   empresarial, disputa y correcciones como eventos inmutables; impedir que editar un
   turno reescriba el historial. Cierre: el importe u obligación se calcula únicamente
@@ -651,9 +653,10 @@ el árbol de trabajo, sin comitear):
   `CN-20260920-004`, `CN-20260920-005`, `CN-20260920-006`): `resolveAssignment` calcula el
   estado del turno con el turno que devuelve el ciclo de vida, no con la lectura previa, y
   confirmar `COMPLETED` saca de `CANCELLED` a un turno que había cerrado el propio
-  vencimiento **solo cuando el recálculo lo deja `COMPLETED`** (todos sus cupos
-  confirmados como trabajados); con algún cupo sin cerrar se mantiene `CANCELLED`, que es
-  terminal. La transición deja un `ShiftEvent` `UPDATED`. Un turno que la empresa canceló
+  vencimiento **solo cuando el recálculo lo deja `COMPLETED`** (desde `CN-20260922-013`:
+  ningún cupo pendiente de decisión y al menos uno completado, con cualquiera de los dos
+  `outcome`; antes exigía todos los cupos confirmados como trabajados); con algún cupo sin
+  resolver se mantiene `CANCELLED`, que es terminal. La transición deja un `ShiftEvent` `UPDATED`. Un turno que la empresa canceló
   con `cancelShift` —reconocido por un `ShiftCancellation` con `actorRole: BUSINESS`, no
   por `assignmentId: null`, que también puede escribir un trabajador—, uno con `endsAt`
   futuro y el cierre sin pago nunca lo reabren. El aviso del panel explica todos los casos
@@ -765,7 +768,11 @@ el árbol de trabajo, sin comitear):
 Validación al cierre: API 190/190 y Playwright rápido 90/90 (medidos y reproducidos en la
 auditoría `CN-20260921-008`; eran 173/173 y 72/72 antes de los 17 casos de API, los 8
 casos × 2 proyectos de `applicant-cv.spec.ts` y el caso nuevo × 2 de `render-cost.spec.ts`),
-Flutter 132/132 (medidos en la auditoría `CN-20260921-010`; eran 114/114 en
+Flutter 139/139 (medidos en las auditorías `CN-20260922-011` y `012`; eran 135/135 en
+`CN-20260922-005` a `008`, antes de los cuatro casos de cobertura de `CN-20260922-009` y
+`010` —dos de `worker_button_contrast_test.dart`, uno de `worker_messages_page_test.dart`
+y uno de `worker_applications_refresh_test.dart`—, y 132/132 en
+`CN-20260921-010`, antes de los tres casos de `CN-20260922-002`, `003` y `004`; 114/114 en
 `CN-20260921-008`, antes de los 18 casos de `worker_filter_contrast_test.dart`, y 98/98
 tras `CN-20260921-005`, antes de los 15 casos de `worker_applications_refresh_test.dart` y
 el de igualdad de `Shift`) e integración PostgreSQL 8/8
@@ -783,26 +790,60 @@ extremo", más abajo.
 
 Pendientes conocidos, por prioridad sugerida:
 
-1. **Turnos multi-cupo parcialmente cubiertos** (`CN-20260918-004`, `CN-20260920-006`): con
-   una asignación completada y otra abandonada o no-show, el turno queda en `CHECKED_IN` y
-   solo sale pagando a la pendiente. Consecuencia aceptada de `CN-20260920-005`: un turno
-   multi-cupo cerrado por vencimiento en el que la empresa confirma un cupo y otro queda
-   sin confirmar se mantiene `CANCELLED` (terminal, con su pago pendiente registrado), así
-   que el estado no refleja que un cupo sí se trabajó. También `cancelShift` deja una
-   asignación `NO_SHOW` resoluble sobre un turno cancelado. Resolverlo de raíz exige tocar
-   `deriveShiftStatus`.
+1. **Turnos multi-cupo parcialmente cubiertos** (`CN-20260918-004`, `CN-20260920-006`):
+   **cerrado: implementado en `CN-20260922-013` y aprobado en la auditoría
+   `CN-20260923-001`**, que ejecutó el escenario contra API y PostgreSQL reales con una
+   sonda desechable (ver abajo). Quedan abiertos cuatro hallazgos bajos de esa auditoría:
+   una prueba que fije el caso "cupo reemplazado con su `NO_SHOW` original sin resolver"
+   (ahora queda `CHECKED_IN` hasta resolverlo; antes pasaba a `COMPLETED`), el texto del
+   `ShiftEvent` `UPDATED` cuando la reapertura la dispara un "Cerrar sin pago", el aviso de
+   "Cerrar sin pago" en un turno cancelado y el comentario desactualizado de
+   `deriveShiftStatus`. La misma auditoría encontró dos problemas previos, fuera de ese
+   alcance y sin corregir: (a) un reemplazo aceptado después de un `NO_SHOW` nunca puede
+   hacer check-in, porque la ventana se mide desde `startsAt` (ya cerrada) y la asignación
+   nueva pasa a `NO_SHOW` al primer toque; solo cobra si la empresa lo confirma a mano; y
+   (b) en un turno multi-cupo, en cuanto un trabajador hace check-in el turno pasa a
+   `CHECKED_IN` y `POST /api/shifts/:id/confirm` responde `404 ASSIGNMENT_NOT_FOUND` a los
+   asignados que aún no habían confirmado, así que tampoco pueden hacer check-in.
+   Texto original del cierre: `deriveShiftStatus` ahora distingue una asignación
+   `NO_SHOW`/`ABANDONED` todavía sin resolver (sigue bloqueando el cierre del turno) de una
+   que la empresa ya resolvió explícitamente como `CANCELLED` (ya no bloquea): un turno
+   multi-cupo llega a `COMPLETED` en cuanto ya no queda ninguna asignación pendiente de
+   decisión y al menos una completó, aunque otras hayan terminado `CANCELLED`; si ninguna
+   completó, queda `CANCELLED`. Esto también corrige, sin caso especial, la reapertura de un
+   turno cerrado por vencimiento (`resolveAssignment`): ya no exige que la llamada en curso
+   resuelva `COMPLETED` para intentar el recálculo, así que resolver el último cupo pendiente
+   como `CANCELLED` también reabre a `COMPLETED` si otro cupo ya había completado antes.
+   `cancelShift` ahora también cancela una asignación `NO_SHOW` que hubiera quedado sin
+   resolver (antes sobrevivía intacta y era resoluble sobre un turno ya cancelado). No se
+   agregó ningún estado nuevo al enum `OperationalShiftStatus` ni migración de Prisma: se
+   reutilizan `COMPLETED`/`CANCELLED` con el significado documentado en
+   `docs/reference/api.md`. Se corrigió también una regresión encontrada en el mismo cierre:
+   `apps/mobile_flutter` (`completedShifts()`) usaba `shift.status === 'COMPLETED'` como señal
+   de que el propio trabajador completó su turno, lo que ahora puede ser falso en un
+   multi-cupo parcial. El riesgo que declaraba el cierre (escenario no ejecutado contra
+   base real) lo cerró la auditoría: la sonda no quedó en el repositorio, así que
+   `apps/api/tests/integration` y `apps/web/e2e-real` siguen sin un escenario multi-cupo
+   permanente.
 2. **Indicadores de carga que todavía parpadean** (pendientes declarados en
-   `CN-20260921-007` y confirmados en su auditoría `CN-20260921-008`): (a) entrar a la
-   pestaña "Postulaciones" de Flutter la reconstruye desde cero —`WorkerShell` la monta con
-   `ValueKey(_applicationRevision)` como refresco manual—, así que muestra el indicador a
-   pantalla completa una vez por entrada (ya no cada 3 s); ahora que la página sabe
-   refrescarse en silencio, pasar la revisión como propiedad y recargar en
-   `didUpdateWidget` quitaría ese último parpadeo. (b) "Conversaciones"
-   (`WorkerMessagesPage`) sí pinta un fotograma de indicador en cada sondeo de 4 s, porque
-   asigna `Future.value(...)` dentro de `setState` y el `FutureBuilder` vuelve a `waiting`
-   hasta que la microtarea resuelve, ya pintado el fotograma; se arregla con
-   `SynchronousFuture` (una línea) o migrando al patrón de estado explícito de
-   "Postulaciones". (c) En el panel web, un sondeo de postulaciones que **falla** con datos
+   `CN-20260921-007` y confirmados en su auditoría `CN-20260921-008`): (a) **cerrado** en
+   `CN-20260922-003` (auditado en `CN-20260922-007`) y completado en `CN-20260922-010`
+   (auditado y aprobado en `CN-20260922-012`, sin hallazgos abiertos):
+   `_applicationRevision` dejó de pasarse como `ValueKey` y viaja como la propiedad
+   `applicationRevision`, que
+   `_WorkerApplicationsPageState.didUpdateWidget` convierte en un `_refresh()` silencioso,
+   así que entrar a "Postulaciones" ya no destruye el `State` ni vacía `_data`. La guarda
+   `!_requestPending` evita la petición doble que provoca el cambio de `TickerMode` del
+   mismo fotograma; como contrapartida, una recarga manual que cae justo sobre un sondeo en
+   vuelo se descarta (la petición en vuelo igual aplica su resultado: el desfase máximo es
+   un viaje de red más un intervalo de 3 s). Ese riesgo queda **aceptado y documentado**
+   junto a la guarda en el código, y la ruta que solo cubre `didUpdateWidget` (volver a
+   tocar la pestaña ya activa, donde `TickerMode` no cambia) tiene desde `CN-20260922-010`
+   su propio caso en `worker_applications_refresh_test.dart`. (b) **cerrado** en `CN-20260922-004` (auditado
+   en `CN-20260922-008`): `_poll` de `WorkerMessagesPage` asigna `SynchronousFuture(...)` en
+   vez de `Future.value(...)`, así que `FutureBuilder` observa `ConnectionState.done` antes
+   de construir el fotograma y ya no pinta el indicador sobre la lista en cada sondeo de
+   4 s. (c) En el panel web, un sondeo de postulaciones que **falla** con datos
    en pantalla vacía la lista y muestra el error (`apps/web/app/page.tsx`, `catch` de
    `refreshApplications`): no ocurre cada 4 s, pero un bache de red sí parpadea; corregirlo
    cambia el contrato de errores de esa vista y de `assignment-resolution.spec.ts`. (d) El
@@ -838,19 +879,45 @@ Pendientes conocidos, por prioridad sugerida:
 8. **Nombres que evocan custodia**: `WalletMovement`, `/api/workers/wallet` y los estados
    `RELEASED`/`REVERSED` se conservaron a propósito; renombrarlos depende de la decisión
    de modelo económico pendiente.
-9. **Higiene**: `apps/api/scripts/e2e-serve.ts` viaja en la imagen de producción (no es
-   explotable: exige una base terminada en `_test`); el botón "Actualizar mensajes" no
-   reacciona si ya hay un sondeo en curso; el reintento de descubrimiento se rotula
-   "Limpiar filtros"; `CONTEXTO_TESIS.md` (documento externo) aún menciona
-   `worker_pages.dart`.
-10. **Fuera de este ciclo**: la duplicación `CompanyWorkerContact` frente a
-   `WorkerTalentProfile` y el rediseño de `main.dart` (inyección de dependencias, tema y
-   sesión).
+9. **Higiene**: el reintento de descubrimiento se rotula "Limpiar filtros";
+   `CONTEXTO_TESIS.md` (documento externo) aún menciona `worker_pages.dart`. **Cerrados:**
+   `apps/api/scripts/e2e-serve.ts` ya no viaja en la imagen de producción (`CN-20260922-001`,
+   auditado en `CN-20260922-005`: la etapa `runtime` de `apps/api/Dockerfile.production`
+   copia `apps/api/dist/src` en vez de `apps/api/dist` completo, así que `dist/scripts`,
+   `dist/tests` y `dist/prisma/seed.js` quedan fuera); y el botón "Actualizar mensajes" ya
+   reacciona a un toque que cae sobre un sondeo en curso (`CN-20260922-002`: el ícono se
+   convierte en un indicador mientras `_refreshing` es verdadero, sin abrir una segunda
+   petición). El contraste de ese indicador, que `CN-20260922-006` dejó abierto como
+   MEDIO-1 (se pintaba con `ColorScheme.primary`: 1,68:1 en claro y 4,34:1 en oscuro contra
+   el relleno `secondaryContainer` del propio botón, por debajo del mínimo de 3:1 para
+   componentes de interfaz), quedó **cerrado** en `CN-20260922-009` (auditado y aprobado en
+   `CN-20260922-011`): el indicador fija
+   `color: Theme.of(context).colorScheme.onSecondaryContainer`, el mismo color del ícono
+   estático al que sustituye, medido en **7,31:1 en claro y en oscuro** sobre el
+   `ColorScheme` real de `buildAppTheme` y fijado por
+   `apps/mobile_flutter/test/worker_button_contrast_test.dart` (ratio WCAG calculado en la
+   prueba, sin hex fijos).
+10. **`apps/api/Dockerfile.production` no completa un build ni arrancaría** con el
+    `package-lock.json` vigente (detectado en `CN-20260922-001`, confirmado de forma
+    independiente en `CN-20260922-005`; **preexistente**, no lo introduce ese cambio).
+    `package-lock.json` declara `prisma` y `@prisma/client` únicamente bajo
+    `apps/api/node_modules/…`, nunca elevados a la raíz del monorepo. La etapa `build`
+    ejecuta `npx prisma generate` con `WORKDIR /workspace` y falla con
+    `sh: prisma: not found` (código 127), y la etapa `runtime` copia solo
+    `/workspace/node_modules`, así que `@prisma/client` tampoco llegaría a la imagen.
+    Afecta el procedimiento de `docs/guides/deployment.md` (`scripts/deploy-hosting.sh`
+    construye esta imagen). `apps/web/Dockerfile.production` usa el mismo patrón pero hoy
+    no se ve afectado: todas las dependencias de `apps/web` sí se elevan a la raíz. No se
+    investigó por qué npm no eleva `prisma`; corregirlo es un alcance nuevo.
+11. **Fuera de este ciclo**: la duplicación `CompanyWorkerContact` frente a
+    `WorkerTalentProfile` y el rediseño de `main.dart` (inyección de dependencias, tema y
+    sesión).
 
-Sin verificar de extremo a extremo: `ABANDONED` contra API y base reales, dos sesiones
-simultáneas, multi-cupo contra base real, la cancelación de la empresa con `cancelShift`
-seguida de `resolve` contra base real (la corrida de `CN-20260920-007` solo ejerce el
-camino en que **no** existe el `ShiftCancellation` con `actorRole: BUSINESS`),
+Sin verificar de extremo a extremo: dos sesiones simultáneas; `ABANDONED`, multi-cupo y
+la cancelación de la empresa con `cancelShift` seguida de `resolve` sí se ejecutaron
+contra API y PostgreSQL reales en la auditoría `CN-20260923-001`, pero con una sonda
+desechable, no con una suite permanente del repositorio (la corrida de `CN-20260920-007`
+solo ejerce el camino en que **no** existe el `ShiftCancellation` con `actorRole: BUSINESS`);
 `demo:seed`/`demo:smoke` con estos cambios, la app Flutter contra una API real y en
 dispositivo, y la pantalla web en un móvil físico. De `CN-20260921-005` falta además abrir
 un CV real en un navegador con visor de PDF: la prueba de Playwright sustituye
@@ -868,7 +935,20 @@ auditoría `CN-20260921-010` sí rasterizó la hoja de filtros dentro de `flutte
 después en oscuro, 14,11:1 sin cambio en claro), pero con la fuente de prueba `Ahem`
 —bloques sólidos—, así que el color y la disposición quedan comprobados y la tipografía
 real no; el contorno nuevo de campos y chips en oscuro tampoco se ha juzgado a ojo en una
-pantalla real.
+pantalla real. De `CN-20260922-002`, `003`, `004`, `009` y `010` falta igualmente la
+comprobación visual
+en dispositivo o navegador: que el reingreso a "Postulaciones" se sienta instantáneo, que
+"Conversaciones" ya no parpadee y cómo se ve el indicador de 20×20 dentro del
+`IconButton.filledTonal` se fijan hoy solo con pruebas de widgets y con el cálculo de
+contraste sobre el `ColorScheme`, sin rasterizar el botón (el indicador anima
+indefinidamente y colgó la sonda de rasterización de la auditoría `CN-20260922-006`; la
+prueba de contraste de `CN-20260922-009` lee el `color` del widget montado y el
+`ColorScheme` real, no los píxeles pintados). De
+`CN-20260922-001`, el build de `apps/api/Dockerfile.production` **no** se verificó con el
+archivo exacto del repositorio: no completa en este entorno por el pendiente 10; la
+comprobación de que la imagen ya no contiene `dist/scripts` ni `dist/tests` se hizo sobre
+una copia del Dockerfile con un rodeo local, y la API nunca se arrancó dentro del
+contenedor.
 
 Antes de fusionar la rama o desplegar: correr `prisma migrate deploy` sobre la base real
 del entorno (la migración `20260918120000_assignment_no_show_abandoned` es aditiva) y

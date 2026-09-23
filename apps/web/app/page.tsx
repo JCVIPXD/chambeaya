@@ -3651,13 +3651,16 @@ function AssignmentResolutionPanel({
                 Solo es un registro de lo que debes: tú pagas directamente al
                 trabajador y Chambeaya no cobra, guarda ni transfiere dinero.
                 {shiftCancelled &&
-                  // La API reabre el turno (a completado) solo si lo cerró ella
-                  // misma por vencimiento sin asistencia y, tras esta
-                  // confirmación, todos sus cupos quedan confirmados como
-                  // trabajados; uno cancelado por la empresa, o con algún cupo
-                  // sin confirmar, sigue cancelado. El panel no sabe cuál es el
-                  // caso, así que no promete el resultado.
-                  " Este turno figura como cancelado. Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado solo cuando todos sus cupos queden confirmados como trabajados; si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado. En todos los casos el pago pendiente se registra."}{" "}
+                  // La API reabre el turno (a completado) solo si lo cerró
+                  // ella misma por vencimiento sin asistencia y, tras esta
+                  // confirmación, ya no queda ningún cupo pendiente de
+                  // decisión (ninguna asignación ASSIGNED/NO_SHOW/ABANDONED
+                  // sin resolver) y al menos uno quedó confirmado como
+                  // trabajado -los demás pueden haber terminado cerrados sin
+                  // pago, eso ya no lo bloquea (CN-20260922-013)-; uno
+                  // cancelado por la empresa sigue cancelado. El panel no
+                  // sabe cuál es el caso, así que no promete el resultado.
+                  " Este turno figura como cancelado. Si se cerró automáticamente por vencer sin asistencia registrada, pasará a completado en cuanto ya no quede ningún cupo pendiente de tu decisión y al menos uno haya quedado confirmado como trabajado; si lo cancelaste tú, seguirá cancelado. En todos los casos el pago pendiente se registra."}{" "}
                 Esta acción no se puede deshacer.
               </>
             ) : (

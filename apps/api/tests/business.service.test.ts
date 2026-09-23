@@ -756,6 +756,50 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
       }
     });
 
+    // Punto 2 de CN-20260922-013: antes, la reapertura de un turno cerrado
+    // por vencimiento exigía que ESTA llamada resolviera con outcome
+    // COMPLETED. Si el último cupo pendiente se resuelve como CANCELLED
+    // pero OTRO cupo ya se había completado en una llamada anterior, el
+    // recálculo real da COMPLETED igual (con el fix del punto 1), pero la
+    // condición vieja (`outcome === 'COMPLETED'`) ni siquiera intentaba
+    // recalcular y el turno se quedaba CANCELLED para siempre pese a que ya
+    // no quedaba ninguna decisión pendiente.
+    it('reabre a COMPLETED un turno cerrado por vencimiento cuando ESTA llamada resuelve el último cupo pendiente como CANCELLED pero otro cupo ya se había completado antes', async () => {
+      const multiSeat = { ...closedShift, requiredWorkers: 2 };
+      const { service, shiftUpdate, paymentUpsert, cancellationFindFirst } = scenario({
+        shiftRow: multiSeat,
+        source: 'NO_SHOW',
+        assignmentsAfterUpdate: [{ status: 'COMPLETED' }, { status: 'CANCELLED' }],
+      });
+
+      const result = await service.resolveAssignment(session, 'shift-1', 'assignment-1', 'CANCELLED');
+
+      expect(result).toMatchObject({ status: 'CANCELLED' });
+      expect(shiftUpdate).toHaveBeenCalledWith(reopenedStatus);
+      expect(cancellationFindFirst).toHaveBeenCalledOnce();
+      // Esta llamada en particular resuelve CANCELLED (sin pago); el pago
+      // del cupo que sí completó ya se generó en la llamada anterior.
+      expect(paymentUpsert).not.toHaveBeenCalled();
+    });
+
+    it('no reabre (sigue CANCELLED) cuando esta llamada resuelve CANCELLED y ningún otro cupo completó', async () => {
+      const multiSeat = { ...closedShift, requiredWorkers: 2 };
+      const { service, shiftUpdate, cancellationFindFirst } = scenario({
+        shiftRow: multiSeat,
+        source: 'NO_SHOW',
+        assignmentsAfterUpdate: [{ status: 'CANCELLED' }, { status: 'CANCELLED' }],
+      });
+
+      await service.resolveAssignment(session, 'shift-1', 'assignment-1', 'CANCELLED');
+
+      expect(shiftUpdate).toHaveBeenCalledWith(stillCancelled);
+      // El recálculo (`deriveShiftStatus('PUBLISHED', ...)`) sí se ejecuta
+      // (ya no depende del outcome de esta llamada), pero da CANCELLED
+      // -ningún cupo completó-, así que ni siquiera llega a consultar si la
+      // empresa canceló el turno: no hay nada que reabrir.
+      expect(cancellationFindFirst).not.toHaveBeenCalled();
+    });
+
     it('rechaza resolver una asignación de un turno de otra empresa: el turno se busca filtrado por la empresa de la sesión y nada se escribe', async () => {
       const shiftFindFirst = vi.fn(async (_args: { where: Record<string, unknown> }) => null);
       const prisma = {
@@ -800,6 +844,45 @@ describe('DatabaseBusinessService.cancelShift', () => {
     const cancelled = await service.cancelShift(session, 'shift-no-show', 'Nunca se cubrió y ya venció');
 
     expect(cancelled).toMatchObject({ status: 'CANCELLED' });
+  });
+
+  // Punto 3 de CN-20260922-013: `cancelShift` solo volcaba a CANCELLED las
+  // asignaciones `ASSIGNED`. Una asignación `NO_SHOW` que quedó sin resolver
+  // (posible: el guard de `checkedInAt` no la bloquea, porque `NO_SHOW`
+  // nunca hizo check-in) sobrevivía intacta y seguía siendo resoluble vía
+  // `resolveAssignment` después de que la empresa ya canceló el turno
+  // completo, generando un `Payment` sobre un turno `CANCELLED`.
+  // `ABANDONED` no puede coexistir con un turno cancelable (exige
+  // `checkedInAt` no nulo, y el guard de `checkedIn > 0` ya bloquea la
+  // cancelación en ese caso), así que basta con sumar `NO_SHOW` al filtro.
+  it('also cancels a lingering unresolved NO_SHOW assignment, so it stops being resolvable once the company cancels the whole shift', async () => {
+    const shift = {
+      id: 'shift-1',
+      companyId: 'company-1',
+      status: 'PUBLISHED' as const,
+      endsAt: new Date(Date.now() + 60 * 60 * 1000),
+    };
+    const assignmentUpdateMany = vi.fn(async () => undefined);
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      shift: { findFirst: vi.fn(async () => shift) },
+      shiftAssignment: { count: vi.fn(async () => 0) },
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
+        shiftAssignment: { updateMany: assignmentUpdateMany },
+        shiftApplication: { updateMany: vi.fn(async () => undefined) },
+        shiftCancellation: { create: vi.fn(async () => undefined) },
+        shiftEvent: { create: vi.fn(async () => undefined) },
+        shift: { update: vi.fn(async () => ({ ...shift, status: 'CANCELLED' })) },
+      })),
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    await service.cancelShift(session, 'shift-1', 'La empresa ya no lo necesita');
+
+    expect(assignmentUpdateMany).toHaveBeenCalledWith({
+      where: { shiftId: 'shift-1', status: { in: ['ASSIGNED', 'NO_SHOW'] } },
+      data: { status: 'CANCELLED' },
+    });
   });
 });
 

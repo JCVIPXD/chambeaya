@@ -57,8 +57,8 @@ test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda
   await row.getByRole('button', { name: `Confirmar que ${strandedShift.workerName} sí trabajó`, exact: true }).click();
   // El turno venció sin asignaciones viables: la API ya lo cerró como cancelado.
   await expect(row).toContainText('Este turno figura como cancelado');
-  await expect(row).toContainText('pasará a completado solo cuando todos sus cupos queden confirmados como trabajados');
-  await expect(row).toContainText('si lo cancelaste tú, o si queda algún cupo sin confirmar, seguirá cancelado');
+  await expect(row).toContainText('pasará a completado en cuanto ya no quede ningún cupo pendiente de tu decisión y al menos uno haya quedado confirmado como trabajado');
+  await expect(row).toContainText('si lo cancelaste tú, seguirá cancelado');
   await expect(row).not.toContainText('Aunque este turno figure como cancelado');
   await expect(row).not.toContainText('se actualizará al confirmar');
   await expect(row).toContainText('Chambeaya no cobra, guarda ni transfiere dinero');

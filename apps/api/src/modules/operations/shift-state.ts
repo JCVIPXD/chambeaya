@@ -129,13 +129,33 @@ export function deriveShiftStatus(
 ): OperationalShiftStatus {
   if (current === 'CANCELLED') return 'CANCELLED';
 
-  // `NO_SHOW`/`ABANDONED` se excluyen del cálculo agregado igual que
-  // `CANCELLED`: son asignaciones que no van a completarse por sí solas, y
-  // dejarlas contar bloquearía para siempre la reasignación de ese cupo.
+  // `ASSIGNED`, `NO_SHOW` y `ABANDONED` sin resolver representan una
+  // decisión todavía pendiente sobre ese cupo: `ASSIGNED` es trabajo en
+  // curso (camino normal a `COMPLETED` vía check-out); `NO_SHOW`/`ABANDONED`
+  // exigen que la empresa decida `COMPLETED`/`CANCELLED` vía
+  // `resolveAssignment` (nunca se resuelven solas). Mientras exista una
+  // asignación así, el turno no puede darse por `COMPLETED`: podría todavía
+  // sumar otro cupo completado, o la empresa podría revertir su decisión.
+  // Una vez que ya no queda ninguna (todo cupo terminó `COMPLETED` o
+  // `CANCELLED` -este último con o sin haber pasado antes por
+  // `NO_SHOW`/`ABANDONED`-), si al menos uno completó, el turno se da por
+  // `COMPLETED` aunque otros hayan terminado `CANCELLED`: un turno
+  // multi-cupo parcialmente cubierto refleja que sí se prestó el servicio,
+  // aunque parcial, en vez de quedar `CHECKED_IN` para siempre (el bug
+  // original, CN-20260922-013, pendiente #1 de "turnos multi-cupo
+  // parcialmente cubiertos" del plan maestro; contexto en CN-20260918-004 y
+  // CN-20260920-004/005/006) o `CANCELLED` (que sugeriría que no pasó nada).
+  // Esto cubre también, sin caso especial, el turno de un solo cupo
+  // totalmente completado (comportamiento sin cambios).
+  const pending = assignments.some((assignment) => ['ASSIGNED', 'NO_SHOW', 'ABANDONED'].includes(assignment.status));
+  const completedCount = assignments.filter((assignment) => assignment.status === 'COMPLETED').length;
+  if (!pending && completedCount > 0) return 'COMPLETED';
+
+  // `NO_SHOW`/`ABANDONED` (resueltas o no) se excluyen de aquí en adelante
+  // igual que `CANCELLED`: son asignaciones que no van a completarse por sí
+  // solas, y dejarlas contar bloquearía para siempre la reasignación de ese
+  // cupo (sin cambios respecto al comportamiento previo).
   const effective = assignments.filter((assignment) => !['CANCELLED', 'NO_SHOW', 'ABANDONED'].includes(assignment.status));
-  if (effective.length >= requiredWorkers && effective.every((assignment) => assignment.status === 'COMPLETED')) {
-    return 'COMPLETED';
-  }
   if (effective.some((assignment) => assignment.checkedInAt != null || assignment.status === 'COMPLETED')) {
     return 'CHECKED_IN';
   }

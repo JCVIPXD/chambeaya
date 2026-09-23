@@ -390,6 +390,96 @@ void main() {
     expect(repository.stateCalls, greaterThan(callsWhenShown));
     await _unmount(tester);
   });
+
+  testWidgets(
+    're-entering "Postulaciones" keeps the previous cards on screen while the '
+    'reload it triggers is in flight, instead of remounting the page and '
+    'showing the full-page spinner (CN-20260921-008, MEDIO-2)',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final repository = _Repository();
+      await tester.pumpWidget(
+        MaterialApp(home: WorkerShell(repository: repository, initialIndex: 1)),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Mozo de Salón'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      // Leave the tab and come back: `_selectTab` bumps `_applicationRevision`
+      // on every entry to "Postulaciones". That revision used to be passed as
+      // the page's `ValueKey`, so changing it destroyed the whole `State`
+      // (and its `_data`) and recreated it from scratch on every entry.
+      repository.hold = true;
+      await tester.tap(find.text('Inicio'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Postulaciones'));
+      await tester.pumpAndSettle();
+
+      // The reload triggered by re-entering is in flight (held by the fake
+      // repository), but the card from the previous load must still be on
+      // screen: a remount would have reset `_data` to null and shown the
+      // full-page spinner instead, exactly the symptom reported.
+      expect(repository.pending, hasLength(1));
+      expect(find.text('Mozo de Salón'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+
+      repository.answer(0, {'a': ApplicationState.accepted});
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Mozo de Salón'), findsOneWidget);
+      await _unmount(tester);
+    },
+  );
+
+  testWidgets(
+    're-tapping "Postulaciones" while it is already the active tab still '
+    'reloads, and does so through didUpdateWidget rather than a '
+    'TickerMode/visibility change (CN-20260922-007, MEDIO-1)',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final repository = _Repository();
+      await tester.pumpWidget(
+        MaterialApp(home: WorkerShell(repository: repository, initialIndex: 1)),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Mozo de Salón'), findsOneWidget);
+      final callsBeforeRetap = repository.stateCalls;
+
+      // Tap "Postulaciones" while it is already the selected tab.
+      // `WorkerShell._selectTab` takes the `!changingTab` branch for this: it
+      // still bumps `_applicationRevision` (the manual-refresh contract this
+      // whole cierre exists to preserve) but neither `selected` nor
+      // `TickerMode.enabled` for this page actually change, so
+      // `_onTickerModeChanged` never fires (`visible == _tabVisible` stays
+      // true throughout). `didUpdateWidget` is the only route that can
+      // deliver this reload; the "re-entering" test above only exercises the
+      // tab-switch path, where `_onTickerModeChanged` wins the race and
+      // `didUpdateWidget`'s call is the one dropped by `_requestPending`
+      // (see CN-20260922-007, MEDIO-1: this exact gap, confirmed by the
+      // auditor by neutralizing `didUpdateWidget`'s body and finding no test
+      // failed).
+      await tester.tap(find.text('Postulaciones'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        repository.stateCalls,
+        greaterThan(callsBeforeRetap),
+        reason:
+            're-tapping the already-active tab must still trigger a silent '
+            'reload via didUpdateWidget',
+      );
+      await _unmount(tester);
+    },
+  );
 }
 
 Shift _shift(String id, String title) => Shift(

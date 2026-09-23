@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
+import 'package:flutter/foundation.dart'
+    show SynchronousFuture, ValueListenable, listEquals;
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
@@ -9,9 +10,21 @@ import 'marketplace_data.dart';
 import 'marketplace_repository.dart';
 
 class WorkerApplicationsPage extends StatefulWidget {
-  const WorkerApplicationsPage({super.key, required this.repository});
+  const WorkerApplicationsPage({
+    super.key,
+    required this.repository,
+    this.applicationRevision = 0,
+  });
 
   final WorkerMarketplaceRepository repository;
+
+  /// Bumped by `WorkerShell` on every deliberate "reload this tab" moment
+  /// (tapping "Postulaciones", or applying to a shift from Descubrimiento).
+  /// It is a plain property, not a `key`: changing it must trigger a silent
+  /// refresh of the existing `State` (see `didUpdateWidget` below), not
+  /// destroy and recreate it, which used to wipe `_data` and show the
+  /// full-screen spinner on every entry to the tab.
+  final int applicationRevision;
 
   @override
   State<WorkerApplicationsPage> createState() => _WorkerApplicationsPageState();
@@ -76,6 +89,38 @@ class _WorkerApplicationsPageState extends State<WorkerApplicationsPage> {
       _tickerMode?.removeListener(_onTickerModeChanged);
       _tickerMode = notifier..addListener(_onTickerModeChanged);
       _tabVisible = notifier.value.enabled;
+    }
+  }
+
+  @override
+  void didUpdateWidget(WorkerApplicationsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The revision changed: the worker tapped "Postulaciones" again, or
+    // applied to a shift from Descubrimiento while this page stayed mounted
+    // in the background. Either way it is a deliberate "reload now", done the
+    // same way a poll tick is: silently, keeping whatever is already on
+    // screen until the response arrives (see `_refresh`). Unlike the old
+    // `ValueKey`-driven remount, this never resets `_data` to null and never
+    // shows the full-screen spinner.
+    //
+    // Guarded by `_requestPending`, same as `_poll`: tapping the tab also
+    // flips `TickerMode` from hidden to visible in the very same frame, which
+    // independently triggers `_onTickerModeChanged`'s own catch-up `_poll()`.
+    // Without this guard both fire and start two overlapping requests for a
+    // single tap; either one already reloads with the freshest data, so only
+    // the one that gets there first needs to run.
+    //
+    // Accepted risk (CN-20260922-007, BAJO-1): if a deliberate reload (this
+    // one, or the manual retap when the tab is already active — see
+    // `WorkerShell._selectTab`) happens to land exactly while an automatic 3 s
+    // poll is already in flight, this guard drops it silently instead of
+    // queuing it. No data is lost: the in-flight request still applies its
+    // result when it lands, so the worst case is up to one extra polling
+    // interval of staleness, not a missed refresh. Confirmed by probe, not
+    // just assumed.
+    if (widget.applicationRevision != oldWidget.applicationRevision &&
+        !_requestPending) {
+      unawaited(_refresh());
     }
   }
 
@@ -675,7 +720,10 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
     super.initState();
     _refreshing = true;
     _loading = widget.repository.workerConversations().whenComplete(() {
-      _refreshing = false;
+      // `_refreshing` only gates the trailing button's icon at this point (the
+      // full-screen spinner for the very first load comes from `_loading`
+      // itself via `FutureBuilder`), so this needs `setState` to repaint it.
+      if (mounted) setState(() => _refreshing = false);
     });
     _refreshTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       if (mounted) _poll();
@@ -689,8 +737,14 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
   }
 
   Future<void> _poll() async {
+    // A refresh (automatic or from the button) is already in flight: do not
+    // start a second one, but the button's icon already reflects that below
+    // (it turns into a spinner while `_refreshing` is true), which is the
+    // visible signal a manual tap needs even when it lands on top of a
+    // running poll. Before this, tapping while `_refreshing` was already
+    // true was a silent no-op.
     if (_refreshing) return;
-    _refreshing = true;
+    setState(() => _refreshing = true);
     try {
       final conversations = await widget.repository.workerConversations();
       if (mounted) {
@@ -698,20 +752,38 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
         // from an arrow body trips `setState`'s debug assertion before the
         // rebuild is scheduled, and the `catch` below swallowed it, so the
         // list silently stopped refreshing.
+        //
+        // `SynchronousFuture`, not `Future.value`: `FutureBuilder` resets to
+        // `ConnectionState.waiting` whenever the `future` it is given changes
+        // identity, and only leaves it once that future's `.then` callback
+        // runs. `Future.value` resolves through a microtask that this frame
+        // (already mid-build/paint from this `setState`) does not drain
+        // until afterwards, so every poll painted one frame of
+        // `CircularProgressIndicator` in place of the list before the data
+        // reappeared. `SynchronousFuture.then` invokes its callback
+        // immediately, so `_FutureBuilderState._subscribe` (see
+        // `package:flutter/src/widgets/async.dart`) observes
+        // `ConnectionState.done` before this build ever runs, and the
+        // "waiting" state it would otherwise force is skipped for a future
+        // already resolved.
         setState(() {
-          _loading = Future.value(conversations);
+          _loading = SynchronousFuture(conversations);
           _refreshFailed = false;
+          _refreshing = false;
         });
       }
     } catch (error) {
       // A failed refresh must not break the screen or wipe the list already
       // shown, and it must not be silent either (an empty `catch` once hid a
       // frozen list). Keep the data, log it and flag the notice; the timer
-      // keeps retrying and the next success clears the flag.
+      // keeps retrying and the next success clears the flag. Always
+      // `setState` (not only on the first consecutive failure) so the
+      // button's spinner turns off even on a repeated failure.
       debugPrint('WorkerMessagesPage: no se pudo actualizar: $error');
-      if (mounted && !_refreshFailed) {
+      if (mounted) {
         setState(() {
           _refreshFailed = true;
+          _refreshing = false;
         });
       }
     } finally {
@@ -727,7 +799,34 @@ class _WorkerMessagesPageState extends State<WorkerMessagesPage> {
     trailing: IconButton.filledTonal(
       tooltip: 'Actualizar mensajes',
       onPressed: () => _poll(),
-      icon: const Icon(Icons.refresh_rounded),
+      // A visible signal on every tap, including one that lands while a poll
+      // (automatic or manual) is already in flight: before this, `_poll`
+      // returning early on `_refreshing` left the button showing the same
+      // static icon with no reaction at all.
+      //
+      // `color:` is required here (CN-20260922-006, MEDIO-1): a
+      // `CircularProgressIndicator` with no explicit color falls back to
+      // `colorScheme.primary` (`ProgressIndicator._getValueColor`), but this
+      // button paints its own fill with `colorScheme.secondaryContainer`
+      // (`IconButton.filledTonal`). Measured on the real theme
+      // (`buildAppTheme`): `primary` on `secondaryContainer` was 1.68:1 in
+      // light mode and 4.34:1 in dark, both below (light) or borderline
+      // (dark) the 3:1 floor this project already applies to non-text UI
+      // components (CN-20260921-009/010). `onSecondaryContainer` is the color
+      // `IconButton.filledTonal` itself uses for its static icon, which the
+      // same measurement put at 7.31:1 in light mode (see
+      // `worker_button_contrast_test.dart`), so it replaces the disabled icon
+      // with no visible color jump when the refresh finishes.
+      icon: _refreshing
+          ? SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Theme.of(context).colorScheme.onSecondaryContainer,
+              ),
+            )
+          : const Icon(Icons.refresh_rounded),
     ),
     child: FutureBuilder<List<WorkerConversationRecord>>(
       future: _loading,

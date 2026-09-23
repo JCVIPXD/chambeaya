@@ -136,10 +136,17 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
           ? Map<String, dynamic>.from(rawAssignment)
           : null;
       final assignmentStatus = assignment?['status'] as String?;
-      final isCompleted =
-          shift['status'] == 'COMPLETED' ||
-          assignmentStatus == 'COMPLETED' ||
-          assignment?['checkedOutAt'] != null;
+      // La API puede cerrar un turno multi-cupo como `COMPLETED` aunque solo
+      // uno de sus cupos haya completado (el resto terminó `CANCELLED`), ver
+      // CN-20260922-013. `shift['status'] == 'COMPLETED'` ya no es una señal
+      // válida de que ESTE trabajador completó su propio turno: solo se usa
+      // como respaldo cuando la API no trae `assignment` (no debería ocurrir
+      // para una postulación `ACCEPTED`, pero se mantiene por seguridad). Si
+      // hay `assignment`, manda su propio estado, nunca el del turno.
+      final isCompleted = assignment == null
+          ? shift['status'] == 'COMPLETED'
+          : assignmentStatus == 'COMPLETED' ||
+                assignment['checkedOutAt'] != null;
       if (!isCompleted) continue;
 
       var parsed = _shiftFromJson(shift);
