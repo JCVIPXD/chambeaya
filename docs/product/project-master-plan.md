@@ -901,18 +901,26 @@ Pendientes conocidos, por prioridad sugerida:
    `ColorScheme` real de `buildAppTheme` y fijado por
    `apps/mobile_flutter/test/worker_button_contrast_test.dart` (ratio WCAG calculado en la
    prueba, sin hex fijos).
-10. **`apps/api/Dockerfile.production` no completa un build ni arrancaría** con el
-    `package-lock.json` vigente (detectado en `CN-20260922-001`, confirmado de forma
-    independiente en `CN-20260922-005`; **preexistente**, no lo introduce ese cambio).
-    `package-lock.json` declara `prisma` y `@prisma/client` únicamente bajo
-    `apps/api/node_modules/…`, nunca elevados a la raíz del monorepo. La etapa `build`
-    ejecuta `npx prisma generate` con `WORKDIR /workspace` y falla con
+10. **Cerrado en `CN-20260923-004` (aprobado por la auditoría `CN-20260923-005`): `apps/api/Dockerfile.production`
+    no completaba un build ni arrancaba** con el `package-lock.json` anterior (detectado en
+    `CN-20260922-001`, confirmado en `CN-20260922-005`; **preexistente**).
+    `package-lock.json` declaraba `prisma` y `@prisma/client` (con sus dependencias
+    `@prisma/*`) únicamente bajo `apps/api/node_modules/…`, sin elevar a la raíz; la etapa
+    `build` ejecutaba `npx prisma generate` con `WORKDIR /workspace` y fallaba con
     `sh: prisma: not found` (código 127), y la etapa `runtime` copia solo
-    `/workspace/node_modules`, así que `@prisma/client` tampoco llegaría a la imagen.
-    Afecta el procedimiento de `docs/guides/deployment.md` (`scripts/deploy-hosting.sh`
-    construye esta imagen). `apps/web/Dockerfile.production` usa el mismo patrón pero hoy
-    no se ve afectado: todas las dependencias de `apps/web` sí se elevan a la raíz. No se
-    investigó por qué npm no eleva `prisma`; corregirlo es un alcance nuevo.
+    `/workspace/node_modules`. Corrección: el lockfile se reubicó para que esos paquetes
+    queden en la raíz (`npm install --package-lock-only` sobre el lockfile sin esas
+    entradas; solo se movieron los nueve paquetes afectados, sin cambiar versiones ni
+    tocar otras dependencias) y `apps/api/tsconfig.json` fija `"rootDir": "."` (BAJO-1 de
+    `CN-20260922-005`). El Dockerfile no cambió. Verificado con `docker build` real, arranque
+    del contenedor y `npm ci` desde cero; ver la entrada para el detalle. La auditoría
+    `CN-20260923-005` repitió el build, reprodujo el fallo con el lockfile anterior y ejecutó el
+    `CMD` completo (`prisma migrate deploy` + arranque + `/api/health`) contra un PostgreSQL
+    efímero. Con `rootDir` explícito, reducir el `include` a `["src"]` ya no aplana la salida:
+    `tsc` sigue emitiendo `dist/src/server.js` (no produce `TS6059`; simplemente conserva el
+    layout). `apps/web/Dockerfile.production` usa el mismo patrón, nunca estuvo afectado y
+    también se construyó y arrancó en esa auditoría. Queda sin verificar solo un despliegue real
+    con `scripts/deploy-hosting.sh` en un VPS.
 11. **Fuera de este ciclo**: la duplicación `CompanyWorkerContact` frente a
     `WorkerTalentProfile` y el rediseño de `main.dart` (inyección de dependencias, tema y
     sesión).
@@ -948,11 +956,10 @@ contraste sobre el `ColorScheme`, sin rasterizar el botón (el indicador anima
 indefinidamente y colgó la sonda de rasterización de la auditoría `CN-20260922-006`; la
 prueba de contraste de `CN-20260922-009` lee el `color` del widget montado y el
 `ColorScheme` real, no los píxeles pintados). De
-`CN-20260922-001`, el build de `apps/api/Dockerfile.production` **no** se verificó con el
-archivo exacto del repositorio: no completa en este entorno por el pendiente 10; la
-comprobación de que la imagen ya no contiene `dist/scripts` ni `dist/tests` se hizo sobre
-una copia del Dockerfile con un rodeo local, y la API nunca se arrancó dentro del
-contenedor.
+`CN-20260922-001`, el build de `apps/api/Dockerfile.production` no se pudo verificar con el
+archivo exacto del repositorio hasta que `CN-20260923-004` corrigió el pendiente 10; esa
+entrada lo construyó y arrancó de verdad, y la auditoría `CN-20260923-005` lo confirmó con un
+ciclo completo contra un PostgreSQL efímero.
 
 Antes de fusionar la rama o desplegar: correr `prisma migrate deploy` sobre la base real
 del entorno (la migración `20260918120000_assignment_no_show_abandoned` es aditiva) y

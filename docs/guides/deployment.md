@@ -4,19 +4,17 @@ El despliegue de producción usa `docker-compose.production.yml` y no modifica e
 flujo de desarrollo. Está pensado para un VPS o hosting que permita Docker
 Engine y Docker Compose v2.
 
-> **Limitación vigente (bloquea este procedimiento).** Con el
-> `package-lock.json` actual, la imagen de la API no se construye:
-> `package-lock.json` declara `prisma` y `@prisma/client` solo bajo
-> `apps/api/node_modules/…`, nunca en la raíz del monorepo, mientras que
-> `apps/api/Dockerfile.production` ejecuta `npx prisma generate` con
-> `WORKDIR /workspace` (falla con `sh: prisma: not found`, código 127) y su
-> etapa `runtime` copia únicamente `/workspace/node_modules`, de modo que
-> `@prisma/client` tampoco llegaría a la imagen final. Verificado en
-> `CN-20260922-001` (build real de Docker) y confirmado de forma independiente
-> en la auditoría `CN-20260922-005` (lectura del `package-lock.json`). Es un
-> defecto preexistente y todavía sin corregir; ver el pendiente 10 de
-> [Plan maestro de pendientes](../product/project-master-plan.md). La imagen del
-> panel web no está afectada: sus dependencias sí se elevan a la raíz.
+> **Requisito del `package-lock.json`.** La imagen de la API depende de que
+> `prisma` y `@prisma/client` estén elevados a la raíz del monorepo
+> (`node_modules/prisma` y `node_modules/@prisma/client` en el lockfile): la
+> etapa `build` ejecuta `npx prisma generate` con `WORKDIR /workspace` y la
+> etapa `runtime` copia únicamente `/workspace/node_modules`. Hasta
+> `CN-20260923-004` el lockfile los tenía anidados bajo
+> `apps/api/node_modules/…`, y la imagen no se construía (`sh: prisma: not
+> found`, código 127); quedó corregido y verificado con un `docker build` real
+> (ver esa entrada en [PROGRESO](../PROGRESO.md)). Si al regenerar el lockfile
+> alguna vez reaparece `apps/api/node_modules/prisma`, revierte ese cambio:
+> `grep -n '"apps/api/node_modules' package-lock.json` debe devolver vacío.
 
 ## Primera instalación
 
