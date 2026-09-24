@@ -16,5 +16,11 @@ export default defineConfig({
     // real dentro de un mismo archivo, que sigue usando `Promise.all` contra
     // la misma base de datos.
     fileParallelism: false,
+    // Las pruebas de carrera con varias rondas (p. ej. las 12 rondas de
+    // `shift-cancel-resolve-race`) tardan ~4,3 s en una máquina en reposo, muy
+    // cerca del límite predeterminado de 5 s: en 2 de 10 corridas completas de
+    // CN-20260923-014 expiraron sin ningún fallo real. Un límite holgado evita
+    // esa falla por tiempo; las pruebas con carga larga ya fijan el suyo.
+    testTimeout: 60_000,
   },
 });

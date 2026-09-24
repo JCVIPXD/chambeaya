@@ -6,6 +6,7 @@ import {
   CHECK_IN_LATE_LIMIT_MS,
   CHECK_OUT_ABANDONED_GRACE_MS,
 } from '../src/modules/operations/shift-state.js';
+import { SERIALIZABLE_MAX_ATTEMPTS } from '../src/modules/operations/serializable-retry.js';
 
 describe('DemoMarketplaceService', () => {
   it('assigns a published shift and generates a development check-in credential', () => {
@@ -256,6 +257,24 @@ describe('DatabaseMarketplaceService rejects new applications for shifts that ar
   });
 });
 
+/**
+ * `$queryRaw` de las sentencias de bloqueo `SELECT ... FOR NO KEY UPDATE` con
+ * que las operaciones del trabajador bloquean sus filas (CN-20260923-012).
+ * `lockedTables` y `lockedValues` describen, en orden, lo bloqueado.
+ */
+function fakeRowLocks() {
+  return vi.fn(async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+    expect(strings.join('?')).toContain('FOR NO KEY UPDATE');
+    return [];
+  });
+}
+function lockedTables(queryRaw: ReturnType<typeof fakeRowLocks>) {
+  return queryRaw.mock.calls.map(([strings]) => /FROM "(\w+)"/.exec(strings.join('?'))?.[1]);
+}
+function lockedValues(queryRaw: ReturnType<typeof fakeRowLocks>) {
+  return queryRaw.mock.calls.map(([, ...values]) => values);
+}
+
 // Modela el subconjunto de Prisma que `checkIn`/`checkOut` tocan, con estado
 // mutable en memoria: cada `update` muta el fixture y el siguiente `findMany`
 // dentro de la misma llamada ya ve el cambio, igual que en una transacción
@@ -279,9 +298,10 @@ function fakeAssignmentPrisma(assignment: Record<string, unknown>, shift: Record
   };
   const shiftEvent = { create: vi.fn(async () => undefined) };
   const payment = { upsert: vi.fn(async () => undefined) };
-  const prisma: Record<string, unknown> = { shiftAssignment, shift: shiftModel, shiftEvent, payment };
+  const queryRaw = fakeRowLocks();
+  const prisma: Record<string, unknown> = { shiftAssignment, shift: shiftModel, shiftEvent, payment, $queryRaw: queryRaw };
   prisma.$transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma));
-  return { prisma, state, shiftAssignment, shiftModel, shiftEvent, payment };
+  return { prisma, state, shiftAssignment, shiftModel, shiftEvent, payment, queryRaw };
 }
 
 describe('DatabaseMarketplaceService.checkIn time window and lifecycle', () => {
@@ -302,7 +322,7 @@ describe('DatabaseMarketplaceService.checkIn time window and lifecycle', () => {
 
   it('rejects a check-in attempted before the tolerance window opens', async () => {
     const { prisma } = fakeAssignmentPrisma(baseAssignment, baseShift);
-    vi.useFakeTimers().setSystemTime(new Date(baseShift.startsAt.getTime() - CHECK_IN_EARLY_TOLERANCE_MS - 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(baseShift.startsAt.getTime() - CHECK_IN_EARLY_TOLERANCE_MS - 1000));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).rejects.toMatchObject({ code: 'CHECK_IN_TOO_EARLY', statusCode: 409 });
@@ -310,7 +330,7 @@ describe('DatabaseMarketplaceService.checkIn time window and lifecycle', () => {
 
   it('accepts a check-in inside the tolerance window', async () => {
     const { prisma, state } = fakeAssignmentPrisma(baseAssignment, baseShift);
-    vi.useFakeTimers().setSystemTime(baseShift.startsAt);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(baseShift.startsAt);
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).resolves.toMatchObject({ shiftId: 'shift-1' });
@@ -319,7 +339,7 @@ describe('DatabaseMarketplaceService.checkIn time window and lifecycle', () => {
 
   it('flags a never-checked-in assignment as NO_SHOW once the window closes, reopens the shift for reassignment, and rejects the check-in', async () => {
     const { prisma, state } = fakeAssignmentPrisma(baseAssignment, baseShift);
-    vi.useFakeTimers().setSystemTime(new Date(baseShift.startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(baseShift.startsAt.getTime() + CHECK_IN_LATE_LIMIT_MS + 1000));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
@@ -344,7 +364,7 @@ describe('DatabaseMarketplaceService.checkIn time window and lifecycle', () => {
     // después de que el turno terminara.
     const shortShift = { ...baseShift, endsAt: new Date(baseShift.startsAt.getTime() + 30 * 60 * 1000) };
     const { prisma, shiftAssignment } = fakeAssignmentPrisma(baseAssignment, shortShift);
-    vi.useFakeTimers().setSystemTime(new Date(baseShift.startsAt.getTime() + 45 * 60 * 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(baseShift.startsAt.getTime() + 45 * 60 * 1000));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).rejects.toMatchObject({ code: 'SHIFT_UNAVAILABLE', statusCode: 409 });
@@ -370,7 +390,7 @@ describe('DatabaseMarketplaceService.checkOut time window and lifecycle', () => 
 
   it('completes the check-out and creates a payment before the abandonment grace period elapses', async () => {
     const { prisma, state, payment } = fakeAssignmentPrisma(checkedInAssignment, baseShift);
-    vi.useFakeTimers().setSystemTime(baseShift.endsAt);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(baseShift.endsAt);
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkOut('worker-1', 'shift-1')).resolves.toMatchObject({ shiftId: 'shift-1' });
@@ -380,7 +400,7 @@ describe('DatabaseMarketplaceService.checkOut time window and lifecycle', () => 
 
   it('flags a checked-in, never-checked-out assignment as ABANDONED past the grace period and closes the shift as CANCELLED (its endsAt already passed, so it cannot reopen to PUBLISHED), rejecting the check-out without creating a payment', async () => {
     const { prisma, state, payment, shiftEvent } = fakeAssignmentPrisma(checkedInAssignment, baseShift);
-    vi.useFakeTimers().setSystemTime(new Date(baseShift.endsAt.getTime() + CHECK_OUT_ABANDONED_GRACE_MS + 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(baseShift.endsAt.getTime() + CHECK_OUT_ABANDONED_GRACE_MS + 1000));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkOut('worker-1', 'shift-1')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
@@ -441,7 +461,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
 
   it('lets the replacement check in well after the original window closed, and moves the shift to CHECKED_IN', async () => {
     const { prisma, state } = fakeAssignmentPrisma(replacement, baseShift, [noShowOriginal]);
-    vi.useFakeTimers().setSystemTime(at(20));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(20));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01')).resolves.toMatchObject({ shiftId: 'shift-1' });
@@ -452,7 +472,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
 
   it('negative: still marks the replacement NO_SHOW once its own grace from assignedAt is over', async () => {
     const { prisma, state } = fakeAssignmentPrisma(replacement, baseShift);
-    vi.useFakeTimers().setSystemTime(at(61));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(61));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
@@ -463,7 +483,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
   it('negative: an original assignment created before startsAt is not extended by the replacement rule', async () => {
     const original = { ...noShowOriginal, status: 'ASSIGNED' };
     const { prisma, state } = fakeAssignmentPrisma(original, baseShift);
-    vi.useFakeTimers().setSystemTime(at(0));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(0));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-1', 'shift-1', 'CUMPLE-ORIG01')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
@@ -473,7 +493,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
 
   it('negative: a NO_SHOW assignment cannot check in even if its assignedAt is recent', async () => {
     const { prisma, state, shiftAssignment } = fakeAssignmentPrisma({ ...replacement, status: 'NO_SHOW' }, baseShift);
-    vi.useFakeTimers().setSystemTime(at(5));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(5));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
@@ -483,7 +503,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
 
   it('negative: an ABANDONED assignment cannot check in', async () => {
     const { prisma, shiftAssignment } = fakeAssignmentPrisma({ ...replacement, status: 'ABANDONED', checkedInAt: at(1) }, baseShift);
-    vi.useFakeTimers().setSystemTime(at(5));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(5));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
@@ -493,7 +513,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
   it('negative: a CANCELLED or COMPLETED assignment responds 404 and writes nothing', async () => {
     for (const status of ['CANCELLED', 'COMPLETED']) {
       const { prisma, shiftAssignment } = fakeAssignmentPrisma({ ...replacement, status }, baseShift);
-      vi.useFakeTimers().setSystemTime(at(5));
+      vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(5));
       const service = new DatabaseMarketplaceService(prisma as never);
 
       await expect(service.checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
@@ -504,7 +524,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
   it('negative: a worker with no assignment on the shift responds 404', async () => {
     const { prisma, shiftAssignment } = fakeAssignmentPrisma(replacement, baseShift);
     shiftAssignment.findFirst.mockResolvedValueOnce(null as never);
-    vi.useFakeTimers().setSystemTime(at(5));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(5));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-stranger', 'shift-1', 'CUMPLE-REPL01')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
@@ -514,7 +534,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
   it('negative: a CANCELLED or COMPLETED shift never accepts the check-in', async () => {
     for (const status of ['CANCELLED', 'COMPLETED']) {
       const { prisma, shiftAssignment } = fakeAssignmentPrisma(replacement, { ...baseShift, status });
-      vi.useFakeTimers().setSystemTime(at(5));
+      vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(5));
       const service = new DatabaseMarketplaceService(prisma as never);
 
       await expect(service.checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01')).rejects.toMatchObject({ code: 'SHIFT_UNAVAILABLE', statusCode: 409 });
@@ -524,7 +544,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
 
   it('negative: an unconfirmed replacement cannot check in, and a wrong credential is rejected', async () => {
     const unconfirmed = fakeAssignmentPrisma({ ...replacement, workerConfirmedAt: null }, baseShift);
-    vi.useFakeTimers().setSystemTime(at(5));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(5));
     await expect(new DatabaseMarketplaceService(unconfirmed.prisma as never).checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01'))
       .rejects.toMatchObject({ code: 'SHIFT_UNAVAILABLE', statusCode: 409 });
     expect(unconfirmed.shiftAssignment.update).not.toHaveBeenCalled();
@@ -538,7 +558,7 @@ describe('DatabaseMarketplaceService.checkIn for an assignment created after sta
   it('negative: the replacement cannot check in after endsAt even inside its own grace, and its window is capped at endsAt (NO_SHOW, not left ASSIGNED)', async () => {
     const shortShift = { ...baseShift, endsAt: new Date(replacementAssignedAt.getTime() + 10 * 60 * 1000) };
     const { prisma, state } = fakeAssignmentPrisma(replacement, shortShift);
-    vi.useFakeTimers().setSystemTime(at(20));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(at(20));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-2', 'shift-1', 'CUMPLE-REPL01')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
@@ -602,14 +622,19 @@ describe('DatabaseMarketplaceService.confirmAssignment and checkIn in a multi-se
       }),
     };
     const shiftEvent = { create: vi.fn(async () => undefined) };
-    return { prisma: { shiftAssignment, shiftEvent }, rows, shiftAssignment, shiftEvent };
+    // `confirmAssignment` corre dentro de una transacción con bloqueo de filas
+    // (CN-20260923-010/012): el fake la ejecuta sobre el mismo cliente.
+    const queryRaw = fakeRowLocks();
+    const prisma: Record<string, unknown> = { shiftAssignment, shiftEvent, $queryRaw: queryRaw };
+    prisma.$transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma));
+    return { prisma, rows, shiftAssignment, shiftEvent, queryRaw };
   }
 
   afterEach(() => { vi.useRealTimers(); });
 
   it('lets an assigned worker confirm after another seat already checked in', async () => {
     const { prisma, rows, shiftEvent } = fakeConfirmPrisma([assignmentACheckedIn, assignmentB], shiftRow);
-    vi.useFakeTimers().setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.confirmAssignment('worker-b', 'shift-1')).resolves.toMatchObject({
@@ -622,7 +647,7 @@ describe('DatabaseMarketplaceService.confirmAssignment and checkIn in a multi-se
   it('lets that worker then check in, keeping the shift CHECKED_IN and leaving the other seat untouched', async () => {
     const confirmedB = { ...assignmentB, workerConfirmedAt: new Date(startsAt.getTime() + 5 * 60 * 1000) };
     const { prisma, state, shiftAssignment } = fakeAssignmentPrisma(confirmedB, shiftRow, [assignmentACheckedIn]);
-    vi.useFakeTimers().setSystemTime(new Date(startsAt.getTime() + 10 * 60 * 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 10 * 60 * 1000));
     const service = new DatabaseMarketplaceService(prisma as never);
 
     await expect(service.checkIn('worker-b', 'shift-1', 'CUMPLE-B00001')).resolves.toMatchObject({ shiftId: 'shift-1' });
@@ -634,7 +659,7 @@ describe('DatabaseMarketplaceService.confirmAssignment and checkIn in a multi-se
   it('still confirms on PUBLISHED and ASSIGNED shifts (behavior unchanged)', async () => {
     for (const status of ['PUBLISHED', 'ASSIGNED']) {
       const { prisma, rows } = fakeConfirmPrisma([assignmentB], { ...shiftRow, status });
-      vi.useFakeTimers().setSystemTime(new Date(startsAt.getTime() - 60 * 60 * 1000));
+      vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() - 60 * 60 * 1000));
       await expect(new DatabaseMarketplaceService(prisma as never).confirmAssignment('worker-b', 'shift-1')).resolves.toMatchObject({ status: 'ACCEPTED' });
       expect(rows[0].workerConfirmedAt).toBeInstanceOf(Date);
     }
@@ -643,7 +668,7 @@ describe('DatabaseMarketplaceService.confirmAssignment and checkIn in a multi-se
   it('negative: a COMPLETED or CANCELLED shift still answers 404 to a confirmation', async () => {
     for (const status of ['COMPLETED', 'CANCELLED']) {
       const { prisma, shiftAssignment } = fakeConfirmPrisma([assignmentB], { ...shiftRow, status });
-      vi.useFakeTimers().setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+      vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
       await expect(new DatabaseMarketplaceService(prisma as never).confirmAssignment('worker-b', 'shift-1'))
         .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
       expect(shiftAssignment.update).not.toHaveBeenCalled();
@@ -652,14 +677,14 @@ describe('DatabaseMarketplaceService.confirmAssignment and checkIn in a multi-se
 
   it('negative: an expired shift answers 404 even while CHECKED_IN', async () => {
     const { prisma, shiftAssignment } = fakeConfirmPrisma([assignmentACheckedIn, assignmentB], shiftRow);
-    vi.useFakeTimers().setSystemTime(new Date(shiftRow.endsAt.getTime() + 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(shiftRow.endsAt.getTime() + 1000));
     await expect(new DatabaseMarketplaceService(prisma as never).confirmAssignment('worker-b', 'shift-1'))
       .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
     expect(shiftAssignment.update).not.toHaveBeenCalled();
   });
 
   it('negative: a worker without an ASSIGNED assignment (unassigned, CANCELLED, NO_SHOW, ABANDONED, COMPLETED) cannot confirm', async () => {
-    vi.useFakeTimers().setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
     const stranger = fakeConfirmPrisma([assignmentACheckedIn, assignmentB], shiftRow);
     await expect(new DatabaseMarketplaceService(stranger.prisma as never).confirmAssignment('worker-stranger', 'shift-1'))
       .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
@@ -671,5 +696,353 @@ describe('DatabaseMarketplaceService.confirmAssignment and checkIn in a multi-se
         .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
       expect(shiftAssignment.update).not.toHaveBeenCalled();
     }
+  });
+
+  it('locks only the assignment itself (not the shift) before reading and writing (CN-20260923-012)', async () => {
+    const { prisma, shiftAssignment, queryRaw } = fakeConfirmPrisma([assignmentACheckedIn, assignmentB], shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+
+    await new DatabaseMarketplaceService(prisma as never).confirmAssignment('worker-b', 'shift-1');
+
+    expect(lockedTables(queryRaw)).toEqual(['ShiftAssignment']);
+    expect(lockedValues(queryRaw)).toEqual([['worker-b', 'shift-1']]);
+    expect(Math.min(...queryRaw.mock.invocationCallOrder)).toBeLessThan(Math.min(...shiftAssignment.findFirst.mock.invocationCallOrder));
+  });
+
+  it('re-reads the assignment on every attempt: a confirmation retried after a P2034 conflict with a cancellation answers 404 and writes nothing (CN-20260923-010)', async () => {
+    const { prisma, rows, shiftAssignment, shiftEvent } = fakeConfirmPrisma([assignmentACheckedIn, assignmentB], shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+    const options: unknown[] = [];
+    let attempts = 0;
+    (prisma as { $transaction: unknown }).$transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>, transactionOptions: unknown) => {
+      attempts += 1;
+      options.push(transactionOptions);
+      if (attempts === 1) {
+        // Una cancelación concurrente confirma primero y esta transacción pierde.
+        rows.find((row) => row.id === 'assignment-b')!.status = 'CANCELLED';
+        throw Object.assign(new Error('write conflict'), { code: 'P2034' });
+      }
+      return callback(prisma);
+    });
+
+    await expect(new DatabaseMarketplaceService(prisma as never).confirmAssignment('worker-b', 'shift-1'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
+    expect(attempts).toBe(2);
+    expect(options).toEqual([{ isolationLevel: 'ReadCommitted' }, { isolationLevel: 'ReadCommitted' }]);
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+    expect(shiftEvent.create).not.toHaveBeenCalled();
+    expect(rows.find((row) => row.id === 'assignment-b')!.workerConfirmedAt).toBeNull();
+  });
+});
+
+// Concurrencia del trabajador sobre su propia asignación (CN-20260923-010,
+// CN-20260923-012): la transacción bloquea las filas (`FOR NO KEY UPDATE`,
+// `READ COMMITTED`) y relee el estado en cada intento, así que un reintento
+// por `P2034` (interbloqueo con una transacción de empresa) no reaplica una
+// lectura obsoleta. Cada
+// prueba simula que otra transacción gana (`onConflict` cambia el estado y el
+// primer intento falla con `P2034`) y comprueba que el reintento responde como
+// una llamada secuencial repetida y no escribe nada de más. El equivalente
+// contra PostgreSQL real está en
+// `tests/integration/worker-assignment-concurrency.integration.test.ts`.
+describe('DatabaseMarketplaceService worker actions lock their rows and re-read state on every attempt', () => {
+  const startsAt = new Date('2026-09-18T18:00:00.000Z');
+  const shiftRow = {
+    id: 'shift-1', companyId: 'company-1', title: 'Mozo', payCents: 10000,
+    requiredWorkers: 1, status: 'ASSIGNED',
+    startsAt,
+    endsAt: new Date('2026-09-19T00:00:00.000Z'),
+    company: { name: 'Restaurante Demo' },
+  };
+  const confirmedAssignment = {
+    id: 'assignment-1', shiftId: 'shift-1', workerId: 'worker-1', status: 'ASSIGNED',
+    checkInCredential: 'CUMPLE-ABC123', workerConfirmedAt: new Date('2026-09-18T10:00:00.000Z'),
+    assignedAt: new Date('2026-09-17T12:00:00.000Z'), checkedInAt: null, checkedOutAt: null,
+  };
+  const checkedInAssignment = { ...confirmedAssignment, checkedInAt: new Date('2026-09-18T18:05:00.000Z') };
+  const winnerAt = new Date('2026-09-18T18:06:00.000Z');
+  const serializationConflict = () => Object.assign(new Error('write conflict'), { code: 'P2034' });
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  // Los primeros `failures` intentos de `$transaction` pierden (`P2034`);
+  // antes del primero corre `onConflict`, que cambia el estado como lo haría la
+  // transacción ganadora. Los siguientes ejecutan el callback sobre ese estado.
+  function conflictOnFirstAttempt(prisma: Record<string, unknown>, onConflict: () => void, failures = 1) {
+    const options: unknown[] = [];
+    let attempts = 0;
+    prisma.$transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>, transactionOptions: unknown) => {
+      attempts += 1;
+      options.push(transactionOptions);
+      if (attempts === 1) onConflict();
+      if (attempts <= failures) throw serializationConflict();
+      return callback(prisma);
+    });
+    return { options, attempts: () => attempts };
+  }
+
+  it('checkIn: a retry after a concurrent check-in answers 200 with the original timestamp and writes no second CHECKED_IN', async () => {
+    const { prisma, state, shiftAssignment, shiftEvent } = fakeAssignmentPrisma(confirmedAssignment, shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+    const race = conflictOnFirstAttempt(prisma, () => { state.assignment.checkedInAt = winnerAt; });
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123'))
+      .resolves.toEqual({ shiftId: 'shift-1', checkedInAt: winnerAt.toISOString() });
+    expect(race.attempts()).toBe(2);
+    expect(race.options).toEqual([{ isolationLevel: 'ReadCommitted' }, { isolationLevel: 'ReadCommitted' }]);
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+    expect(shiftEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('checkIn: a retry after a concurrent cancellation answers 404 and does not check in a cancelled assignment', async () => {
+    const { prisma, state, shiftAssignment, shiftEvent } = fakeAssignmentPrisma(confirmedAssignment, shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+    conflictOnFirstAttempt(prisma, () => { state.assignment.status = 'CANCELLED'; });
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+    expect(shiftEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('checkIn: a retry after the assignment became NO_SHOW answers 409 ASSIGNMENT_NOT_ACTIONABLE, and after the shift was cancelled 409 SHIFT_UNAVAILABLE', async () => {
+    const noShow = fakeAssignmentPrisma(confirmedAssignment, shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+    conflictOnFirstAttempt(noShow.prisma, () => { noShow.state.assignment.status = 'NO_SHOW'; });
+    await expect(new DatabaseMarketplaceService(noShow.prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
+    expect(noShow.shiftAssignment.update).not.toHaveBeenCalled();
+
+    const cancelledShift = fakeAssignmentPrisma(confirmedAssignment, shiftRow);
+    conflictOnFirstAttempt(cancelledShift.prisma, () => { cancelledShift.state.shift.status = 'CANCELLED'; });
+    await expect(new DatabaseMarketplaceService(cancelledShift.prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123'))
+      .rejects.toMatchObject({ code: 'SHIFT_UNAVAILABLE', statusCode: 409 });
+    expect(cancelledShift.shiftAssignment.update).not.toHaveBeenCalled();
+  });
+
+  it('checkIn: a retry with nothing changed still checks in exactly once and derives the shift status from the re-read shift', async () => {
+    const { prisma, state, shiftAssignment, shiftEvent } = fakeAssignmentPrisma(confirmedAssignment, shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+    conflictOnFirstAttempt(prisma, () => undefined);
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123')).resolves.toMatchObject({ shiftId: 'shift-1' });
+    expect(shiftAssignment.update).toHaveBeenCalledTimes(1);
+    expect(shiftEvent.create).toHaveBeenCalledTimes(1);
+    expect(state.shift.status).toBe('CHECKED_IN');
+  });
+
+  it('checkOut: a retry after a concurrent check-out answers 404 and writes no second CHECKED_OUT, COMPLETED event or payment, nor a new completedAt', async () => {
+    const { prisma, state, shiftAssignment, shiftEvent, payment } = fakeAssignmentPrisma(checkedInAssignment, { ...shiftRow, status: 'CHECKED_IN' });
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 60 * 60 * 1000));
+    conflictOnFirstAttempt(prisma, () => {
+      Object.assign(state.assignment, { status: 'COMPLETED', checkedOutAt: winnerAt, completedAt: winnerAt });
+      state.shift.status = 'COMPLETED';
+    });
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkOut('worker-1', 'shift-1'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+    expect(shiftEvent.create).not.toHaveBeenCalled();
+    expect(payment.upsert).not.toHaveBeenCalled();
+    expect(state.assignment.completedAt).toBe(winnerAt);
+  });
+
+  it('checkOut: a repeated sequential check-out answers 404 and does not duplicate the effects of the first one', async () => {
+    const { prisma, shiftEvent, payment } = fakeAssignmentPrisma(checkedInAssignment, { ...shiftRow, status: 'CHECKED_IN' });
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 60 * 60 * 1000));
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkOut('worker-1', 'shift-1')).resolves.toMatchObject({ shiftId: 'shift-1' });
+    await expect(service.checkOut('worker-1', 'shift-1')).rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
+    expect(payment.upsert).toHaveBeenCalledTimes(1);
+    // CHECKED_OUT + COMPLETED del primer check-out, nada más.
+    expect(shiftEvent.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('checkOut: uses the re-read shift (not the first read) to derive the aggregate status and the payment', async () => {
+    const { prisma, state, payment } = fakeAssignmentPrisma(checkedInAssignment, { ...shiftRow, status: 'CHECKED_IN' });
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 60 * 60 * 1000));
+    // Entre la primera lectura y la transacción, la empresa cambió el pago del turno.
+    conflictOnFirstAttempt(prisma, () => { state.shift.payCents = 15000; });
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkOut('worker-1', 'shift-1')).resolves.toMatchObject({ shiftId: 'shift-1' });
+    expect(payment.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ amountCents: 15000 }) }));
+  });
+
+  it('lifecycle: a stale ABANDONED decision never overwrites an assignment another check-out just completed', async () => {
+    const { prisma, state, shiftAssignment, shiftEvent, payment } = fakeAssignmentPrisma(checkedInAssignment, { ...shiftRow, status: 'CHECKED_IN' });
+    // Pasado el margen de abandono: la lectura previa (todavía `ASSIGNED`) se resuelve como `ABANDONED`.
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(shiftRow.endsAt.getTime() + CHECK_OUT_ABANDONED_GRACE_MS + 1000));
+    const runTransaction = prisma.$transaction as (callback: (tx: unknown) => Promise<unknown>, options?: unknown) => Promise<unknown>;
+    let first = true;
+    prisma.$transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>, options?: unknown) => {
+      if (first) {
+        first = false;
+        // Otro check-out completó la asignación entre la lectura previa y esta transacción.
+        Object.assign(state.assignment, { status: 'COMPLETED', checkedOutAt: winnerAt, completedAt: winnerAt });
+      }
+      return runTransaction(callback, options);
+    });
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkOut('worker-1', 'shift-1'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
+    expect(state.assignment.status).toBe('COMPLETED');
+    expect(shiftAssignment.update).not.toHaveBeenCalled();
+    expect(shiftEvent.create).not.toHaveBeenCalled();
+    expect(payment.upsert).not.toHaveBeenCalled();
+  });
+
+  // ----------------------------------------------------- cancelAssignment
+
+  function fakeCancelPrisma(application: Record<string, unknown>) {
+    const state = { application: { ...application } as Record<string, unknown> & { assignment: Record<string, unknown> | null } };
+    const shiftApplication = {
+      findFirst: vi.fn(async () => ({ ...state.application, shift: { ...shiftRow } })),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        ...state.application, ...data, shift: { ...shiftRow, company: { name: 'Restaurante Demo', industry: 'HOSPITALITY' } },
+      })),
+    };
+    const shiftAssignment = {
+      update: vi.fn(async () => undefined),
+      findMany: vi.fn(async () => []),
+    };
+    const shiftCancellation = { create: vi.fn(async () => undefined) };
+    const shiftEvent = { create: vi.fn(async () => undefined) };
+    const shiftModel = { update: vi.fn(async () => undefined) };
+    const queryRaw = fakeRowLocks();
+    const prisma: Record<string, unknown> = { shiftApplication, shiftAssignment, shiftCancellation, shiftEvent, shift: shiftModel, $queryRaw: queryRaw };
+    prisma.$transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(prisma));
+    return { prisma, state, shiftApplication, shiftAssignment, shiftCancellation, shiftEvent, shiftModel, queryRaw };
+  }
+
+  const acceptedApplication = {
+    id: 'application-1', workerId: 'worker-1', shiftId: 'shift-1', status: 'ACCEPTED', screeningAnswers: [],
+    createdAt: new Date('2026-09-17T12:00:00.000Z'), updatedAt: new Date('2026-09-17T12:00:00.000Z'),
+    assignment: { id: 'assignment-1', status: 'ASSIGNED', checkedInAt: null, checkedOutAt: null, workerConfirmedAt: null },
+  };
+
+  it('cancelAssignment: runs in a READ COMMITTED transaction and a retry after a concurrent check-in answers 409 without cancelling anything', async () => {
+    const fake = fakeCancelPrisma(acceptedApplication);
+    const race = conflictOnFirstAttempt(fake.prisma, () => { fake.state.application.assignment = { ...acceptedApplication.assignment, checkedInAt: winnerAt }; });
+
+    await expect(new DatabaseMarketplaceService(fake.prisma as never).cancelAssignment('worker-1', 'shift-1', 'Ya no puedo asistir'))
+      .rejects.toMatchObject({ code: 'CANCELLATION_NOT_ALLOWED', statusCode: 409 });
+    expect(race.attempts()).toBe(2);
+    expect(race.options).toEqual([{ isolationLevel: 'ReadCommitted' }, { isolationLevel: 'ReadCommitted' }]);
+    expect(fake.shiftAssignment.update).not.toHaveBeenCalled();
+    expect(fake.shiftApplication.update).not.toHaveBeenCalled();
+    expect(fake.shiftCancellation.create).not.toHaveBeenCalled();
+    expect(fake.shiftEvent.create).not.toHaveBeenCalled();
+    expect(fake.shiftModel.update).not.toHaveBeenCalled();
+  });
+
+  it('cancelAssignment: a retry after a concurrent cancellation answers 404 and records no second cancellation', async () => {
+    const fake = fakeCancelPrisma(acceptedApplication);
+    conflictOnFirstAttempt(fake.prisma, () => { fake.state.application.status = 'CANCELLED'; });
+
+    await expect(new DatabaseMarketplaceService(fake.prisma as never).cancelAssignment('worker-1', 'shift-1', 'Ya no puedo asistir'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
+    expect(fake.shiftCancellation.create).not.toHaveBeenCalled();
+    expect(fake.shiftEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('cancelAssignment: a spurious conflict retries and cancels exactly once', async () => {
+    const fake = fakeCancelPrisma(acceptedApplication);
+    conflictOnFirstAttempt(fake.prisma, () => undefined);
+
+    await expect(new DatabaseMarketplaceService(fake.prisma as never).cancelAssignment('worker-1', 'shift-1', 'Ya no puedo asistir'))
+      .resolves.toMatchObject({ status: 'CANCELLED' });
+    expect(fake.shiftAssignment.update).toHaveBeenCalledTimes(1);
+    expect(fake.shiftCancellation.create).toHaveBeenCalledTimes(1);
+    expect(fake.shiftEvent.create).toHaveBeenCalledTimes(1);
+  });
+
+  // --------------------------------------------- bloqueo de filas (ALTO-1)
+
+  const idsOf = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder;
+
+  it('checkIn: locks the assignment and then the shift, inside the transaction, before re-reading and writing', async () => {
+    const { prisma, shiftAssignment, shiftModel, queryRaw } = fakeAssignmentPrisma(confirmedAssignment, shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+
+    await new DatabaseMarketplaceService(prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123');
+
+    expect(lockedTables(queryRaw)).toEqual(['ShiftAssignment', 'Shift']);
+    expect(lockedValues(queryRaw)).toEqual([['worker-1', 'shift-1'], ['shift-1']]);
+    // El bloqueo ocurre antes de la relectura y de cualquier escritura de la transacción.
+    const lastLock = Math.max(...idsOf(queryRaw));
+    expect(Math.max(...idsOf(shiftAssignment.findFirst))).toBeGreaterThan(lastLock);
+    expect(Math.min(...idsOf(shiftAssignment.update))).toBeGreaterThan(lastLock);
+    expect(Math.min(...idsOf(shiftModel.update))).toBeGreaterThan(lastLock);
+  });
+
+  it('checkOut: locks the assignment and then the shift before completing it', async () => {
+    const { prisma, shiftAssignment, queryRaw } = fakeAssignmentPrisma(checkedInAssignment, { ...shiftRow, status: 'CHECKED_IN' });
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 60 * 60 * 1000));
+
+    await new DatabaseMarketplaceService(prisma as never).checkOut('worker-1', 'shift-1');
+
+    expect(lockedTables(queryRaw)).toEqual(['ShiftAssignment', 'Shift']);
+    expect(lockedValues(queryRaw)).toEqual([['worker-1', 'shift-1'], ['shift-1']]);
+    expect(Math.min(...idsOf(shiftAssignment.update))).toBeGreaterThan(Math.max(...idsOf(queryRaw)));
+  });
+
+  it('checkIn already registered answers from the first read without opening a transaction or taking any lock', async () => {
+    const { prisma, queryRaw } = fakeAssignmentPrisma(checkedInAssignment, shiftRow);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 5 * 60 * 1000));
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123'))
+      .resolves.toEqual({ shiftId: 'shift-1', checkedInAt: checkedInAssignment.checkedInAt.toISOString() });
+    expect(queryRaw).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('lifecycle: persisting a NO_SHOW locks the assignment and the shift of that worker first', async () => {
+    const { prisma, state, queryRaw } = fakeAssignmentPrisma(confirmedAssignment, shiftRow);
+    // Fuera de la ventana de check-in por tardanza: la lectura previa se resuelve como `NO_SHOW`.
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(new Date(startsAt.getTime() + 3 * 60 * 60 * 1000));
+
+    await expect(new DatabaseMarketplaceService(prisma as never).checkIn('worker-1', 'shift-1', 'CUMPLE-ABC123'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_ACTIONABLE', statusCode: 409 });
+    expect(state.assignment.status).toBe('NO_SHOW');
+    expect(lockedTables(queryRaw)).toEqual(['ShiftAssignment', 'Shift']);
+    expect(lockedValues(queryRaw)).toEqual([['worker-1', 'shift-1'], ['shift-1']]);
+  });
+
+  it('cancelAssignment: locks the application, then the assignment, then the shift before reading', async () => {
+    const fake = fakeCancelPrisma(acceptedApplication);
+
+    await new DatabaseMarketplaceService(fake.prisma as never).cancelAssignment('worker-1', 'shift-1', 'Ya no puedo asistir');
+
+    expect(lockedTables(fake.queryRaw)).toEqual(['ShiftApplication', 'ShiftAssignment', 'Shift']);
+    expect(lockedValues(fake.queryRaw)).toEqual([['worker-1', 'shift-1'], ['worker-1', 'shift-1'], ['shift-1']]);
+    const lastLock = Math.max(...idsOf(fake.queryRaw));
+    expect(Math.min(...idsOf(fake.shiftApplication.findFirst))).toBeGreaterThan(lastLock);
+    expect(Math.min(...idsOf(fake.shiftApplication.update))).toBeGreaterThan(lastLock);
+  });
+
+  it('cancelAssignment: a reason that is too short is rejected before opening any transaction or lock', async () => {
+    const fake = fakeCancelPrisma(acceptedApplication);
+
+    await expect(new DatabaseMarketplaceService(fake.prisma as never).cancelAssignment('worker-1', 'shift-1', 'no'))
+      .rejects.toMatchObject({ code: 'CANCELLATION_NOT_ALLOWED', statusCode: 400 });
+    expect(fake.prisma.$transaction).not.toHaveBeenCalled();
+    expect(fake.queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('cancelAssignment: gives up after the maximum number of serialization conflicts by propagating the last error, and never retries business errors', async () => {
+    // Sin espera real entre intentos (la espera aleatoria se prueba en `serializable-retry.test.ts`).
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const exhausted = fakeCancelPrisma(acceptedApplication);
+    const race = conflictOnFirstAttempt(exhausted.prisma, () => undefined, SERIALIZABLE_MAX_ATTEMPTS);
+    await expect(new DatabaseMarketplaceService(exhausted.prisma as never).cancelAssignment('worker-1', 'shift-1', 'Ya no puedo asistir'))
+      .rejects.toMatchObject({ code: 'P2034' });
+    expect(race.attempts()).toBe(SERIALIZABLE_MAX_ATTEMPTS);
+    random.mockRestore();
+
+    const missing = fakeCancelPrisma({ ...acceptedApplication, status: 'CANCELLED' });
+    await expect(new DatabaseMarketplaceService(missing.prisma as never).cancelAssignment('worker-1', 'shift-1', 'Ya no puedo asistir'))
+      .rejects.toMatchObject({ code: 'ASSIGNMENT_NOT_FOUND', statusCode: 404 });
+    expect(missing.prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 });

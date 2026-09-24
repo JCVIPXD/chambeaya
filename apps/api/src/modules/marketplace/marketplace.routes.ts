@@ -1,8 +1,9 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { z } from 'zod';
 
-import { DatabaseAuthService, type AuthService } from '../auth/auth.service.js';
+import { AuthError, DatabaseAuthService, type AuthService } from '../auth/auth.service.js';
 import { marketplaceShiftEvents, type MarketplaceShiftEvents } from './marketplace.events.js';
+import { isRetryableTransactionError } from '../operations/serializable-retry.js';
 import { DatabaseMarketplaceService, DemoMarketplaceService, MarketplaceError, type MarketplaceOperations } from './marketplace.service.js';
 import type { ShiftIndustry, ShiftSearchFilter } from './shift_search.js';
 
@@ -22,6 +23,37 @@ const screeningAnswersSchema = z.object({
 // se cortara. Este refresco periódico complementa el refresco por evento y
 // acota esa ventana de desfase a como máximo `feedRefreshIntervalMs`.
 const DEFAULT_FEED_REFRESH_INTERVAL_MS = 60_000;
+
+/**
+ * Traduce un error de las rutas del trabajador a su respuesta HTTP:
+ *  - `MarketplaceError`: su propio código y estado;
+ *  - `AuthError` (sesión inexistente o vencida, de `authService.restore`):
+ *    `401 INVALID_SESSION`, el único caso en que la app debe pedir otra sesión;
+ *  - conflicto de serialización (`P2034`) o interbloqueo (`40P01`) agotado tras
+ *    los reintentos de `withSerializableRetry`: `409 CONCURRENT_UPDATE`, un
+ *    código explícito y reintentable (la operación no se aplicó);
+ *  - cualquier otro error: `500 INTERNAL_ERROR`, como las rutas de empresa.
+ * Antes todo lo que no era `MarketplaceError` respondía `401 INVALID_SESSION`,
+ * lo que presentaba un fallo transitorio del servidor como una sesión
+ * inválida (CN-20260923-011, MEDIO-1).
+ */
+function sendMarketplaceError(response: Response, error: unknown) {
+  if (error instanceof MarketplaceError) {
+    response.status(error.statusCode).json({ error: error.code });
+    return;
+  }
+  if (error instanceof AuthError) {
+    response.status(401).json({ error: 'INVALID_SESSION' });
+    return;
+  }
+  if (isRetryableTransactionError(error)) {
+    console.error('Marketplace transaction gave up after repeated serialization conflicts or deadlocks', error);
+    response.status(409).json({ error: 'CONCURRENT_UPDATE' });
+    return;
+  }
+  console.error(error);
+  response.status(500).json({ error: 'INTERNAL_ERROR' });
+}
 
 export function createMarketplaceRouter(
   service: MarketplaceOperations = new DatabaseMarketplaceService(),
@@ -112,55 +144,35 @@ export function createMarketplaceRouter(
     try {
       response.json(await service.activeShift(await authenticatedWorkerId(request)));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.get('/workers/applications', async (request, response) => {
     try {
       response.json(await service.listApplications(await authenticatedWorkerId(request)));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.get('/workers/conversations', async (request, response) => {
     try {
       response.json(await service.listWorkerConversations(await authenticatedWorkerId(request)));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.post('/workers/payments/:id/confirm', async (request, response) => {
     try {
       response.json(await service.confirmPayment(await authenticatedWorkerId(request), request.params.id));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.get('/workers/conversations/:id', async (request, response) => {
     try {
       response.json(await service.getWorkerConversation(await authenticatedWorkerId(request), request.params.id));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.post('/workers/conversations/:id/messages', async (request, response) => {
@@ -172,11 +184,7 @@ export function createMarketplaceRouter(
       }
       response.status(201).json(await service.createWorkerMessage(await authenticatedWorkerId(request), request.params.id, body));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.post('/shifts/:id/applications', async (request, response) => {
@@ -189,22 +197,14 @@ export function createMarketplaceRouter(
         response.status(400).json({ error: 'INVALID_SCREENING_ANSWERS', issues: error.issues });
         return;
       }
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.post('/shifts/:id/confirm', async (request, response) => {
     try {
       response.json(await service.confirmAssignment(await authenticatedWorkerId(request), request.params.id));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.post('/shifts/:id/check-in', async (request, response) => {
@@ -212,22 +212,14 @@ export function createMarketplaceRouter(
       const credential = typeof request.body?.credential === 'string' ? request.body.credential : '';
       response.json(await service.checkIn(await authenticatedWorkerId(request), request.params.id, credential));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.post('/shifts/:id/check-out', async (request, response) => {
     try {
       response.json(await service.checkOut(await authenticatedWorkerId(request), request.params.id));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.post('/shifts/:id/cancel', async (request, response) => {
@@ -235,11 +227,7 @@ export function createMarketplaceRouter(
       const reason = typeof request.body?.reason === 'string' ? request.body.reason : '';
       response.json(await service.cancelAssignment(await authenticatedWorkerId(request), request.params.id, reason));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.put('/shifts/:id/accept', async (request, response) => {
@@ -262,22 +250,14 @@ export function createMarketplaceRouter(
       }
       response.json(await service.updateAvailability(authenticatedId, request.body.isAvailable));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.get('/workers/availability', async (request, response) => {
     try {
       response.json(await service.workerAvailability(await authenticatedWorkerId(request)));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
   router.get('/workers/wallet', async (request, response) => {
@@ -285,11 +265,7 @@ export function createMarketplaceRouter(
       const authenticatedId = await authenticatedWorkerId(request);
       response.json(await service.wallet(authenticatedId));
     } catch (error) {
-      if (error instanceof MarketplaceError) {
-        response.status(error.statusCode).json({ error: error.code });
-        return;
-      }
-      response.status(401).json({ error: 'INVALID_SESSION' });
+      sendMarketplaceError(response, error);
     }
   });
 

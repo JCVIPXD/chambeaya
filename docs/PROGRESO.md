@@ -54,6 +54,468 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260923-015 — Reauditoría de `CN-20260923-014` (corrección de MEDIO-1, MEDIO-2 y BAJO-1 de `CN-20260923-013`), cierre conjunto de `CN-20260923-010`, `012` y `014`
+
+- Fecha: 2026-09-24 11:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260923-014` (corrección auditada), `CN-20260923-013` (reauditoría con MEDIO-1, MEDIO-2 y BAJO-1), `CN-20260923-012` (corrección), `CN-20260923-011` (auditoría) y `CN-20260923-010` (implementación, Alcance B1). Diff sin commitear sobre `99475e4`.
+- Alcance:
+  - Revisión independiente del diff completo. Primero corrección, concurrencia y seguridad; después pruebas y documentación.
+  - Repetí las cuatro mutaciones declaradas, 5 corridas completas de integración, la carga con `CHAMBEAYA_LOAD_ROUNDS=8` y 10 corridas sueltas de `business-routes-load`.
+  - Añadí una sonda de fragilidad: `deadlock_timeout` reducido en la base de pruebas y restaurado después.
+- Archivos:
+  - Revisados: `apps/api/src/modules/operations/serializable-retry.ts`, `business/business.service.ts` (`cancelShift`, `decideShiftApplication`, `resolveShiftAssignmentsLifecycle`, `resolveAssignment`, `updateShift`, `deleteShift`), `marketplace/marketplace.service.ts` (`lockedTransaction`, las cuatro operaciones, `resolveAndPersistLifecycle`, `applyToShift`, `acceptShift`), `marketplace.routes.ts`, `business.routes.ts` (manejador de errores), `auth/auth.service.ts`, `vitest.integration.config.mts` y las pruebas nuevas o modificadas.
+  - Modificados por la auditoría (solo documentación):
+    - `docs/reference/api.md`: matiz de `FOR KEY SHARE` frente al `DELETE` del turno.
+    - `docs/product/project-master-plan.md`: estado del pendiente 13.
+  - No se tocó código de producción, pruebas, `CLAUDE.md` ni `.claude/agents/`.
+- Decisiones (hallazgos):
+  - **Críticos, altos y medios: ninguno.**
+  - **MEDIO-1 de `CN-20260923-013`: resuelto.**
+    - Orden verificado en el código, con cada operación como subsecuencia de postulación → asignación → turno:
+      - trabajador: `cancel` (postulación → asignación → turno), `check-in`/`check-out`/ciclo de vida (asignación → turno) y `confirm` (asignación);
+      - `cancelShift`: `updateMany` de postulaciones → asignaciones → `update` del turno;
+      - `decideShiftApplication`: postulación → `insert` de la asignación → turno;
+      - `resolveAssignment`: asignación → pago → turno;
+      - ciclo de vida de la empresa: asignaciones por `id` → turno;
+      - `updateShift`/`deleteShift`: una sola sentencia sobre el turno;
+      - `applyToShift` solo inserta (`FOR KEY SHARE` sobre el turno, compatible);
+      - `acceptShift` responde `410` sin tocar la base.
+    - No encontré ningún par que forme ciclo. Solo quedan los límites declarados, todos cubiertos por el reintento:
+      - el orden físico de un `updateMany` de varias filas frente al orden por `id` del ciclo de vida;
+      - un tercero ajeno a la API.
+    - La tabla de `api.md` coincide con el código.
+    - Garantías de `CN-20260923-008/009` y `CN-20260922-013` intactas:
+      - `cancelShift` sigue `Serializable` y relee turno y check-ins dentro de la transacción;
+      - las dos sentencias filtran por su propio estado, así que el orden es semánticamente neutro;
+      - sigue cancelando `ASSIGNED` y `NO_SHOW`, con `confirmedWorkers: 0`;
+      - la reapertura de `resolveAssignment` no cambió.
+    - `shift-cancel-resolve-race` sigue siendo significativa: `resolve` no toca postulaciones y el conflicto sigue sobre la asignación y el turno. Pasó 10 de 10 veces (5 en la suite completa y 5 sueltas).
+  - **40P01 reintentable: correcto y acotado.**
+    - Se reconocen `P2034`, `P2010` con `meta.code` `40001`/`40P01` y un error sin `code` cuyo mensaje trae `PostgresError { code: "40P01"`/`"40001"`.
+    - No se reintentan los errores de negocio: tienen `code`, así que no entran en la rama del texto. Tampoco `P2002`/`P2025`, un `P2010` con otro SQLSTATE ni menciones sueltas (prueba unitaria).
+    - Reintentar es seguro: PostgreSQL revierte entera la transacción abortada, y todas las operaciones envueltas releen dentro de ella. La excepción previa conocida está en Riesgos.
+    - Cota: 6 intentos. El peor caso ronda 6 s por interbloqueos repetidos (1 s de `deadlock_timeout` cada uno) más ~1,2 s de espera aleatoria.
+    - Si se agotan, las rutas del trabajador responden `409 {"error":"CONCURRENT_UPDATE"}` y las de empresa `500 {"error":"INTERNAL_ERROR"}`. En ninguno de los dos casos sale detalle al cliente; solo va al `console.error` del servidor.
+  - **MEDIO-2 de `CN-20260923-013`: resuelto con la opción (b).**
+    - La prueba por defecto no tiene aserciones vacías ni tautológicas:
+      - exige solo `200` o `500 INTERNAL_ERROR`;
+      - comprueba la atomicidad fila por fila y los agregados del turno;
+      - la repetición en serie tiene que responder `200`.
+    - En mis corridas la ruta tolerante se ejercitó de verdad, con `500` impresos y aceptados: `cancelShift 10 {"200":9,"500":1}` (dos veces) y `decide 10 same-shift {"200":9,"500":1}`.
+    - "Al menos un `200`" depende de que `Serializable` deje confirmar a alguna de las transacciones en conflicto. Es prácticamente seguro, no un teorema; se acepta.
+    - Prefiero (b) a (a): el riesgo de reescribir cuatro transacciones ya auditadas no compensa, y el fallo es atómico y repetible. El límite probabilístico desde ~20 llamadas simultáneas de una misma empresa queda como riesgo aceptado, no como bloqueo.
+  - **BAJO-1 de `CN-20260923-013`: resuelto.**
+    - `restore` y `setInitialGooglePassword` usan `deleteMany`. No hay otro `authSession.delete` en `src/`, y el cierre de sesión ya usaba `deleteMany`.
+    - Con la barrera determinista, las dos peticiones responden `401 INVALID_SESSION` y no queda ninguna sesión.
+  - **BAJO-1 (nuevo, no bloqueante): `testTimeout: 60_000` global.**
+    - El `hookTimeout` sigue en 10 s y el `timeout` de 5 s de las transacciones interactivas de Prisma acota la mayoría de los cuelgues. Aun así, un bloqueo real en una prueba tarda 60 s en reportarse, y N pruebas colgadas alargan CI N minutos.
+    - Recomendación, sin implementar:
+      - volver a un global moderado (15–20 s);
+      - dar `{ timeout }` explícito solo a los archivos de carrera o carga que lo necesitan (`shift-cancel-resolve-race` y los que ya lo fijan).
+  - **BAJO-2 (nuevo, no bloqueante): fragilidad de las pruebas deterministas y del reconocimiento por texto.**
+    - Sonda con `deadlock_timeout = '200ms'` (menor que el margen de 300 ms): los 2 interbloqueos forzados fallan con "the test transaction must not be the deadlock victim".
+      - Es un falso fallo, no un falso pase.
+      - Con el valor por defecto (1 s) hace falta una latencia mayor de ~700 ms para provocarlo.
+      - Recomendación: derivar el margen de `SHOW deadlock_timeout`.
+    - `waitUntilSomeSessionIsBlocked` cuenta cualquier sesión de la base en espera de un bloqueo. Con `fileParallelism: false` es correcto, pero un cliente ajeno sobre `chambeaya_test` podría liberar la pausa antes de tiempo.
+    - Reconocer `40P01` por el texto `PostgresError { code: ...` depende del formato del motor de Prisma 6. Si Prisma cambia de motor, el síntoma sería volver a `500`, y el interbloqueo forzado de `cancelShift` lo detecta (exige `200`).
+  - **Mutaciones reproducidas** (archivos restaurados y comprobados con `cmp` tras cada una; pruebas deterministas y forzadas de `worker-company-lock-order`):
+    - orden inverso + sin reintento de `40P01`: `4 failed`;
+    - solo sin reintento: `2 failed | 2 passed` (forzados con `500`);
+    - solo orden inverso: `3 failed | 1 passed` (deterministas con `40P01` visto y forzado de empresa sin interbloqueo);
+    - `authSession.delete` en `restore`: `1 failed` (`[500, 401]`).
+- Validaciones (base `chambeaya_test` de `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la de desarrollo):
+  - `npx prisma migrate deploy` → `No pending migrations to apply.`
+  - `npx vitest run --exclude "tests/integration/**"` (API) → `Test Files 21 passed (21)`, `Tests 339 passed (339)`.
+  - `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - `npm run test:integration`, 5 corridas completas → las 5 con `Tests 71 passed (71)` (123–159 s cada una).
+  - Carga larga `CHAMBEAYA_LOAD_ROUNDS=8` (`worker-assignment-load`, `business-routes-load`, `worker-company-lock-order`) → `Test Files 3 passed (3)`, `Tests 46 passed (46)`.
+  - `business-routes-load` suelta, 10 corridas → 10 de 10 con `Tests 10 passed (10)`.
+  - `worker-company-lock-order` + `expired-session-race` + `shift-cancel-resolve-race`, 5 corridas → 5 de 5 con `Tests 22 passed (22)`.
+  - Sonda de `deadlock_timeout` → descrita en BAJO-2. Después, `ALTER DATABASE chambeaya_test RESET deadlock_timeout` y `pg_db_role_setting` → `count 0`.
+  - `npm test` en la raíz → API `339 passed`; Playwright `1 skipped`, `103 passed (2.4m)`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (45.2s)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (los mismos `info`; ningún `error` ni `warning`).
+  - No ejecutadas:
+    - la medición estricta opt-in con `CHAMBEAYA_LOAD_WORKERS=20` (ya medida en 014 y 013);
+    - Flutter contra la API real o en un dispositivo.
+  - Limpieza:
+    - `apps/web/next-env.d.ts` restaurado con `git checkout`;
+    - `apps/web/test-results` y los temporales de mutación y registros borrados;
+    - `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`.
+  - Sin commit.
+- Riesgos:
+  - Las rutas de empresa siguen siendo probabilísticas bajo ráfagas (`500` atómicos y repetibles, ya observados con `N=10` en estas corridas). Sin bloqueo de filas para ellas, `acceptShift` y `applyToShift`.
+  - `companyFor` (`upsert`) puede responder `409` si las primeras llamadas de una empresa nueva llegan a la vez. Es un hallazgo lateral de 014, sin prueba propia.
+  - BAJO-3 de `CN-20260918-002`, previo y sin cambios: `resolveShiftAssignmentsLifecycle` calcula `NO_SHOW`/`ABANDONED` con una lectura hecha fuera de su transacción y la escribe (también en cada reintento) sin revalidar. En teoría puede pisar una cancelación del trabajador confirmada entre la lectura y la escritura. No es regresión de este ciclo; conviene igualarlo con su gemela del marketplace en un alcance aparte.
+  - BAJO-1 y BAJO-2 de esta entrada, abiertos.
+  - BAJO-1 y BAJO-2 de `CN-20260923-011`, sin tocar.
+  - Mediciones en un solo proceso y con latencia local.
+- Siguiente paso:
+  - Se cierran juntas `CN-20260923-010`, `CN-20260923-012` y `CN-20260923-014`; el coordinador puede commitear.
+  - Opcional, en alcances aparte a cargo de `implementador-sonnet`:
+    - BAJO-1 y BAJO-2 de esta entrada (`testTimeout` por archivo y margen derivado de `deadlock_timeout`);
+    - revalidar dentro de la transacción en `resolveShiftAssignmentsLifecycle`;
+    - bloqueo de filas para las rutas de empresa si el producto exige la garantía.
+
+### CN-20260923-014 — Corrección de MEDIO-1, MEDIO-2 y BAJO-1 de `CN-20260923-013`: orden de bloqueo global, reintento de `40P01`, `business-routes-load` estable y sesión vencida idempotente
+
+- Fecha: 2026-09-24 01:05 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260923-013` (reauditoría, hallazgos MEDIO-1, MEDIO-2 y BAJO-1), `CN-20260923-012` (corrección de la que nacen), `CN-20260923-011` (auditoría; ALTO-1 y MEDIO-1 ya verificados y no deshechos) y `CN-20260923-010` (implementación original). Los cambios de 010, 012 y este siguen sin commitear sobre `99475e4`.
+- Alcance:
+  - **MEDIO-1 (interbloqueo real sin reintento).** Reproducido primero, con una prueba determinista, contra el código de `CN-20260923-012`: en los dos sentidos del cruce `cancel` del trabajador x `cancelShift` de la empresa, PostgreSQL detecta `40P01` y una de las dos responde `500` (`{"worker":200,"company":500}` con el trabajador ya dueño de su postulación; `{"company":200,"worker":500}` con la empresa ya dueña de su primera tabla). Corregido con las opciones (1) y (2) del auditor, ambas: (1) **orden de bloqueo global postulación → asignación → turno**, tomado como el orden del trabajador (`lockedTransaction`) y llevando a él a `cancelShift` (dos líneas: `updateMany` de postulaciones antes que el de asignaciones); el ciclo de vida de la empresa (`resolveShiftAssignmentsLifecycle`) lee las asignaciones `orderBy: { id: 'asc' }`; (2) **`withSerializableRetry` reintenta también `40P01`** (`isRetryableTransactionError`, exportada): `P2034`, `P2010` con `meta.code` `40P01`/`40001` (forma de `$queryRaw`) y el error sin código con `PostgresError { code: "40P01"` en el mensaje (forma de `updateMany`), medidas con Prisma 6.12 contra PostgreSQL 16. `sendMarketplaceError` usa la misma función: un `40P01` agotado responde `409 CONCURRENT_UPDATE` en las rutas del trabajador. (3) Pruebas nuevas y (4) comentario de `lockedTransaction` y documentación corregidos (ver Archivos).
+  - **Otros entrelazados de orden inverso, revisados.** Tabla de cada operación y su orden en `docs/reference/api.md` ("Orden de bloqueo global"): `confirm` (asignación), `check-in`/`check-out`/ciclo de vida (asignación → turno), `cancel` (postulación → asignación → turno), `decideShiftApplication` (postulación → asignación nueva → turno), `resolveAssignment` (asignación → pago → turno), `cancelShift` (postulaciones → asignaciones → turno, antes invertido), `updateShift`/`deleteShift` (solo el turno, una sentencia). Cada una toma sus filas como subsecuencia del mismo orden, así que no hay ciclos. Declarados como límite: el orden interno de un `updateMany` de varias filas de una misma tabla, y un tercero fuera de la API. Evidencia práctica: una matriz de 16 pruebas (`confirm`, `check-in`, `check-out`, `cancel` x `decide`, `resolve`, `cancelShift`, `PATCH` del turno, a la vez, sobre el mismo turno, 3 rondas) sin `500` ni `40P01`; es una prueba de humo (con el orden inverso no detectó el defecto en una corrida de 3 rondas, las deterministas sí). Se descartó "asignación primero" porque deja una ventana de inversión con `decideShiftApplication` que crea la asignación después de la postulación (razonado en `api.md`).
+  - **MEDIO-2 (`business-routes-load` inestable): opción (b), mantener el diseño y cambiar la prueba.** Medido con `N=20` (una empresa): 1 o 2 `500` de 20 en la mayoría de las ráfagas (9, 8 y 12 de 15 ráfagas con al menos un `500` en tres corridas); el `500` es un `P2034` agotado sobre el `insert` de `ShiftEvent`/`ShiftCancellation` (falso positivo `Serializable` entre turnos distintos), la transacción no deja efecto y repetir responde `200`. La hipótesis de recorridos secuenciales sobre tablas pequeñas se midió y se descartó (`enable_seqscan = off` en la base de pruebas no bajó las cifras: 9 y 10 de 15 ráfagas; restaurado con `RESET`). Opción (a) descartada por riesgo: reescribir cuatro transacciones de empresa de `Serializable` a `READ COMMITTED` con bloqueos, sin cambio de semántica exigido y con pruebas unitarias a rehacer, para una garantía sobre un patrón (20 mutaciones simultáneas de una empresa) que el uso real no produce y que falla de forma segura. La prueba por defecto ya no exige `200` en todas: exige solo lo determinista (respuestas solo `200`/`500 INTERNAL_ERROR`, al menos un `200`, atomicidad comprobada fila por fila —cada `200` con su efecto completo, cada `500` sin ninguno— y que una llamada fallida se pueda repetir con `200`); "todas `200`" queda opt-in (`CHAMBEAYA_LOAD_STRICT=true`, `CHAMBEAYA_LOAD_WORKERS=4,10,20`). La empresa de la prueba se crea en serie en `beforeAll` (el `upsert` de `companyFor` compite en la primera llamada simultánea y daba `409 DUPLICATE_RECORD`; hallazgo lateral, no corregido en producción).
+  - **BAJO-1.** `DatabaseAuthService.restore` y `setInitialGooglePassword` borran la sesión vencida con `deleteMany` (idempotente): dos peticiones con el mismo token vencido responden las dos `401 INVALID_SESSION`.
+  - **Hallazgo lateral de validación: `testTimeout` de la suite de integración.** En 2 de 10 corridas completas, `shift-cancel-resolve-race` (12 rondas, ~4,3 s en reposo, preexistente) expiró por el límite de 5 s sin fallo real. `vitest.integration.config.mts` fija `testTimeout: 60_000`. Con el cambio, 10 de 10 corridas completas sin fallos.
+  - No se cambiaron la ventana de check-in (`CN-20260923-006`), `deriveShiftStatus` (`CN-20260922-013`), el esquema, el Dockerfile ni el lockfile. Se conservan las garantías de 010/012 (un ganador, un solo `Payment`, un solo `ShiftEvent` por transición, respuestas de la llamada que pierde iguales a las secuenciales, `200` para todos con 4/10/20/40 trabajadores en las rutas del trabajador, `confirmedWorkers` correcto).
+- Archivos:
+  - Código: `apps/api/src/modules/operations/serializable-retry.ts` (`isRetryableTransactionError`, `40P01`/`40001`), `apps/api/src/modules/business/business.service.ts` (`cancelShift` reordenado, `orderBy` del ciclo de vida), `apps/api/src/modules/marketplace/marketplace.service.ts` (comentario de `lockedTransaction` corregido y orden documentado), `apps/api/src/modules/marketplace/marketplace.routes.ts` (`isRetryableTransactionError`), `apps/api/src/modules/auth/auth.service.ts` (`deleteMany`), `apps/api/vitest.integration.config.mts` (`testTimeout`).
+  - Pruebas nuevas: `apps/api/tests/integration/worker-company-lock-order.integration.test.ts` (2 entrelazados deterministas del orden, 2 interbloqueos forzados por un tercero con las dos formas del error, 16 de matriz), `apps/api/tests/integration/expired-session-race.integration.test.ts`.
+  - Pruebas modificadas: `apps/api/tests/integration/business-routes-load.integration.test.ts` (invariantes, atomicidad, reintento, opt-in estricto), `apps/api/tests/serializable-retry.test.ts` (clasificación y reintento de `40P01`, 10 pruebas), `apps/api/tests/marketplace.routes.test.ts` (`40P01` agotado a `409` en las 14 rutas), `apps/api/tests/google_auth.service.test.ts` (`deleteMany` en el doble y prueba de doble `restore`).
+  - Documentación: `docs/reference/api.md` (orden de bloqueo, `40P01`, garantías reales de las rutas de empresa, decisión de MEDIO-2, sesión vencida), `docs/product/project-master-plan.md` (pendiente 13).
+- Decisiones:
+  1. **Orden postulación → asignación → turno, no asignación → postulación** (la orientación que sugería el auditor): con "asignación primero" queda una ventana (cancelación del trabajador sobre una postulación `PENDING` que la empresa acepta a la vez) donde el trabajador toca una asignación nueva después de la postulación; si un `cancelShift` la tomara antes, el orden quedaba invertido. Con "postulación primero" es imposible y solo hubo que reordenar dos líneas de `cancelShift`.
+  2. **El orden y el reintento son complementarios.** El orden evita el interbloqueo; el reintento es la red para lo que el orden no prevé. Las pruebas separan ambos: los entrelazados deterministas afirman que ningún servicio vio un `40P01` (prueba el orden aunque exista reintento) y los interbloqueos forzados por un tercero exigen el reintento (prueba el reintento aunque el orden sea correcto).
+  3. **Cómo se fuerza el entrelazado sin depender del reloj:** un `Proxy` de Prisma retiene una operación tras su primer bloqueo/`updateMany` y la prueba libera solo cuando `pg_stat_activity` informa una sesión con `wait_event_type = 'Lock'`. En los interbloqueos forzados, una transacción de prueba toma la asignación y pide la postulación 300 ms después de que la operación ya espera: PostgreSQL aborta a quien espera desde antes (la operación), no a la de prueba.
+  4. **Los `500` de las rutas de empresa se conservan** (un `P2034` agotado sigue siendo `500 INTERNAL_ERROR` allí); solo las rutas del trabajador lo traducen a `409 CONCURRENT_UPDATE`.
+  5. **`isRetryableTransactionError` para el error sin código exige el formato `PostgresError { code: "40P01"`**, no cualquier mención del código, para no reintentar por error un fallo distinto.
+- Validaciones (resultado literal; base `chambeaya_test` del contenedor `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`, nunca la de desarrollo; `npx prisma migrate deploy` → `No pending migrations to apply.`). Docker Desktop se apagó a mitad de la sesión y se volvió a arrancar (`docker start cumplenow-db-1`); ninguna validación se interrumpió a medias.
+  - **Mutaciones** (archivos restaurados y comprobados con `cmp` después de cada una), `worker-company-lock-order`:
+    - orden inverso y `40P01` no reintentable (equivale al código de `CN-20260923-012`): `Tests 4 failed (4)` en la versión previa a la matriz (`{"worker":200,"company":500}`, `{"company":200,"worker":500}`, `expected 500 to be 200` en el interbloqueo forzado del trabajador, y el forzado de empresa sin `40P01` visto);
+    - solo sin reintento de `40P01`: `2 failed | 2 passed` (los dos interbloqueos forzados con `500`);
+    - solo orden inverso (con reintento): `3 failed | 1 passed` (`the company/worker transaction must not see a deadlock`; el forzado de empresa falla porque con el orden inverso no llega a interbloquearse);
+    - `expired-session-race` con `authSession.delete`: `1 failed` (`[401,500]`).
+  - Con la corrección: `worker-company-lock-order` → `Tests 20 passed (20)`; `expired-session-race` → `Tests 1 passed (1)`; `serializable-retry` → `Tests 10 passed (10)`; `marketplace.routes` → `Tests 76 passed (76)`; `google_auth.service` → `Tests 13 passed (13)`.
+  - `npx vitest run --exclude "tests/integration/**"` (API) → `Test Files 21 passed (21)`, `Tests 339 passed (339)`. `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - **`npm run test:integration`, 20 corridas completas** (`Test Files 10 passed (10)`, `Tests 71 passed (71)`): las 10 primeras (`testTimeout` por defecto de 5 s) dieron 8 pasadas y 2 con `1 failed | 70 passed`, ambas `shift-cancel-resolve-race` `Error: Test timed out in 5000ms` (el hallazgo lateral de arriba, no relacionado con esta corrección: el mismo archivo tarda ~4,3 s en reposo, también con el orden de bloqueo anterior); tras fijar `testTimeout: 60_000`, las 10 siguientes: 10 de 10 `Tests 71 passed (71)`.
+  - Carga larga: `CHAMBEAYA_LOAD_ROUNDS=8` de `worker-assignment-load`, `business-routes-load` y `worker-company-lock-order` → `Test Files 3 passed (3)`, `Tests 46 passed (46)` (con un `500` informado en `decide` de 10, que la prueba admite y repite: `{"200":9,"500":1}`).
+  - Medición opt-in de `N=20` (`CHAMBEAYA_LOAD_WORKERS=20`, 3 rondas): estricto, falla en 3 de 3 corridas (3 a 4 pruebas de 5) por `{"200":19,"500":1}`, `{"200":18,"500":2}` o `{"200":17,"500":3}`; no estricto, `Tests 5 passed (5)` en 6 de 6 corridas.
+  - `npm test` en la raíz → API `Test Files 21 passed (21)`, `Tests 339 passed (339)`; Playwright `1 skipped`, `103 passed (2.9m)`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_REAL_TESTS=true`, `CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (1.1m)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (los mismos `info` de siempre; ningún `error` ni `warning`). Sin cambios de código en Flutter.
+  - Limpieza: `apps/web/next-env.d.ts` restaurado con `git checkout`; `apps/web/test-results` borrado; sin archivos temporales en el repositorio; `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`; `ALTER DATABASE ... RESET enable_seqscan` (sin `pg_db_role_setting`). Sin commit.
+- Riesgos:
+  - Las rutas de empresa siguen siendo probabilísticas: con 20 llamadas simultáneas de una empresa aparecen 1 o 2 `500` de 20 (`P2034` agotado, atómico, repetible). Es una decisión explícita (MEDIO-2 opción b), no un olvido; el bloqueo de filas para ellas queda como alcance aparte. `acceptShift`/`applyToShift` siguen sin tratar.
+  - Un interbloqueo reintentado cuesta ~1 s (`deadlock_timeout`) más la espera aleatoria.
+  - La matriz de 16 pruebas es de humo y aleatoria: no prueba la ausencia de ciclos; la garantía es el análisis de orden de `api.md` más las dos pruebas deterministas de la única pareja que estaba invertida. Un tercero fuera de la API o un `updateMany` multi-fila de dos `cancelShift` a la vez no están cubiertos por el orden (solo por el reintento).
+  - Las pruebas deterministas dependen de `pg_stat_activity` (rol con visibilidad de las sesiones, como el usuario `cumplenow` de esta base) y de que PostgreSQL aborte al que espera desde antes (margen de 300 ms); con `deadlock_timeout` distinto o una base muy lenta podrían necesitar ajuste, y como mucho fallarían, no darían un falso pase.
+  - `companyFor` (`upsert` de la empresa en el primer uso) puede responder `409 DUPLICATE_RECORD` si las primeras llamadas de una empresa nueva son simultáneas; hallazgo lateral sin corregir ni cubrir con prueba propia.
+  - `testTimeout: 60_000` es un cambio global de la configuración de integración: un bloqueo real de una prueba tardará hasta 60 s en reportarse.
+  - Mediciones en un solo proceso y con latencia local; Flutter no se ejecutó contra la API real ni en dispositivo.
+  - BAJO-1 y BAJO-2 de `CN-20260923-011` (`409 ASSIGNMENT_NOT_ACTIONABLE` sin persistir en el borde de la ventana; `checkOut` con lectura previa obsoleta) siguen sin tocar.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260923-014` sobre el diff sin commitear de `99475e4` (junto con 010 y 012): repetir las mutaciones (sin orden, sin reintento de `40P01`, `delete` en `restore`), la matriz y la carga (`CHAMBEAYA_LOAD_ROUNDS=8`, `CHAMBEAYA_LOAD_WORKERS`), confirmar la tabla de orden de bloqueo contra el código y decidir si el bloqueo de filas de las rutas de empresa y de `acceptShift`/`applyToShift` se aborda en un alcance aparte. `CN-20260923-010`, `012` y `014` se cierran juntas solo si la reauditoría queda `APROBADO`.
+
+### CN-20260923-013 — Reauditoría de `CN-20260923-012` (corrección de ALTO-1 y MEDIO-1 de `CN-20260923-011` sobre `CN-20260923-010`)
+
+- Fecha: 2026-09-23 20:05 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260923-012` (corrección), `CN-20260923-010` (implementación) y `CN-20260923-011` (auditoría anterior).
+- Alcance: revisión independiente del diff sin commitear sobre `99475e4` (010 y 012 juntos). Revisé primero la corrección del bloqueo de filas, su orden frente a las transacciones de empresa y la traducción de errores; después las pruebas y la documentación. Repetí la carga (4, 10, 20 y 40 trabajadores) y las mutaciones declaradas, y corrí una sonda temporal que fuerza el entrelazado entre `cancel` del trabajador y `cancelShift` de la empresa (archivos temporales en `apps/api/tests/integration/`, borrados).
+- Archivos:
+  - Revisados: `apps/api/src/modules/marketplace/marketplace.service.ts` (`lockedTransaction`, `confirmAssignment`, `resolveAndPersistLifecycle`, `checkIn`, `checkOut`, `cancelAssignment`), `marketplace.routes.ts`, `operations/serializable-retry.ts`, `business/business.service.ts` (`cancelShift`, `decideShiftApplication`, `resolveShiftAssignmentsLifecycle`, `resolveAssignment`), `auth/auth.service.ts` (`restore`), `prisma/schema.prisma`, las pruebas nuevas o modificadas del API y de Flutter, y en Flutter `http_worker_marketplace_repository.dart`, `marketplace_repository.dart`, `worker_secondary_pages.dart` y `auth_repository.dart`.
+  - Modificados por la auditoría (solo documentación): `docs/reference/api.md` (límite conocido del interbloqueo `40P01`, `409 CONCURRENT_UPDATE` no alcanzable en la práctica y cifras con `N=20`/`N=40`) y `docs/product/project-master-plan.md` (estado del pendiente 13).
+  - No se tocó código de producción, pruebas, `CLAUDE.md` ni `.claude/agents/`.
+- Decisiones (hallazgos):
+  - Críticos y altos: ninguno.
+  - **ALTO-1 de `CN-20260923-011`: resuelto en las rutas del trabajador.** Todas las llamadas responden `200` con una sola transacción por llamada:
+    - `worker-assignment-load` con 3 rondas (5 corridas) y con `CHAMBEAYA_LOAD_ROUNDS=8`: `16 passed`.
+    - Copia temporal con 20 y 40 trabajadores (3 rondas; turnos distintos y mismo turno; las cuatro operaciones): `8 passed` en los dos casos.
+    - `confirmedWorkers`, un solo `COMPLETED` por turno, eventos y pagos correctos.
+    - Línea base contra `HEAD`: `8 failed | 8 passed`, con `{"200":3,"401":7}` y `confirmedWorkers` corrupto (`expected 7 to be 1`). Contra una reconstrucción de `CN-20260923-010` (`Serializable` sin bloqueos y 3 intentos inmediatos), sumando la suite de concurrencia: `17 failed | 10 passed (27)`.
+  - **MEDIO-1 de `CN-20260923-011`: resuelto.**
+    - `sendMarketplaceError` cubre las 14 rutas.
+    - `AuthError` es la única fuente de `401`; lo demás responde `500 INTERNAL_ERROR` sin detalle al cliente (el `console.error` queda en el servidor). `403` sigue saliendo de `MarketplaceError`.
+    - `PUT /api/shifts/:id/accept` no cambia.
+    - Flutter: ningún flujo del trabajador cierra la sesión por el código HTTP; `CONCURRENT_UPDATE` no es `isShiftGone` y cae al mensaje genérico. Leído en el código, no solo en las pruebas.
+  - **Garantías de 010 conservadas.** Verificado en el código y por las suites:
+    - un solo ganador, un solo `Payment` y un solo `ShiftEvent` por transición; `completedAt` intacto;
+    - las respuestas de la llamada que pierde son las secuenciales;
+    - el cuerpo de cada operación relee y revalida después del último bloqueo, y no queda ningún efecto fuera de la transacción;
+    - el SQL crudo usa nombres correctos (sin `@@map` ni `@map` en `Shift`, `ShiftApplication` ni `ShiftAssignment`; valores parametrizados por la plantilla de `$queryRaw`);
+    - sin cambios en la ventana de check-in (006), `deriveShiftStatus` (013), el esquema, el Dockerfile ni el lockfile.
+  - **MEDIO-1 (nuevo; regresión de 012): orden de bloqueo invertido entre `cancelAssignment` del trabajador y `cancelShift` de la empresa, con interbloqueo real y no reintentado.**
+    - El orden no es el mismo en los dos lados:
+      - `cancelAssignment` bloquea `ShiftApplication` y después `ShiftAssignment`;
+      - `cancelShift` (`business.service.ts`, líneas 209-210) hace `updateMany` de `ShiftAssignment` y después de `ShiftApplication`.
+    - Sonda que retiene al trabajador tras bloquear la postulación: PostgreSQL detecta `40P01 deadlock detected` en 3 de 3 rondas. La empresa pierde y responde `500 INTERNAL_ERROR` tras ~1,05 s.
+    - Variante inversa (la empresa retenida tras su `updateMany` de asignaciones): pierde el trabajador con `PrismaClientKnownRequestError` `P2010` (`$queryRaw`, `40P01`), que también es `500`.
+    - `40P01` **no** llega como `P2034` (en el `updateMany` es un `ConnectorError` sin código), así que `withSerializableRetry` no lo reintenta.
+    - Esto contradice la decisión 4 de `CN-20260923-012`, el comentario de `lockedTransaction` y el riesgo declarado ("solo produce un `P2034` reintentable"). También deja `409 CONCURRENT_UPDATE` prácticamente inalcanzable en las rutas del trabajador.
+    - Con `CN-20260923-010` (las dos `Serializable` y el mismo orden de escritura: asignación y después postulación) el choque era un `P2034` reintentado.
+    - Impacto: ventana estrecha (la empresa cancela el turno en el mismo instante en que el trabajador cancela). Una de las dos operaciones falla con `500` tras 1 s y la otra se aplica completa. No hay pérdida ni corrupción de datos, y repetir la llamada funciona.
+    - Corrección sugerida:
+      - (a) en `cancelAssignment`, bloquear la asignación antes que la postulación (orden asignación → postulación → turno, igual al de `cancelShift`, `resolveAssignment` y `resolveShiftAssignmentsLifecycle`; `decideShiftApplication` solo inserta la asignación);
+      - (b) además, tratar `40P01` como reintentable en `withSerializableRetry` (`P2010` con `meta.code` `40P01` o un error desconocido con `40P01`);
+      - (c) una prueba de integración determinista que fuerce ese entrelazado;
+      - (d) corregir el comentario de `lockedTransaction`.
+  - **MEDIO-2: `business-routes-load` es inestable en la suite por defecto.**
+    - En 1 de 7 corridas completas de `npm run test:integration` falló `10 decisions, distinct-shifts: … resolution of a NO_SHOW …`. Las otras 6, y 6 corridas sueltas del archivo (2 de ellas con 8 rondas), pasaron.
+    - Con `N=20` (copia temporal): `decide` y `resolve` en el mismo turno y `cancelShift` en turnos distintos dan `{"200":19,"500":1}` y `{"200":18,"500":2}` (`P2034` agotado tras 6 intentos).
+    - La prueba exige una garantía (todo `200`) que el diseño probabilístico declarado no da, así que la suite puede fallar en CI sin regresión.
+    - Sugerencia: sacarla de la suite por defecto (opt-in como `CHAMBEAYA_LOAD_ROUNDS`) o afirmar una cota de fallos. Las rutas de empresa siguen con el riesgo declarado: con `N=20` ya aparecen `500`.
+  - **BAJO-1:**
+    - Con el mapeo nuevo, `DatabaseAuthService.restore` responde `500` y no `401` si dos peticiones simultáneas usan el mismo token vencido: la segunda hace `authSession.delete` de una fila ya borrada (`P2025`).
+    - Sin impacto en Flutter, que no trata `401` de forma especial en estas rutas.
+    - Sugerencia: usar `deleteMany`.
+  - **Punto 3 (`withSerializableRetry` compartido):** es seguro.
+    - La espera ocurre después de que la transacción falló y se revirtió: no retiene conexión del pool y no bloquea el bucle de eventos (usa `setTimeout`).
+    - La carga máxima está acotada a 6 intentos por llamada, con una espera acumulada de ~1,2 s.
+    - `business.routes.test.ts` pasa, porque la reexportación se mantiene.
+  - **Punto 5 (pruebas):**
+    - Las mutaciones reproducen las cifras declaradas:
+      - `READ COMMITTED` sin bloqueos: `14 failed | 13 passed (27)`;
+      - sin el bloqueo del turno: `7 failed | 20 passed (27)`;
+      - helper con 3 intentos inmediatos: `serializable-retry` `4 failed | 3 passed (7)` y `business-routes-load` `10 failed (10)` (`{"200":3,"500":1}` y `{"200":3,"500":7}`);
+      - mapeo anterior (todo a `401`): `29 failed | 33 passed (62)`.
+      - Tras cada mutación se restauró el archivo y se comprobó con `cmp`.
+    - La espera negativa de 700 ms es aceptable: solo puede dar un falso pase, y la mutación sin bloqueos la hace fallar. Añade ~2,1 s.
+    - No encontré pruebas tautológicas.
+    - Duración de las suites nuevas: `worker-assignment-load`, `worker-assignment-concurrency` y `business-routes-load` juntas tardan ~76 s; la suite completa, ~4 min. Aceptable para CI, salvo la inestabilidad de MEDIO-2.
+  - **Punto 6 (riesgos declarados):**
+    - La latencia lineal del bloqueo del turno en multi-cupo es aceptable: con 40 trabajadores en el mismo turno todo fue `200`.
+    - El interbloqueo de 1 s no es solo una espera: termina en `500` (MEDIO-1 nuevo).
+    - Que `409 CONCURRENT_UPDATE` solo tenga cobertura simulada es irrelevante, porque en la práctica no se alcanza.
+- Validaciones (base `chambeaya_test` de `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la de desarrollo):
+  - `npx prisma migrate deploy` → `No pending migrations to apply.`
+  - `npm run test:integration`, 5 corridas → `Tests 50 passed (50)` en 4 y `1 failed | 49 passed (50)` en 1 (MEDIO-2).
+  - Carga y mutaciones: cifras en Decisiones.
+  - Sonda de interbloqueo (temporal, borrada): 4 de 4 entrelazados forzados terminan en `40P01` y `500`.
+  - `npx vitest run --exclude "tests/integration/**"` (API) → `Test Files 21 passed (21)`, `Tests 321 passed (321)`.
+  - `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - `npm test` en la raíz → API `321 passed`; Playwright `1 skipped`, `103 passed (2.3m)`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (43.4s)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (los mismos `info`; ningún `error` ni `warning`).
+  - Limpieza:
+    - `apps/web/next-env.d.ts` restaurado con `git checkout`;
+    - `apps/web/test-results`, las sondas y las copias temporales borradas;
+    - `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`.
+  - Sin commit.
+- Riesgos:
+  - MEDIO-1 y MEDIO-2 abiertos.
+  - Las rutas de empresa siguen siendo probabilísticas (`500` observados con `N=20`).
+  - `acceptShift`/`applyToShift` siguen sin tratar.
+  - Mediciones en un solo proceso, con latencia local.
+  - Flutter no se ejecutó contra la API real ni en dispositivo.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (orden de bloqueo de `cancelAssignment`, reintento de `40P01`, prueba determinista del entrelazado y comentario) y MEDIO-2 (estabilizar o volver opt-in `business-routes-load`) en una entrada `CORRECCION` que referencie esta auditoría y `CN-20260923-010`/`012`. Después, `auditor-opus` reaudita. ALTO-1 y MEDIO-1 de `CN-20260923-011` ya están verificados; `CN-20260923-010` y `CN-20260923-012` se cerrarán juntas con esa reauditoría.
+
+### CN-20260923-012 — Corrección de ALTO-1 y MEDIO-1 de `CN-20260923-011`: bloqueo de filas para las operaciones del trabajador, espera aleatoria en los reintentos y traducción explícita de errores
+
+- Fecha: 2026-09-23 19:35 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260923-010` (implementación corregida) y `CN-20260923-011` (auditoría; hallazgos ALTO-1 y MEDIO-1).
+- Alcance:
+  - **ALTO-1 reproducido primero, corregido después.** Con una prueba de integración de carga nueva contra el código de `CN-20260923-010` (sin tocar), las cuatro operaciones fallan con 4 y con 10 trabajadores simultáneos: `12 failed | 4 passed (16)`. Primera ronda de cada caso: check-in, check-out y cancelar con 4 trabajadores, `{"200":3,"401":1}` (también en el mismo turno, salvo cancelar con 3 canceladores, que pasó); con 10 trabajadores, `{"200":3,"401":7}` en check-in, check-out y cancelar (cancelar en el mismo turno, `{"200":3,"401":6}` de 9); confirmar con 10 en el mismo turno, `{"200":5,"401":5}`; confirmar en los demás casos, todo `200`. Confirma las cifras de la auditoría (cada ronda deja pasar exactamente 3 llamadas).
+  - **Corrección elegida: bloqueo de filas en `READ COMMITTED`** (la orientación (a) del auditor, la más simple que cumple el criterio). `confirmAssignment`, `checkIn`, `checkOut`, `cancelAssignment` y la persistencia del ciclo de vida (`resolveAndPersistLifecycle`) pasan por un helper privado nuevo, `lockedTransaction`, que abre una transacción `READ COMMITTED` y ejecuta `SELECT "id" ... FOR NO KEY UPDATE` sobre la postulación (solo cancelar), la asignación del trabajador y el turno (todas menos confirmar), siempre en ese orden y antes de leer y escribir. Los cuerpos de las cuatro operaciones son los de `CN-20260923-010` (releen y revalidan con las mismas reglas), así que se conservan las garantías: un solo ganador en doble check-in/check-out/cancelación/confirmación de la misma asignación, un solo `Payment`, un solo `ShiftEvent` por transición y las mismas respuestas de la llamada que pierde (`200` idempotente, `404`, `409 CANCELLATION_NOT_ALLOWED`, `404`, `404`).
+  - **`withSerializableRetry` con espera aleatoria** (`apps/api/src/modules/operations/serializable-retry.ts`): 6 intentos (antes 3) y espera con jitter total, uniforme en `[0, 20 ms · 2^intento)` (acumulado máximo ~1,2 s); acepta `sleep` y `random` inyectables para pruebas. En las rutas del trabajador ya solo reintenta interbloqueos con una transacción `Serializable` de empresa; en las de empresa es la corrección de la contención (ver siguiente punto).
+  - **Rutas de empresa medidas y curadas por el helper compartido.** Con la misma carga (4 y 10 llamadas simultáneas; aceptar postulaciones, `cancelShift` y `resolveAssignment`, sobre turnos distintos y sobre el mismo turno), el defecto se reproduce en las tres: con el reintento anterior, `N=4` da `{"200":3,"500":1}` y `N=10` da `{"200":3,"500":7}` (aceptar sobre turnos distintos con 10: 3 a 5 `200`; `cancelShift` de un mismo turno da `{"200":1,"400":N-1}`, que es lo correcto y no es contención). Como la corrección vive en el `withSerializableRetry` compartido, se aplicó sin tocar código específico de esas rutas: con 6 intentos y espera aleatoria todas las llamadas responden `200` con `N=4` y `N=10`. No se extendió el patrón a `acceptShift`/`applyToShift`.
+  - **MEDIO-1.** `marketplace.routes.ts` traduce los errores con una función única, `sendMarketplaceError`: `MarketplaceError` con su estado y código; `AuthError` (sesión) `401 INVALID_SESSION`; `P2034` agotado `409 CONCURRENT_UPDATE` (reintentable: la operación no se aplicó); cualquier otro error `500 INTERNAL_ERROR` con el detalle en el registro, como las rutas de empresa. Sustituye 14 bloques `catch` (13 idénticos y el de postulaciones, que conserva antes su `ZodError`); `PUT /api/shifts/:id/accept` conserva su comportamiento (ya relanzaba los errores inesperados). Flutter no cierra la sesión por ninguno de estos códigos (no hay manejo de `401` en el flujo del trabajador): `CONCURRENT_UPDATE` llega como `MarketplaceApiException` y `confirm`/`check-in`/`check-out` muestran "… Inténtalo otra vez." con la tarjeta accionable; `cancel` muestra "No pudimos cancelar la postulación.". Sin cambios de código en Flutter.
+  - No se cambiaron la ventana de check-in (`CN-20260923-006`), `deriveShiftStatus` (`CN-20260922-013`), el esquema, el Dockerfile ni el lockfile.
+- Archivos:
+  - Código: `apps/api/src/modules/marketplace/marketplace.service.ts` (`lockedTransaction`; `confirmAssignment`, `resolveAndPersistLifecycle`, `checkIn`, `checkOut` y `cancelAssignment` pasan a usarlo; `resolveAndPersistLifecycle` recibe también `workerId`), `apps/api/src/modules/operations/serializable-retry.ts` (espera aleatoria y 6 intentos), `apps/api/src/modules/marketplace/marketplace.routes.ts` (`sendMarketplaceError`).
+  - Pruebas nuevas: `apps/api/tests/integration/worker-assignment-load.integration.test.ts` (16 pruebas: las cuatro operaciones × 4 y 10 trabajadores × turnos distintos y mismo turno; exige `200` en todas, como máximo dos intentos de transacción por llamada y el estado final correcto, incluidos `confirmedWorkers` y un solo `COMPLETED` por turno; 3 rondas por defecto, `CHAMBEAYA_LOAD_ROUNDS` para más), `apps/api/tests/integration/business-routes-load.integration.test.ts` (10 pruebas de carga de las rutas de empresa), `apps/api/tests/serializable-retry.test.ts` (7 pruebas del helper).
+  - Pruebas modificadas: `apps/api/tests/integration/worker-assignment-concurrency.integration.test.ts` (las dos variantes deterministas que retenían una lectura obsoleta dentro de la transacción se reescribieron como pruebas de bloqueo: una operación retiene las filas bloqueadas, la otra tiene que esperar y luego responde como una llamada secuencial; hay una tercera para cancelar contra confirmar; las demás no cambian), `apps/api/tests/marketplace.service.test.ts` (los fakes aceptan `$queryRaw`, aislamiento `ReadCommitted`, orden de los bloqueos, `useFakeTimers` solo de `Date`), `apps/api/tests/marketplace.routes.test.ts` (58 pruebas de mapeo de errores en las 14 rutas del trabajador), `apps/mobile_flutter/test/marketplace_repository_test.dart` y `apps/mobile_flutter/test/worker_applications_page_test.dart` (una prueba cada uno para `409 CONCURRENT_UPDATE`).
+  - Documentación: `docs/reference/api.md` (garantías, orden de bloqueo, `409 CONCURRENT_UPDATE`, `500 INTERNAL_ERROR`, tabla de mediciones antes/después, contención de rutas de empresa, lista de errores), `docs/product/project-master-plan.md` (pendiente 13 y cobertura de concurrencia).
+- Decisiones:
+  1. **Por qué bloqueo de filas y no solo espera aleatoria.** Medí las dos. Con `Serializable` (código de `CN-20260923-010`) y el nuevo `withSerializableRetry` (6 intentos con jitter), las cuatro operaciones llegan a `200` en todos los casos, pero necesitan 27 a 33 transacciones para 10 llamadas (hasta 3 intentos por llamada): incumple "como máximo un reintento interno" y desperdicia trabajo, y el éxito sigue siendo probabilístico. Con el bloqueo de filas cada llamada usa exactamente una transacción y el resultado es determinista. Mantener `Serializable` con relecturas ya no aporta nada si las filas están bloqueadas.
+  2. **`FOR NO KEY UPDATE`** (no `FOR UPDATE`): excluye a otros escritores de la fila (los `update` de Prisma ya toman ese modo) pero no bloquea a quien solo inserta filas que la referencian, como los `ShiftEvent` de las demás operaciones.
+  3. **Orden de bloqueo fijo (postulación, asignación, turno)** en las cuatro operaciones: dos trabajadores nunca se esperan en círculo. El turno se bloquea siempre que se escribe porque recalcula el agregado (`confirmedWorkers`, estado): sin ese bloqueo, cancelaciones y check-outs simultáneos del mismo turno multi-cupo dejaban el agregado mal (mutación descrita abajo). Confirmar no escribe el turno y no lo bloquea.
+  4. **Compatibilidad con las transacciones `Serializable` de empresa.** Toda operación de empresa que decide sobre estos datos termina actualizando filas que el trabajador también modifica (asignación o turno), y una fila actualizada después de su instantánea produce `P2034` en la de empresa, que se reintenta con la relectura. Un interbloqueo entre una transacción de empresa (asignación y luego turno) y una del trabajador (mismo orden, salvo `cancelShift`, que actualiza todas las asignaciones antes del turno) solo produce un `P2034` reintentable. Lo cubren las suites de carrera existentes de empresa, que siguen pasando.
+  5. **`409 CONCURRENT_UPDATE`** (y no `503`): es un conflicto de estado, reintentable de inmediato y sin `Retry-After`; con el bloqueo de filas solo es alcanzable por un interbloqueo repetido con una operación de empresa. El texto de Flutter para `confirm`/`check-in`/`check-out` ya dice "Inténtalo otra vez" y `cancel` conserva su aviso de fallo; no se cambió (no hay flujo de sesión que cerrar).
+  6. **Pruebas deterministas de bloqueo.** Un `Proxy` de Prisma retiene la operación justo después de bloquear el turno (`afterLock`, tras la última sentencia `FOR NO KEY UPDATE`); la otra llamada, hecha por HTTP, debe seguir pendiente 700 ms (afirmación negativa de tiempo: nunca da un falso fallo por lentitud, y solo podría dar un falso pase si el otro camino tardara más de 700 ms) y, al liberar, responde como una llamada secuencial. Las variantes que retienen la lectura previa fuera de la transacción (doble check-in, doble check-out, check-in obsoleto tras cancelar) se conservan sin cambios.
+  7. Los errores de las rutas de empresa no cambian de código; sus `P2034` agotados siguen siendo `500`.
+- Validaciones (resultado literal; base `chambeaya_test` del contenedor `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`, nunca la de desarrollo; `npx prisma migrate deploy` → `No pending migrations to apply.`):
+  - **Reproducción contra el código de `CN-20260923-010`:** `npx vitest run --config vitest.integration.config.mts tests/integration/worker-assignment-load` → `Tests  12 failed | 4 passed (16)` (cifras por caso en Alcance).
+  - **Con la corrección:** el mismo archivo → `Tests  16 passed (16)`; `worker-assignment-concurrency` → `Tests  11 passed (11)`; carga larga `CHAMBEAYA_LOAD_ROUNDS=8` de `worker-assignment-load` y `business-routes-load` → `Test Files  2 passed (2)`, `Tests  26 passed (26)`.
+  - `npm run test:integration` (3 corridas) → `Test Files  8 passed (8)`, `Tests  50 passed (50)` las tres.
+  - **Mutaciones contra la prueba de carga y las de bloqueo** (los archivos se restauraron después y se comprobaron con `cmp`):
+    - Código de `CN-20260923-010` con el helper nuevo (`Serializable`, sin bloqueos): `Tests  12 failed | 15 passed (27)` sobre `worker-assignment-load` y `worker-assignment-concurrency` (9 por exceder los dos intentos de transacción por llamada, con todos los códigos en `200`, y 3 pruebas de bloqueo que nunca llegan a su punto de pausa); con el helper anterior (3 intentos inmediatos), que es el código completo de `CN-20260923-010`, es la reproducción de arriba (`401`).
+    - `READ COMMITTED` sin ningún bloqueo: `Tests  14 failed | 13 passed (27)` (doble efecto en las variantes reales, `expected 2 to be 1`, `expected 200 to be 404`; pruebas de bloqueo; `COMPLETED` faltante y `confirmedWorkers` incorrecto en turnos multi-cupo).
+    - Sin el bloqueo del turno (solo la asignación): `Tests  7 failed | 20 passed (27)` (`expected +0 to be 1` en el `COMPLETED` del check-out y `expected 3 to be 1` / `expected 9 to be 1` en `confirmedWorkers` tras cancelar en el mismo turno, y las 3 pruebas de bloqueo del turno, que nunca llegan a su punto de pausa).
+    - `withSerializableRetry` con 3 intentos inmediatos: `tests/serializable-retry.test.ts` → `Tests  4 failed | 3 passed (7)`; `business-routes-load` → `Tests  10 failed` (`{"200":3,"500":1}` con 4; `{"200":3,"500":7}` con 10).
+    - `marketplace.routes.ts` con el mapeo anterior (todo lo que no sea `MarketplaceError` a `401`): `Tests  29 failed | 33 passed (62)`.
+  - `npx vitest run --exclude "tests/integration/**"` (API; `npm test` de la raíz) → `Test Files  21 passed (21)`, `Tests  321 passed (321)`; Playwright de la raíz → `1 skipped`, `103 passed (2.4m)`.
+  - `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_REAL_TESTS=true`, `CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (43.9s)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (los mismos `info` preexistentes; ningún `error` ni `warning`).
+  - Limpieza: `apps/web/next-env.d.ts` restaurado con `git checkout`; `apps/web/test-results` y los archivos temporales de edición y de mutación borrados; `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`. Sin commit.
+- Riesgos:
+  - Las rutas de empresa (`decideShiftApplication`, `cancelShift`, `resolveAssignment`) no tienen bloqueo de filas: su contención queda curada por reintentos con espera aleatoria (6 intentos), que es probabilística. Con una ráfaga mucho mayor de la medida (10) los 6 intentos podrían agotarse y responder `500`. Un cambio específico de esas rutas (bloqueo de filas, como el del trabajador) no se hizo, como se pidió; queda como pendiente declarado en `docs/product/project-master-plan.md`, pendiente 13.
+  - `acceptShift` y `applyToShift` del trabajador siguen sin este tratamiento (alcance explícito del encargo) y `PUT /api/shifts/:id/accept` conserva su relanzamiento de errores.
+  - Las mediciones son ráfagas dentro de un solo proceso con latencia local a la base. En producción, cada transacción tarda más (varios viajes) y un bloqueo se mantiene más tiempo; el bloqueo serializa operaciones del mismo turno, por lo que la latencia de un turno multi-cupo con muchos trabajadores simultáneos crece linealmente. No se midió con latencia real ni con la frecuencia real de ráfagas.
+  - Las sentencias de bloqueo usan SQL crudo con los nombres de tabla y columna de Prisma (`"ShiftApplication"`, `"ShiftAssignment"`, `"Shift"`, `"workerId"`, `"shiftId"`, `"id"`). Un renombre de modelo o de columna las rompería; las suites de integración lo detectarían.
+  - Un interbloqueo real entre una transacción de empresa y una del trabajador (orden de bloqueo distinto) esperaría hasta `deadlock_timeout` (1 s por defecto) antes de abortar una de las dos y reintentarla. No se reprodujo; solo hay razonamiento y las suites de carrera de empresa, que pasan.
+  - La prueba determinista de bloqueo incluye una espera de 700 ms por caso; en una máquina muy cargada un falso pase (la otra llamada sí se adelantó pero tardó más de 700 ms) es posible, no un falso fallo. La mutación sin bloqueo la hizo fallar.
+  - `P2034` agotado → `409 CONCURRENT_UPDATE` solo está cubierto con el servicio simulado (pruebas de ruta), no contra una base real: con el bloqueo de filas ya no se alcanza en las pruebas de carga.
+  - Flutter no se ejecutó contra la API real ni en dispositivo; sin cambios de código en la app.
+  - BAJO-1 y BAJO-2 de `CN-20260923-011` (`409 ASSIGNMENT_NOT_ACTIONABLE` sin persistir en el borde de la ventana; `checkOut` con lectura previa obsoleta) no se tocaron y conservan su comportamiento.
+- Siguiente paso: `auditor-opus` audita `CN-20260923-012` sobre el diff sin commitear de `99475e4` (junto con el de `CN-20260923-010`, que sigue sin commitear): repetir la carga con 4 y 10 trabajadores en las cuatro operaciones, las tres mutaciones del bloqueo y la del helper, decidir si el pendiente de bloqueo de filas para las rutas de empresa (y `acceptShift`/`applyToShift`) se aborda en un alcance aparte, y reauditar `CN-20260923-010` como cerrada solo si esta entrada queda `APROBADO`.
+
+### CN-20260923-011 — Auditoría de `CN-20260923-010` (Alcance B1 del Hito B: concurrencia del trabajador sobre su propia asignación)
+
+- Fecha: 2026-09-23 18:45 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260923-010`.
+- Alcance: revisión independiente del diff sin commitear sobre `99475e4`: 6 archivos modificados y 2 nuevos. Revisé primero la corrección de las transacciones y la semántica frente al código de `HEAD`, y después el refactor, las pruebas y la documentación. Repetí las validaciones y las dos mutaciones declaradas. Además corrí una sonda propia de contención entre trabajadores distintos: un archivo temporal de integración, ejecutado contra el código nuevo y contra `HEAD` y borrado después.
+- Archivos:
+  - Revisados: `apps/api/src/modules/marketplace/marketplace.service.ts` (`confirmAssignment`, `resolveAndPersistLifecycle`, `assertCanCheckIn`, `checkIn`, `checkOut`, `cancelAssignment`), `apps/api/src/modules/operations/serializable-retry.ts`, `apps/api/src/modules/business/business.service.ts`, `apps/api/src/modules/marketplace/marketplace.routes.ts`, `apps/api/src/modules/operations/shift-state.ts`, `apps/api/tests/marketplace.service.test.ts`, `apps/api/tests/integration/worker-assignment-concurrency.integration.test.ts`, `apps/api/tests/business.routes.test.ts`, `apps/mobile_flutter/lib/features/marketplace/http_worker_marketplace_repository.dart`, `marketplace_repository.dart` y `worker_secondary_pages.dart`.
+  - Modificados por la auditoría (solo documentación):
+    - `docs/reference/api.md`: el agotamiento de `P2034` sí se alcanza con varios trabajadores, con cifras medidas.
+    - `docs/product/project-master-plan.md`: el pendiente 13 pasa a `REQUIERE_CAMBIOS` por esta auditoría.
+  - No se tocó código de producción, pruebas, `CLAUDE.md` ni `.claude/agents/`.
+- Decisiones (hallazgos):
+  - Críticos: ninguno.
+  - **ALTO-1 (regresión de disponibilidad bajo contención de trabajadores distintos):** las transacciones `Serializable` nuevas o ampliadas agotan los 3 intentos de `P2034` cuando actúan a la vez 4 o más trabajadores, aunque sea sobre asignaciones y **turnos distintos**. La llamada que agota los intentos recibe `401 INVALID_SESSION` por el mapeo de `marketplace.routes.ts`.
+    - Evidencia, con la sonda propia contra `chambeaya_test`, 5 rondas, un trabajador por turno y turnos distintos:
+
+      | Operación | Código nuevo, 10 trabajadores | Código nuevo, 4 trabajadores | `HEAD` con la misma sonda |
+      | --- | --- | --- | --- |
+      | check-in | `200`: 15, `401`: 35 | `200`: 15, `401`: 5 | `200`: 49, `401`: 1 |
+      | cancelar | `200`: 15, `401`: 35 | `200`: 15, `401`: 5 | `200`: 50 |
+      | confirmar | `200`: 50 | sin fallos | sin fallos |
+
+    - En todos los casos del código nuevo, exactamente 3 llamadas por ronda tienen éxito: cada reintento inmediato solo deja ganar a una transacción.
+    - Con 10 trabajadores en el **mismo** turno multi-cupo:
+      - `confirm`: 21 de 50 y 12 de 50 fallidas en dos corridas; con `HEAD`, 0.
+      - check-in: 35 de 50 fallidas, igual que con `HEAD`; el fallo ya existía ahí.
+      - cancelar: 35 de 50 fallidas; con `HEAD`, 0.
+    - El resultado se repite igual con `enable_seqscan = off` en la base de prueba. No se debe solo a escaneos secuenciales en tablas pequeñas, que además es lo que tendrá la producción temprana.
+    - Causa probable: la lectura de la asignación dentro de la transacción (antes estaba fuera) añade dependencias lectura-escritura de SSI entre transacciones que escriben la misma tabla. Además `withSerializableRetry` reintenta sin espera.
+    - Impacto: check-in y cancelación, que antes casi nunca fallaban, fallan con un `401` engañoso en ráfagas de 4 o más trabajadores de toda la plataforma (p. ej. a la hora de inicio de turnos). La app Flutter **no** cierra la sesión por ese `401`: `MarketplaceApiException('INVALID_SESSION')` cae al mensaje genérico "Inténtalo otra vez", y en cancelar "No pudimos cancelar la postulación". Un reintento manual funciona. No hay pérdida de datos.
+    - Contrapartida medida: con `HEAD`, las cancelaciones simultáneas del mismo turno dejaban `confirmedWorkers` corrupto (p. ej. `5` con 0 asignaciones `ASSIGNED`, en 5 de 5 rondas). El código nuevo lo corrige.
+    - Corrección sugerida, a criterio del implementador:
+      - (a) Para operaciones sobre la propia asignación, preferir el bloqueo de fila (`SELECT ... FOR UPDATE` sobre la asignación y, al recalcular el agregado, sobre el turno) o `updateMany` con guarda de estado y conteo, en `READ COMMITTED`. Así se serializa solo lo que choca de verdad.
+      - (b) O, como mínimo, más intentos con espera aleatoria (`jitter`).
+      - (c) En todo caso, traducir el `P2034` agotado a un código reintentable, no `401`: p. ej. `409 CONCURRENT_UPDATE` o `503`.
+      - (d) Añadir una prueba de integración con N≥4 trabajadores simultáneos (turnos distintos y mismo turno) que exija que todos respondan `200`.
+  - **MEDIO-1 (punto 4 del encargo, mapeo `401`):**
+    - Preexistente, pero ALTO-1 lo vuelve alcanzable.
+    - Flutter no cierra la sesión, y el panel web no usa estas rutas.
+    - Recomendación: corregirlo dentro de la corrección de ALTO-1, no como alcance aparte. Traducir `P2034` a un código explícito y, en general, los errores no `MarketplaceError` a `500` (como las rutas de empresa), cuidando que los errores reales de `authService.restore` sigan dando `401`.
+  - **BAJO-1 (punto 5, `409 ASSIGNMENT_NOT_ACTIONABLE` sin persistir):** aceptable.
+    - Solo ocurre en la ventana de milisegundos del borde de la ventana de check-in o del margen de abandono.
+    - La siguiente llamada lo persiste.
+    - Flutter lo maneja: `_handleActionError` muestra el aviso de cierre y recarga. La web no usa estas rutas.
+  - **BAJO-2 (lectura previa obsoleta en `checkOut` tras `resolveAndPersistLifecycle`):** caso borde.
+    - Si la lectura previa calcula `NO_SHOW`, pero dentro de su transacción la relectura muestra un check-in recién hecho, `resolveAndPersistLifecycle` devuelve `ASSIGNED`.
+    - Aun así `checkOut` usa la lectura previa (`checkedInAt` nulo) y responde `409 SHIFT_UNAVAILABLE`, aunque una repetición inmediata tendría éxito.
+    - Es transitorio, sin efecto sobre los datos, y en rigor linealizable: equivale a un check-out anterior al check-in.
+  - **Verificación del punto 1:**
+    - Las cuatro operaciones y `resolveAndPersistLifecycle` corren en `Serializable` con `withSerializableRetry`, que solo reintenta `P2034` y como máximo 3 veces. La asignación y el turno se releen con `tx` en cada intento y se revalidan con las mismas reglas.
+    - La lectura previa solo sirve para responder rápido o para errores que linealizan en el instante de esa lectura.
+    - Eventos, `Payment` y `ShiftCancellation` van todos dentro de la transacción; no hay efectos fuera.
+    - `resolveAndPersistLifecycle` ya no pisa un estado `COMPLETED`/`CANCELLED` (responde `404`) ni un estado recalculado sin cambio.
+    - Un doble check-out deja un solo `Payment`, un solo `CHECKED_OUT`/`COMPLETED` y `completedAt` intacto (suite nueva, pasó).
+  - **Verificación del punto 2:** leído el código de `HEAD`, las respuestas secuenciales son las declaradas:
+    - check-in repetido: `200` con el `checkedInAt` original (`if (assignment.checkedInAt) return`);
+    - check-out repetido: `404`, porque el estado ya es `COMPLETED`;
+    - cancelar tras el check-in: `409 CANCELLATION_NOT_ALLOWED`;
+    - check-in tras cancelar: `404`; confirmar tras cancelar: `404` (filtro `status: 'ASSIGNED'`);
+    - doble cancelación: `404`, porque la postulación ya es `CANCELLED`.
+
+    Ningún camino feliz ni código previo cambia, salvo ALTO-1 bajo contención. `checkInWindowViolation`, `deriveShiftStatus`/`shift-state.ts`, el esquema, el Dockerfile y el lockfile no se tocaron (`git status`).
+  - **Verificación del punto 3:**
+    - El cuerpo de `withSerializableRetry` es idéntico al anterior (3 intentos, condición `P2034`). Las opciones de aislamiento se siguen pasando en cada llamada.
+    - `serializable-retry.ts` no importa nada, así que no hay ciclos.
+    - `business.routes.test.ts` importa la reexportación y pasa.
+    - Importadores: `business.service.ts`, `marketplace.service.ts` y esa prueba.
+  - **Verificación del punto 6 (calidad de las pruebas):**
+    - Las variantes deterministas fijan el defecto sin depender del azar:
+      - la barrera alinea las lecturas previas, y con `HEAD` siempre duplica;
+      - las pausas de un solo uso dejan obsoleta la lectura, y el reintento o la relectura la pasan sin esperar.
+    - La prueba real de cancelar contra confirmar compara `createdAt` de eventos generados por el reloj del proceso. Es sólida: el `CANCELLED` se inserta después de que la confirmación se confirmó, o reintenta.
+    - No encontré pruebas tautológicas.
+    - Límite de la suite: solo ejerce dos contendientes por asignación. Por eso no detectó ALTO-1.
+- Validaciones:
+  - Contenedor `cumplenow-db-1` (`healthy`, `127.0.0.1:5433`), base `chambeaya_test`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la base de desarrollo.
+    - `npx prisma migrate deploy` → `No pending migrations to apply.`
+    - `npm run test:integration` → `Test Files 6 passed (6)`, `Tests 23 passed (23)`.
+    - Suite nueva, 4 corridas → `Tests 10 passed (10)` las 4.
+  - Mutación de integración (`marketplace.service.ts` de `HEAD`), 2 corridas → `Tests 10 failed (10)` las dos, deterministas incluidas.
+  - Mutación unitaria → `Tests 11 failed | 42 passed (53)`.
+  - Tras cada mutación, archivo restaurado y comprobado con `cmp`.
+  - Sonda de contención propia (temporal, borrada): cifras en ALTO-1.
+    - Se ejecutó con `N=4` y `N=10`, contra el código nuevo y contra `HEAD`, y una vez con `ALTER DATABASE chambeaya_test SET enable_seqscan = off`.
+    - El ajuste se revirtió con `RESET`; `pg_db_role_setting` quedó con `0` filas.
+  - `npx vitest run --exclude "tests/integration/**"` en `apps/api` → `Test Files 20 passed (20)`, `Tests 249 passed (249)`.
+  - `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - `npm test` en la raíz → API `249 passed`; Playwright `1 skipped`, `103 passed (3.8m)`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (50.0s)`.
+  - `flutter test` → `All tests passed!` (`+145`); `flutter analyze` → `10 issues found.` (los mismos `info` preexistentes).
+  - Limpieza:
+    - `apps/web/next-env.d.ts` restaurado con `git checkout`; `test-results` y temporales borrados.
+    - `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`.
+- Riesgos:
+  - ALTO-1 abierto.
+  - La sonda mide ráfagas dentro de un solo proceso, con latencia local a la base. En producción la duración de cada transacción interactiva (varios viajes a la base) amplía la ventana de choque. La frecuencia real de ráfagas de 4 o más trabajadores no está medida.
+  - Las rutas de empresa (`cancelShift`, `resolveAssignment`, `decideShiftApplication`) usan el mismo patrón `Serializable` sin espera entre reintentos y probablemente comparten el riesgo. No se sondearon.
+  - No se ejecutó Flutter contra la API real ni en dispositivo.
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1 y MEDIO-1 en una entrada `CORRECCION` que referencie `CN-20260923-010` y esta auditoría:
+  - bloqueo de fila o guardas en lugar de SSI para la propia asignación, o reintento con espera;
+  - traducción del `P2034` agotado a un código no `401`;
+  - prueba de integración con N≥4 trabajadores simultáneos.
+
+  Después, `auditor-opus` reaudita. Extender el patrón a `acceptShift`/`applyToShift` solo después de cerrar esto.
+
+### CN-20260923-010 — Alcance B1 del Hito B: concurrencia del trabajador sobre su propia asignación (`checkIn`, `checkOut`, `confirmAssignment`, `cancelAssignment`)
+
+- Fecha: 2026-09-23 18:23 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260923-008` y su auditoría `CN-20260923-009` (mismo patrón: lectura fuera de la transacción reintentable).
+- Alcance: el análisis de entrada al Hito B detectó por lectura de código riesgo de doble efecto en la ruta del trabajador de `apps/api/src/modules/marketplace/marketplace.service.ts`. Primero se **reprodujo cada riesgo contra PostgreSQL real** y después se corrigió lo confirmado. **Los cinco riesgos se reprodujeron** contra el código de `HEAD` (`99475e4`), en las variantes deterministas y en la primera ronda de las reales:
+  1. Doble `checkIn` simultáneo: dos `200` con `checkedInAt` distintos y **dos** `ShiftEvent` `CHECKED_IN` (un reintento por `P2034` reutilizaba la lectura previa).
+  2. Doble `checkOut` simultáneo: dos `200` (observado). Por el código, el segundo intento además sobrescribe `completedAt` y duplica `CHECKED_OUT`/`COMPLETED`; esos conteos no se observaron porque la prueba falla antes, en el estado HTTP. El `Payment` ya era único por `assignmentId` (`upsert`).
+  3. `cancelAssignment` contra `checkIn`: `cancel=200 checkIn=200` (check-in aceptado sobre una asignación ya `CANCELLED`) y, en la variante determinista inversa, la cancelación obsoleta se aplicó (`200`) tras un check-in ya registrado.
+  4. `cancelAssignment` contra `confirmAssignment` (no estaba en el análisis; salió de la prueba pedida): la confirmación se aplicaba y registraba su evento `ASSIGNMENT_CONFIRMED` **después** del `CANCELLED`, con `200`.
+  5. Doble `cancelAssignment`: dos `200` (observado); por el código, dos `ShiftCancellation` y dos eventos `CANCELLED` (conteos no observados: la prueba falla antes, en el estado HTTP).
+  Corrección: (a) `checkIn`, `checkOut`, `confirmAssignment` y `cancelAssignment` escriben en una transacción `Serializable` con `withSerializableRetry` y **releen la asignación y el turno dentro de cada intento**, revalidando con las mismas reglas (la lectura previa queda solo para responder rápido y persistir el ciclo de vida); (b) `resolveAndPersistLifecycle` también relee dentro de su transacción y ya no sobrescribe un estado más reciente con una decisión calculada sobre una lectura obsoleta; (c) `withSerializableRetry` se unificó en `apps/api/src/modules/operations/serializable-retry.ts` (el módulo de empresa lo reexporta para no romper `business.routes.test.ts`). Sin cambios de esquema, migración, Dockerfile ni lockfile; no se tocó la regla de ventana de `CN-20260923-006` ni `deriveShiftStatus` (`CN-20260922-013`).
+- Archivos:
+  - Nuevo: `apps/api/src/modules/operations/serializable-retry.ts`.
+  - Modificados: `apps/api/src/modules/marketplace/marketplace.service.ts`, `apps/api/src/modules/business/business.service.ts` (solo mueve `withSerializableRetry` y lo reexporta).
+  - Pruebas: nueva `apps/api/tests/integration/worker-assignment-concurrency.integration.test.ts` (10 pruebas); `apps/api/tests/marketplace.service.test.ts` (+12 pruebas con Prisma simulado y el fake de `confirmAssignment` con `$transaction`).
+  - Documentación: `docs/reference/api.md` (subsección "Concurrencia del trabajador sobre su propia asignación" y viñetas de `confirm`/`check-in`/`check-out`/`cancel`), `docs/product/project-master-plan.md` (pendiente 13, "Sin verificar" y cobertura de concurrencia).
+- Decisiones:
+  - **Respuesta de la llamada que pierde = la de una llamada secuencial repetida** (verificado leyendo el código y fijado por las pruebas): doble check-in, `200` idempotente con el `checkedInAt` original; doble check-out, `404 ASSIGNMENT_NOT_FOUND` (la asignación ya es `COMPLETED`); cancelar tras check-in, `409 CANCELLATION_NOT_ALLOWED`; check-in o confirmar tras cancelar, `404 ASSIGNMENT_NOT_FOUND`; doble cancelación, `404`. Los caminos felices y los errores previos conservan código y cuerpo.
+  - **Relectura en la transacción Serializable en lugar de `updateMany` con guarda**: PostgreSQL detecta el conflicto de escritura sobre la fila de la asignación, el reintento relee y responde con el estado nuevo. Es el mismo mecanismo de `CN-20260923-008`, y evita cambiar la forma de los `update` que ya usan las pruebas.
+  - `assertCanCheckIn` (helper privado) concentra las comprobaciones posteriores al ciclo de vida y corre dos veces (lectura previa y relectura), para que ambas cascadas de errores no diverjan.
+  - Dentro de la transacción, si el ciclo de vida recalculado sobre la relectura ya no es `ASSIGNED` se responde `409 ASSIGNMENT_NOT_ACTIONABLE` sin persistirlo (no se puede escribir y lanzar en la misma transacción); la próxima llamada lo persiste.
+  - `confirmAssignment` se movió entero a la transacción (antes: `findFirst` + `update` + `shiftEvent.create` sueltos), pese a no estar en el análisis inicial, porque su prueba de carrera (pedida) lo reprodujo.
+  - Las pruebas de integración usan `createApp({ rateLimit: false })` (opción de prueba ya existente) porque registran un trabajador por ronda y el límite de `/api/auth` respondía `429`.
+  - Variante determinista: un `Proxy` sobre el cliente Prisma retiene la lectura de la asignación (o de la postulación dentro de la transacción de `cancelAssignment`) hasta que la otra operación termina, o alinea dos llamadas con una barrera, de modo que la lectura queda obsoleta sin depender del reloj. Funciona igual contra el código anterior (lectura fuera de la transacción) y el nuevo (dentro).
+  - Observación no modificada: las rutas del trabajador (`marketplace.routes.ts`) traducen **cualquier** error que no sea `MarketplaceError` a `401 INVALID_SESSION`, así que si se agotaran los 3 intentos de `P2034` el cliente vería `401` y no `500` (a diferencia de las rutas de empresa). Con dos contendientes por asignación no se alcanzó. Se declara en `docs/reference/api.md`; cambiarlo alteraría respuestas existentes y queda fuera del alcance.
+- Validaciones (resultado literal):
+  - Contenedor `cumplenow-db-1` (Docker Desktop estaba apagado; se inició Docker Desktop y `docker start cumplenow-db-1`), `127.0.0.1:5433`, base `chambeaya_test`, `CHAMBEAYA_INTEGRATION_TESTS=true`, nunca la base de desarrollo. `npx prisma migrate deploy` → `No pending migrations to apply.`; hizo falta `npx prisma generate` (solo `node_modules`).
+  - **Reproducción contra `HEAD`** (`marketplace.service.ts` y `business.service.ts` restaurados desde `git show HEAD:`, prueba nueva): 3 corridas de 3 → `Test Files  1 failed (1)`, `Tests  10 failed (10)` cada vez; entre otros `round 1: a=200 b=200: expected 2 to be 1` (doble check-in), `round 1: a=200 b=200: expected 200 to be 404` (doble check-out y doble cancelación), `round 1: cancel=200 checkIn=200: expected 200 to be 404`, `round 1: cancel=200 confirm=200: expected 1790204990314 to be less than or equal to 1790204990300`. Archivos restaurados y comprobados con `cmp`.
+  - **Mutación unitaria** (`marketplace.service.ts` de `HEAD`, `tests/marketplace.service.test.ts` nuevo): `Test Files  1 failed (1)`, `Tests  11 failed | 42 passed (53)`; con el código nuevo `Tests  53 passed (53)`.
+  - Con el código nuevo: `npx vitest run --config vitest.integration.config.mts tests/integration/worker-assignment-concurrency` → `Tests  10 passed (10)` en 4 corridas de 4.
+  - `npm run test:integration` (dos corridas) → `Test Files  6 passed (6)`, `Tests  23 passed (23)` las dos.
+  - `npm test` (raíz; API y Playwright con API simulada, incluye `assignment-resolution.spec.ts` en desktop y móvil) → API `Test Files  20 passed (20)`, `Tests  249 passed (249)`; Playwright `103 passed (3.4m)`.
+  - `npx tsc -p tsconfig.json --noEmit` en `apps/api` → `TSC_API=0`; `npx tsc --noEmit` en `apps/web` → `TSC_WEB=0`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_REAL_TESTS=true`, `CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (51.3s)`.
+  - `flutter test` → `All tests passed!` (`+145`); `flutter analyze` → `10 issues found.` (los mismos `info` de estilo preexistentes en `lib/`; ningún `error` ni `warning`; no se tocó Flutter).
+  - `apps/web/next-env.d.ts` modificado por el build y restaurado con `git checkout`.
+- Riesgos:
+  - Las carreras reales son probabilísticas: las variantes deterministas son las que fijan de forma segura el defecto; las de 8 rondas fallaron en la primera ronda contra `HEAD`, pero con el código nuevo un `pass` no demuestra ausencia de carreras no cubiertas (p. ej. tres o más contendientes por asignación, que podrían agotar los 3 intentos y devolver `401` por el mapeo de errores de las rutas).
+  - `withSerializableRetry` sigue sin traducir `P2034` agotado; en rutas del trabajador se ve como `401 INVALID_SESSION` (preexistente, declarado arriba).
+  - Sin cubrir contra base real: `ABANDONED` bajo carrera de doble check-out pasado el margen (solo con Prisma simulado), la carrera del ciclo de vida de `business.service.ts` (persistencia de `NO_SHOW` al abrir el panel de empresa) y `acceptShift`/`applyToShift` del trabajador; siguen fuera de este alcance.
+  - Flutter no se probó contra la API real ni en dispositivo; el cambio no altera códigos ni cuerpos de respuesta, así que no debería afectarlo.
+  - Un check-in o check-out cuyo ciclo de vida cambió entre la lectura y la transacción responde `409 ASSIGNMENT_NOT_ACTIONABLE` sin persistir el nuevo estado (lo hará la siguiente llamada), a diferencia de la ruta secuencial que lo persiste antes de responder; solo alcanzable en la ventana de milisegundos del borde de la ventana de check-in o del margen de abandono.
+- Siguiente paso: `auditor-opus` audita `CN-20260923-010` sobre el diff sin commitear de `99475e4` (`marketplace.service.ts`, `business.service.ts`, `serializable-retry.ts`, las dos suites de pruebas y los dos documentos), repite las mutaciones (HEAD contra la prueba de integración nueva y contra `marketplace.service.test.ts`) y decide si además conviene aplicar el mismo criterio a `acceptShift`/`applyToShift` en un alcance aparte.
+
 ### CN-20260923-009 — Auditoría de `CN-20260923-008` (Alcance D: robustez del panel web, sondeo de Flutter en primer plano, `cancelShift`/`resolveAssignment` Serializable y notas menores)
 
 - Fecha: 2026-09-23 13:58 (America/Lima)

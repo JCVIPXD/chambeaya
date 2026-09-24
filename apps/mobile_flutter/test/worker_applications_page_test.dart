@@ -156,6 +156,36 @@ void main() {
     },
   );
 
+  testWidgets(
+    'a CONCURRENT_UPDATE conflict while confirming asks to try again and keeps '
+    'the card actionable (no session error, no retirement)',
+    (tester) async {
+      final repository = _ConcurrentUpdateRepository();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: WorkerApplicationsPage(repository: repository)),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Confirmar asistencia'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('No pudimos confirmar la asignación. Inténtalo otra vez.'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Este turno ya no está disponible'),
+        findsNothing,
+      );
+      expect(find.text('Confirmar asistencia'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   // `onRetry` used to be `() => setState(() => _loading = _load())`: an
   // expression-bodied callback that returns the `Future`, which `setState`
   // rejects with an assertion in debug mode (before it schedules the rebuild).
@@ -321,6 +351,24 @@ class _TransientFailureRepository extends DemoWorkerMarketplaceRepository {
   @override
   Future<void> confirmAssignment(String shiftId) =>
       Future.error(StateError('sin conexión'));
+}
+
+/// The API answers `409 CONCURRENT_UPDATE` when a serialization conflict
+/// exhausted its retries: retryable, the operation was not applied.
+class _ConcurrentUpdateRepository extends DemoWorkerMarketplaceRepository {
+  @override
+  Future<Map<String, ApplicationState>> applicationStates() async => {
+    _acceptedNotConfirmedShift.id: ApplicationState.accepted,
+  };
+
+  @override
+  Future<List<Shift>> availableShifts() async => const [
+    _acceptedNotConfirmedShift,
+  ];
+
+  @override
+  Future<void> confirmAssignment(String shiftId) =>
+      Future.error(const MarketplaceApiException('CONCURRENT_UPDATE'));
 }
 
 /// Fails the first load (`applicationStates()`) and then serves an accepted,

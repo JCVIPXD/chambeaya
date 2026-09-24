@@ -102,6 +102,43 @@ void main() {
     },
   );
 
+  test(
+    'HTTP repository surfaces a 409 CONCURRENT_UPDATE from confirm, check-in '
+    'and check-out as a retryable error code, not a session error',
+    () async {
+      final repository = HttpWorkerMarketplaceRepository(
+        client: _StatusClient(409, '{"error":"CONCURRENT_UPDATE"}'),
+        baseUri: Uri.parse('http://localhost:4000/api'),
+        token: 'worker-token',
+      );
+
+      Future<MarketplaceApiException> failureOf(Future<void> call) async {
+        try {
+          await call;
+        } on MarketplaceApiException catch (error) {
+          return error;
+        }
+        fail('the call should have failed');
+      }
+
+      for (final call in [
+        repository.confirmAssignment('shift-1'),
+        repository.checkIn('shift-1', 'CUMPLE-ABC123'),
+        repository.checkOut('shift-1'),
+      ]) {
+        final error = await failureOf(call);
+        expect(error.code, 'CONCURRENT_UPDATE');
+        // No es "el turno ya no existe": la pantalla no debe retirar la tarjeta.
+        expect(error.isShiftGone, isFalse);
+      }
+      // `cancel` conserva su error genérico y nunca cierra la sesión.
+      await expectLater(
+        repository.cancelApplication('shift-1', 'Ya no puedo asistir'),
+        throwsA(isA<StateError>()),
+      );
+    },
+  );
+
   test('demo repository persists saved jobs and local applications', () async {
     final repository = DemoWorkerMarketplaceRepository();
 
@@ -420,6 +457,23 @@ class _JsonClient extends http.BaseClient {
     return http.StreamedResponse(
       Stream.value(utf8.encode(jsonEncode(payload))),
       200,
+      headers: {'content-type': 'application/json'},
+      request: request,
+    );
+  }
+}
+
+class _StatusClient extends http.BaseClient {
+  _StatusClient(this.statusCode, this.body);
+
+  final int statusCode;
+  final String body;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    return http.StreamedResponse(
+      Stream.value(utf8.encode(body)),
+      statusCode,
       headers: {'content-type': 'application/json'},
       request: request,
     );

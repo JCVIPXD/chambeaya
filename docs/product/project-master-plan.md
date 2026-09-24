@@ -983,6 +983,47 @@ Pendientes conocidos, por prioridad sugerida:
     producto/diseño (mostrar las acciones en móvil con un área táctil adecuada, o declarar el
     panel de empresa solo para escritorio); la misma regla también oculta otras acciones de
     fila (por ejemplo la del encabezado del chat), que conviene revisar juntas.
+13. **Concurrencia del trabajador sobre su propia asignación** (entrada de Hito B, declarada
+    en `CN-20260923-010`, **auditada con `REQUIERE_CAMBIOS` en `CN-20260923-011`, corregida en `CN-20260923-012` y reauditada con `REQUIERE_CAMBIOS` en `CN-20260923-013` (ALTO-1 y MEDIO-1 resueltos; nuevos: orden de bloqueo invertido entre `cancel` del trabajador y `cancelShift` de la empresa con interbloqueo real que respondía `500`, `business-routes-load` inestable y `500` en sesión vencida simultánea) corregida en `CN-20260923-014` y reauditada con `APROBADO` en `CN-20260923-015` (riesgos residuales declarados allí): 010, 012 y 014 quedan cerradas juntas**). El análisis de entrada al Hito B detectó
+    por lectura de código el mismo patrón que `CN-20260923-008` cerró en `resolveAssignment`:
+    `checkIn`, `checkOut`, `confirmAssignment` y `cancelAssignment` leían fuera de la
+    transacción (o sin `Serializable`) y sin guarda de estado. Se reprodujo contra PostgreSQL
+    real (los cinco riesgos: doble check-in con dos `CHECKED_IN`, doble check-out con dos `200`
+    y `completedAt` sobrescrito, cancelar contra check-in con ambos `200`, confirmar sobre una
+    asignación ya cancelada y doble cancelación). `CN-20260923-010` lo corrigió con una
+    transacción `Serializable` que releía dentro de cada intento, y la auditoría
+    `CN-20260923-011` halló una regresión (ALTO-1): con 4 o más trabajadores simultáneos, aunque
+    cada uno actuara sobre su propia asignación y en turnos distintos, los conflictos de
+    serialización agotaban los 3 reintentos inmediatos y solo 3 llamadas por ronda respondían
+    `200` (el resto `401 INVALID_SESSION`, por el mapeo de errores de las rutas del
+    trabajador, MEDIO-1). `CN-20260923-012` lo corrigió: (a) las cuatro operaciones y la
+    persistencia del ciclo de vida usan una transacción `READ COMMITTED` que bloquea la
+    postulación (solo cancelar), la asignación y el turno con `SELECT ... FOR NO KEY UPDATE`
+    antes de leer y escribir, así que cada llamada usa una sola transacción y las de
+    trabajadores distintos no se esperan; conserva el resultado de una ejecución en serie y las
+    respuestas de la llamada que pierde; (b) `withSerializableRetry` (compartido con las rutas
+    de empresa) reintenta con espera aleatoria y hasta 6 intentos, lo que además cura la misma
+    contención medida en `decideShiftApplication`, `cancelShift` y `resolveAssignment`
+    (antes 3 `200` y el resto `500` desde 4 llamadas simultáneas); (c) las rutas del
+    trabajador responden `401 INVALID_SESSION` solo para `AuthError`, `409 CONCURRENT_UPDATE`
+    ante un `P2034` agotado y `500 INTERNAL_ERROR` ante el resto. Ver "Concurrencia del
+    trabajador" en `docs/reference/api.md` (con las mediciones antes y después). Sin cambios de
+    esquema. `CN-20260923-014` corrigió lo hallado en `CN-20260923-013`: (a) orden de bloqueo global
+    postulación → asignación → turno, con `cancelShift` de la empresa reordenado para seguirlo
+    (y el ciclo de vida de la empresa ordenado por `id`), tabla de operaciones y análisis de los
+    demás pares trabajador x empresa en `docs/reference/api.md`; (b) `withSerializableRetry`
+    reintenta también el interbloqueo `40P01` (`P2010` de `$queryRaw` y el error sin código
+    de `updateMany`), y un `40P01` agotado responde `409 CONCURRENT_UPDATE` en las rutas del
+    trabajador; (c) `business-routes-load` ya no exige `200` en todas (diseño probabilístico
+    mantenido): exige atomicidad y que una llamada fallida se pueda repetir, y "todas `200`"
+    queda como medición opt-in (`CHAMBEAYA_LOAD_STRICT`); (d) `authSession.deleteMany`
+    en `restore`, así que dos peticiones con el mismo token vencido dan `401` y no `500`.
+    **Pendiente conocido:** las rutas de empresa no usan bloqueo de filas, así que su
+    contención se mitiga con reintentos y espera (probabilístico, no determinista): con 20
+    llamadas simultáneas de una sola empresa 1 o 2 responden `500` (`P2034` agotado; la
+    transacción no deja efecto y repetirla funciona); darles el bloqueo de filas del trabajador
+    quedó fuera de alcance por riesgo. `acceptShift`/`applyToShift` del trabajador siguen sin
+    este tratamiento.
 
 Sin verificar de extremo a extremo: dos sesiones simultáneas; `ABANDONED`, multi-cupo y
 la cancelación de la empresa con `cancelShift` seguida de `resolve` sí se ejecutaron
@@ -990,7 +1031,10 @@ contra API y PostgreSQL reales en la auditoría `CN-20260923-001`, pero con una 
 desechable; el multi-cupo con check-in previo y el reemplazo tras `NO_SHOW` ya tienen desde
 `CN-20260923-006` una suite permanente contra PostgreSQL en `apps/api/tests/integration`,
 y desde `CN-20260923-008` la carrera simultánea entre `cancelShift` y `resolve` sobre un
-`NO_SHOW` también (`shift-cancel-resolve-race.integration.test.ts`); `ABANDONED` y la
+`NO_SHOW` también (`shift-cancel-resolve-race.integration.test.ts`), y desde
+`CN-20260923-010` la concurrencia del trabajador (doble check-in, doble check-out, cancelar
+contra check-in y contra confirmar; `worker-assignment-concurrency.integration.test.ts`);
+`ABANDONED` y la
 reapertura bloqueada por una cancelación previa de la empresa siguen sin ella (la corrida de `CN-20260920-007`
 solo ejerce el camino en que **no** existe el `ShiftCancellation` con `actorRole: BUSINESS`);
 `demo:seed`/`demo:smoke` con estos cambios, la app Flutter contra una API real y en
@@ -1033,7 +1077,11 @@ queda abierto en las auditorías de este ciclo.
 
 - Integración PostgreSQL para perfil, privacidad, búsqueda, cursores, invitaciones y
   reseñas.
-- Concurrencia real en cupos, decisiones, cancelación, asistencia, ledger y webhooks.
+- Concurrencia real en cupos, decisiones, cancelación, asistencia, ledger y webhooks. Ya
+  cubiertos contra PostgreSQL real: cupos (`shift-capacity-race`), cancelar contra resolver
+  (`shift-cancel-resolve-race`) y la asistencia del trabajador —check-in, check-out,
+  confirmar y cancelar— (`worker-assignment-concurrency`, `CN-20260923-010`), con carga de 4 y 10 trabajadores simultáneos (`worker-assignment-load` y `business-routes-load`, `CN-20260923-012`). Faltan ledger
+  y webhooks.
 - Playwright para publicación, selección, mensajería y cierre. Ya cubiertos: el acceso
   empresarial, la paginación del directorio de talento, la invitación de talento y el
   estado de membresía con piloto activo, sin plan activado y con plan Pro (suite

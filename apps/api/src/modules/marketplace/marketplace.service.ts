@@ -9,6 +9,7 @@ import {
   type OperationalAction,
   type OperationalAssignmentStatus,
 } from '../operations/shift-state.js';
+import { withSerializableRetry } from '../operations/serializable-retry.js';
 
 export type DemoShiftStatus = 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
 
@@ -411,38 +412,107 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
     return applications.map(toWorkerApplication);
   }
 
+  /**
+   * Transacción de una operación del trabajador sobre SU asignación
+   * (`confirmAssignment`, `checkIn`, `checkOut`, `cancelAssignment` y la
+   * persistencia del ciclo de vida). Bloquea primero las filas de la
+   * postulación (solo si `application`), de la asignación y del turno (salvo
+   * `shift: false`), siempre en ese orden, y recién después lee y escribe:
+   * dos llamadas sobre la misma asignación (o sobre el mismo turno) se
+   * serializan y la que llega segunda relee el estado que dejó la primera,
+   * mientras que trabajadores en turnos distintos no se esperan.
+   *
+   * Se usa `READ COMMITTED` a propósito. El aislamiento `Serializable` de
+   * CN-20260923-010 lograba lo mismo por detección de conflictos, pero con 4 o
+   * más trabajadores simultáneos (aunque cada uno actuara sobre su propia
+   * asignación) agotaba los 3 reintentos de `P2034` y la ráfaga respondía
+   * `401` a casi todos (CN-20260923-011, ALTO-1).
+   *
+   * ORDEN DE BLOQUEO GLOBAL (CN-20260923-013, MEDIO-1): postulación ->
+   * asignación -> turno. Es el orden que también siguen las operaciones de la
+   * empresa que bloquean varias de estas filas (`cancelShift`: postulaciones,
+   * luego asignaciones, luego el turno; `decideShiftApplication`: postulación,
+   * luego la asignación nueva, luego el turno; `resolveAssignment` y la
+   * persistencia del ciclo de vida: asignación y luego turno, un subconjunto
+   * del mismo orden). Una transacción que respeta ese orden nunca espera una
+   * fila que otra tenga mientras esta tenga una anterior en el orden, así que
+   * no se forman ciclos entre el trabajador y la empresa. Antes `cancelShift`
+   * tomaba asignaciones y luego postulaciones (orden inverso a
+   * `cancelAssignment`) y el cruce daba un interbloqueo real (`40P01`) que
+   * terminaba en `500`, ver `docs/reference/api.md` ("Orden de bloqueo").
+   *
+   * Cualquier cambio de esas operaciones tiene que conservar el orden. Aun así,
+   * `withSerializableRetry` reintenta `40P01` (medido: P2010 con `meta.code`
+   * `40P01` en estas consultas crudas) como red de seguridad para un cruce que
+   * este orden no prevea, p. ej. una transacción ajena a esta API. Una
+   * transacción `READ COMMITTED` no produce fallos de serialización (`40001`),
+   * solo interbloqueos. Cuando es la transacción `Serializable` de la EMPRESA
+   * la que choca con una escritura confirmada de una operación del trabajador,
+   * el que recibe `P2034` y reintenta es la empresa, no el trabajador.
+   *
+   * Cada bloqueo es `FOR NO KEY UPDATE`: excluye a otros escritores de la
+   * misma fila pero no bloquea a quien solo inserta filas que la referencian
+   * (p. ej. `ShiftEvent`).
+   */
+  private lockedTransaction<T>(
+    workerId: string,
+    shiftId: string,
+    locks: { application?: boolean; shift?: boolean },
+    body: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      if (locks.application) {
+        await tx.$queryRaw`SELECT "id" FROM "ShiftApplication" WHERE "workerId" = ${workerId} AND "shiftId" = ${shiftId} FOR NO KEY UPDATE`;
+      }
+      await tx.$queryRaw`SELECT "id" FROM "ShiftAssignment" WHERE "workerId" = ${workerId} AND "shiftId" = ${shiftId} FOR NO KEY UPDATE`;
+      if (locks.shift !== false) {
+        await tx.$queryRaw`SELECT "id" FROM "Shift" WHERE "id" = ${shiftId} FOR NO KEY UPDATE`;
+      }
+      return body(tx);
+    }, { isolationLevel: 'ReadCommitted' }));
+  }
+
   async confirmAssignment(workerId: string, shiftId: string) {
-    const assignment = await this.prisma.shiftAssignment.findFirst({
-      where: {
-        workerId,
+    // La asignación se bloquea y se lee DENTRO de la transacción (ver
+    // `lockedTransaction`): confirmar contra una cancelación simultánea tiene un
+    // único ganador coherente (si cancela primero, la confirmación responde
+    // `404` y no escribe ni evento ni `workerConfirmedAt`). Antes la lectura y
+    // el `update` iban sin transacción y sin guarda de estado, y una
+    // confirmación podía aplicarse sobre una asignación ya `CANCELLED`
+    // (CN-20260923-010).
+    return this.lockedTransaction(workerId, shiftId, { shift: false }, async (tx) => {
+      const assignment = await tx.shiftAssignment.findFirst({
+        where: {
+          workerId,
+          shiftId,
+          status: 'ASSIGNED',
+          // La confirmación depende de la asignación propia, no del estado
+          // agregado del turno: en un turno multi-cupo, cuando otro trabajador
+          // ya hizo check-in el turno está `CHECKED_IN` y los demás asignados
+          // deben poder confirmar (y luego hacer su check-in) igual. Solo los
+          // turnos terminales (`COMPLETED`/`CANCELLED`) quedan excluidos
+          // (CN-20260923-006).
+          shift: { status: { notIn: ['COMPLETED', 'CANCELLED'] }, endsAt: { gt: new Date() } },
+        },
+        include: { shift: { include: { company: true } }, application: true },
+      });
+      if (!assignment) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+      if (assignment.workerConfirmedAt) return toWorkerApplication({ ...assignment.application, shiftId, shift: assignment.shift, assignment });
+      const updated = await tx.shiftAssignment.update({
+        where: { id: assignment.id },
+        data: { workerConfirmedAt: new Date() },
+        include: { shift: { include: { company: true } } },
+      });
+      await tx.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'WORKER', type: 'ASSIGNMENT_CONFIRMED' } });
+      return toWorkerApplication({
+        id: assignment.applicationId,
         shiftId,
-        status: 'ASSIGNED',
-        // La confirmación depende de la asignación propia, no del estado
-        // agregado del turno: en un turno multi-cupo, cuando otro trabajador
-        // ya hizo check-in el turno está `CHECKED_IN` y los demás asignados
-        // deben poder confirmar (y luego hacer su check-in) igual. Solo los
-        // turnos terminales (`COMPLETED`/`CANCELLED`) quedan excluidos
-        // (CN-20260923-006).
-        shift: { status: { notIn: ['COMPLETED', 'CANCELLED'] }, endsAt: { gt: new Date() } },
-      },
-      include: { shift: { include: { company: true } }, application: true },
-    });
-    if (!assignment) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
-    if (assignment.workerConfirmedAt) return toWorkerApplication({ ...assignment.application, shiftId, shift: assignment.shift, assignment });
-    const updated = await this.prisma.shiftAssignment.update({
-      where: { id: assignment.id },
-      data: { workerConfirmedAt: new Date() },
-      include: { shift: { include: { company: true } } },
-    });
-    await this.prisma.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'WORKER', type: 'ASSIGNMENT_CONFIRMED' } });
-    return toWorkerApplication({
-      id: assignment.applicationId,
-      shiftId,
-      status: 'ACCEPTED',
-      createdAt: assignment.assignedAt,
-      updatedAt: updated.updatedAt,
-      shift: updated.shift,
-      assignment: updated,
+        status: 'ACCEPTED',
+        createdAt: assignment.assignedAt,
+        updatedAt: updated.updatedAt,
+        shift: updated.shift,
+        assignment: updated,
+      });
     });
   }
 
@@ -455,6 +525,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
    */
   private async resolveAndPersistLifecycle(assignment: {
     id: string;
+    workerId: string;
     shiftId: string;
     status: string;
     assignedAt?: Date | null;
@@ -464,41 +535,58 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
   }) {
     const lifecycle = resolveAssignmentLifecycle(assignment as never, assignment.shift);
     if (!lifecycle.changed) return lifecycle.status;
-    await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
-      await tx.shiftAssignment.update({ where: { id: assignment.id }, data: { status: lifecycle.status as never } });
+    return this.lockedTransaction(assignment.workerId, assignment.shiftId, {}, async (tx) => {
+      // La asignación y el turno se releen en cada intento: la decisión de
+      // `lifecycle` se calculó con una lectura previa que puede haber quedado
+      // obsoleta (p. ej. otro check-out la completó mientras tanto) y no debe
+      // sobrescribir un estado más reciente (CN-20260923-010).
+      const fresh = await tx.shiftAssignment.findFirst({ where: { id: assignment.id }, include: { shift: true } });
+      if (!fresh || ['CANCELLED', 'COMPLETED'].includes(fresh.status)) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+      const current = resolveAssignmentLifecycle(fresh as never, fresh.shift);
+      if (!current.changed) return current.status;
+      await tx.shiftAssignment.update({ where: { id: fresh.id }, data: { status: current.status as never } });
       // Rastro de auditoría de la transición automática (ver MEDIO-1 de
       // CN-20260918-002). No existe un `ShiftEventType` dedicado a
       // `NO_SHOW`/`ABANDONED`; se reutiliza `CANCELLED` (el precedente más
       // cercano) con actor `SYSTEM`, igual que en `business.service.ts`.
       await tx.shiftEvent.create({
         data: {
-          shiftId: assignment.shiftId,
+          shiftId: fresh.shiftId,
           actorId: null,
           actorRole: 'SYSTEM',
           type: 'CANCELLED',
-          detail: lifecycle.status === 'NO_SHOW'
-            ? `Asignación ${assignment.id} marcada NO_SHOW automáticamente: sin check-in dentro de la ventana`
-            : `Asignación ${assignment.id} marcada ABANDONED automáticamente: check-in sin check-out tras el margen de tolerancia`,
+          detail: current.status === 'NO_SHOW'
+            ? `Asignación ${fresh.id} marcada NO_SHOW automáticamente: sin check-in dentro de la ventana`
+            : `Asignación ${fresh.id} marcada ABANDONED automáticamente: check-in sin check-out tras el margen de tolerancia`,
         },
       });
-      const assignments = await tx.shiftAssignment.findMany({ where: { shiftId: assignment.shiftId } });
-      const nextShiftStatus = deriveShiftStatus(assignment.shift.status as never, assignment.shift.requiredWorkers, assignments as never, assignment.shift);
+      const assignments = await tx.shiftAssignment.findMany({ where: { shiftId: fresh.shiftId } });
+      const nextShiftStatus = deriveShiftStatus(fresh.shift.status as never, fresh.shift.requiredWorkers, assignments as never, fresh.shift);
       const confirmedWorkers = assignments.filter((candidate) => candidate.status === 'ASSIGNED').length;
-      await tx.shift.update({ where: { id: assignment.shiftId }, data: { status: nextShiftStatus as never, confirmedWorkers } });
-    }, { isolationLevel: 'Serializable' }));
-    return lifecycle.status;
+      await tx.shift.update({ where: { id: fresh.shiftId }, data: { status: nextShiftStatus as never, confirmedWorkers } });
+      return current.status;
+    });
   }
 
-  async checkIn(workerId: string, shiftId: string, credential: string) {
-    const assignment = await this.prisma.shiftAssignment.findFirst({
-      where: { workerId, shiftId },
-      include: { shift: true },
-    });
-    if (!assignment || ['CANCELLED', 'COMPLETED'].includes(assignment.status)) {
-      throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
-    }
-    const lifecycleStatus = await this.resolveAndPersistLifecycle(assignment);
-    if (lifecycleStatus !== 'ASSIGNED') throw new MarketplaceError('ASSIGNMENT_NOT_ACTIONABLE', 409);
+  /**
+   * Comprobaciones de `checkIn` posteriores al ciclo de vida, sobre una
+   * lectura de la asignación y su turno. Se ejecutan dos veces: sobre la
+   * lectura previa (respuesta rápida y misma cascada de errores de siempre) y
+   * de nuevo sobre la relectura dentro de la transacción reintentable, que es
+   * la que decide. Devuelve la respuesta idempotente si el check-in ya
+   * estaba registrado.
+   */
+  private assertCanCheckIn(
+    assignment: {
+      assignedAt: Date | null;
+      workerConfirmedAt: Date | null;
+      checkedInAt: Date | null;
+      checkInCredential: string | null;
+      shift: { status: string; startsAt: Date; endsAt: Date };
+    },
+    shiftId: string,
+    credential: string,
+  ) {
     // Guard directo contra `endsAt`, independiente de la ventana relativa a
     // `startsAt` (`checkInWindowViolation`/`resolveAndPersistLifecycle`): en
     // un turno más corto que `CHECK_IN_LATE_LIMIT_MS` la ventana por tardanza
@@ -512,20 +600,45 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
     }
     if (assignment.checkedInAt) return { shiftId, checkedInAt: assignment.checkedInAt.toISOString() };
     // La tardanza más allá de la ventana ya la captura `resolveAndPersistLifecycle`
-    // arriba (la asignación pasa a `NO_SHOW` y este método ya retornó
+    // (la asignación pasa a `NO_SHOW` y `checkIn` ya retornó
     // `ASSIGNMENT_NOT_ACTIONABLE`): a este punto solo puede quedar la
     // violación por llegar demasiado temprano.
     if (checkInWindowViolation(assignment.shift, new Date(), assignment.assignedAt) === 'TOO_EARLY') throw new MarketplaceError('CHECK_IN_TOO_EARLY', 409);
     if (!assignment.checkInCredential || credential.trim() !== assignment.checkInCredential) throw new MarketplaceError('INVALID_CHECK_IN', 400);
-    const checkedInAt = new Date();
-    await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
-      await tx.shiftAssignment.update({ where: { id: assignment.id }, data: { checkedInAt } });
+    return null;
+  }
+
+  async checkIn(workerId: string, shiftId: string, credential: string) {
+    const assignment = await this.prisma.shiftAssignment.findFirst({
+      where: { workerId, shiftId },
+      include: { shift: true },
+    });
+    if (!assignment || ['CANCELLED', 'COMPLETED'].includes(assignment.status)) {
+      throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+    }
+    const lifecycleStatus = await this.resolveAndPersistLifecycle(assignment);
+    if (lifecycleStatus !== 'ASSIGNED') throw new MarketplaceError('ASSIGNMENT_NOT_ACTIONABLE', 409);
+    const alreadyCheckedIn = this.assertCanCheckIn(assignment, shiftId, credential);
+    if (alreadyCheckedIn) return alreadyCheckedIn;
+    return this.lockedTransaction(workerId, shiftId, {}, async (tx) => {
+      // La asignación y el turno se releen ya bloqueados y se revalidan: la
+      // lectura de arriba puede estar obsoleta (otro check-in, una
+      // cancelación, un `NO_SHOW`) y no debe aplicarse tal cual. Un segundo check-in simultáneo responde igual que uno
+      // secuencial (`200` con el `checkedInAt` original) y solo hay un
+      // `CHECKED_IN` (CN-20260923-010).
+      const current = await tx.shiftAssignment.findFirst({ where: { workerId, shiftId }, include: { shift: true } });
+      if (!current || ['CANCELLED', 'COMPLETED'].includes(current.status)) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+      if (resolveAssignmentLifecycle(current as never, current.shift).status !== 'ASSIGNED') throw new MarketplaceError('ASSIGNMENT_NOT_ACTIONABLE', 409);
+      const settled = this.assertCanCheckIn(current, shiftId, credential);
+      if (settled) return settled;
+      const checkedInAt = new Date();
+      await tx.shiftAssignment.update({ where: { id: current.id }, data: { checkedInAt } });
       const assignments = await tx.shiftAssignment.findMany({ where: { shiftId } });
-      const status = deriveShiftStatus(assignment.shift.status, assignment.shift.requiredWorkers, assignments, assignment.shift);
+      const status = deriveShiftStatus(current.shift.status as never, current.shift.requiredWorkers, assignments as never, current.shift);
       await tx.shift.update({ where: { id: shiftId }, data: { status } });
       await tx.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'WORKER', type: 'CHECKED_IN' } });
-    }, { isolationLevel: 'Serializable' }));
-    return { shiftId, checkedInAt: checkedInAt.toISOString() };
+      return { shiftId, checkedInAt: checkedInAt.toISOString() };
+    });
   }
 
   async checkOut(workerId: string, shiftId: string) {
@@ -539,26 +652,35 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
     const lifecycleStatus = await this.resolveAndPersistLifecycle(assignment);
     if (lifecycleStatus !== 'ASSIGNED') throw new MarketplaceError('ASSIGNMENT_NOT_ACTIONABLE', 409);
     if (!assignment.checkedInAt) throw new MarketplaceError('SHIFT_UNAVAILABLE', 409);
-    const checkedOutAt = new Date();
-    await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+    return this.lockedTransaction(workerId, shiftId, {}, async (tx) => {
+      // Relectura y revalidación en cada intento (ver `checkIn`): un segundo
+      // check-out simultáneo encuentra la asignación ya `COMPLETED` y responde
+      // `404 ASSIGNMENT_NOT_FOUND`, igual que una llamada secuencial repetida,
+      // sin sobrescribir `completedAt` ni duplicar el `CHECKED_OUT`, el
+      // `COMPLETED` ni el pago (CN-20260923-010).
+      const current = await tx.shiftAssignment.findFirst({ where: { workerId, shiftId }, include: { shift: { include: { company: true } } } });
+      if (!current || ['CANCELLED', 'COMPLETED'].includes(current.status)) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
+      if (resolveAssignmentLifecycle(current as never, current.shift).status !== 'ASSIGNED') throw new MarketplaceError('ASSIGNMENT_NOT_ACTIONABLE', 409);
+      if (!current.checkedInAt) throw new MarketplaceError('SHIFT_UNAVAILABLE', 409);
+      const checkedOutAt = new Date();
       await tx.shiftAssignment.update({
-        where: { id: assignment.id },
+        where: { id: current.id },
         data: { checkedOutAt, completedAt: checkedOutAt, status: 'COMPLETED' },
       });
       const assignments = await tx.shiftAssignment.findMany({ where: { shiftId } });
-      const status = deriveShiftStatus(assignment.shift.status, assignment.shift.requiredWorkers, assignments, assignment.shift);
+      const status = deriveShiftStatus(current.shift.status as never, current.shift.requiredWorkers, assignments as never, current.shift);
       await tx.shift.update({ where: { id: shiftId }, data: { status } });
       await tx.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'WORKER', type: 'CHECKED_OUT' } });
       await tx.payment.upsert({
-        where: { assignmentId: assignment.id },
+        where: { assignmentId: current.id },
         update: {},
         create: {
-          companyId: assignment.shift.companyId,
+          companyId: current.shift.companyId,
           shiftId,
-          assignmentId: assignment.id,
-          reference: `CN-${shiftId.slice(-8).toUpperCase()}-${assignment.id.slice(-8).toUpperCase()}`,
-          description: `${assignment.shift.title} · ${assignment.shift.company.name}`,
-          amountCents: assignment.shift.payCents,
+          assignmentId: current.id,
+          reference: `CN-${shiftId.slice(-8).toUpperCase()}-${current.id.slice(-8).toUpperCase()}`,
+          description: `${current.shift.title} · ${current.shift.company.name}`,
+          amountCents: current.shift.payCents,
           workerCount: 1,
           status: 'PENDING',
           dueAt: checkedOutAt,
@@ -567,13 +689,18 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       if (status === 'COMPLETED') {
         await tx.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'SYSTEM', type: 'COMPLETED' } });
       }
-    }, { isolationLevel: 'Serializable' }));
-    return { shiftId, checkedOutAt: checkedOutAt.toISOString() };
+      return { shiftId, checkedOutAt: checkedOutAt.toISOString() };
+    });
   }
 
   async cancelAssignment(workerId: string, shiftId: string, reason: string) {
     if (reason.trim().length < 3) throw new MarketplaceError('CANCELLATION_NOT_ALLOWED', 400);
-    return this.prisma.$transaction(async (tx) => {
+    // Con bloqueo de filas: cancelar contra un check-in (o contra otra
+    // cancelación) simultáneo tiene un único ganador. La postulación y su
+    // asignación se leen ya bloqueadas; si el check-in gana, la
+    // cancelación responde `409 CANCELLATION_NOT_ALLOWED`, y si gana la
+    // cancelación, el check-in responde `404` (CN-20260923-010).
+    return this.lockedTransaction(workerId, shiftId, { application: true }, async (tx) => {
       const application = await tx.shiftApplication.findFirst({
         where: { workerId, shiftId },
         include: { shift: true, assignment: true },
@@ -818,18 +945,6 @@ function readScreeningAnswers(value: unknown): ScreeningAnswer[] {
 
 function isUniqueConstraintError(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002';
-}
-
-async function withSerializableRetry<T>(operation: () => Promise<T>, maxAttempts = 3): Promise<T> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
-      if (code !== 'P2034' || attempt === maxAttempts) throw error;
-    }
-  }
-  throw new Error('UNREACHABLE');
 }
 
 function industryFor(value: string | null): ShiftIndustry {

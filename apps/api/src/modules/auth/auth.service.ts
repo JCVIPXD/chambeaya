@@ -271,8 +271,12 @@ export class DatabaseAuthService implements AuthService {
       include: { user: true },
     });
     if (!session || session.expiresAt <= new Date()) {
+      // `deleteMany` y no `delete`: dos peticiones simultáneas con el mismo token
+      // vencido leen ambas la sesión; la segunda ya no encuentra la fila y
+      // `delete` fallaría con `P2025` (una `500` en vez del `401` que
+      // corresponde). `deleteMany` es idempotente (CN-20260923-013, BAJO-1).
       if (session)
-        await this.prisma.authSession.delete({ where: { id: session.id } });
+        await this.prisma.authSession.deleteMany({ where: { id: session.id } });
       throw new AuthError("INVALID_SESSION");
     }
     return publicSession(token, this.toAccount(session.user));
@@ -380,7 +384,8 @@ export class DatabaseAuthService implements AuthService {
       include: { user: { include: { externalIdentities: true } } },
     });
     if (!session || session.expiresAt <= new Date()) {
-      if (session) await this.prisma.authSession.delete({ where: { id: session.id } });
+      // Idempotente por la misma razón que en `restore` (CN-20260923-013, BAJO-1).
+      if (session) await this.prisma.authSession.deleteMany({ where: { id: session.id } });
       throw new AuthError('INVALID_SESSION');
     }
     const isGoogleAccount = session.user.externalIdentities.some(

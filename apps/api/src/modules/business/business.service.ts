@@ -11,6 +11,10 @@ import {
 import type { AuthSession } from '../auth/auth.service.js';
 import { companyCanViewApplicantCv } from '../talent/cv_access.js';
 import { deriveShiftStatus, isTerminalShift, nextOperationalAction, resolveAssignmentLifecycle } from '../operations/shift-state.js';
+import { withSerializableRetry } from '../operations/serializable-retry.js';
+
+// Se reexporta para no romper a quien ya lo importaba desde este módulo.
+export { withSerializableRetry };
 
 /**
  * Antes se derivaba solo de `shiftId` (`CUMPLE-${shift.id.slice(-8)}`), así
@@ -202,8 +206,15 @@ export class DatabaseBusinessService implements BusinessOperations {
       // sobre un turno ya `CANCELLED`. `ABANDONED` no hace falta: exige
       // `checkedInAt` no nulo, y ese mismo guard ya rechaza cancelar el
       // turno si existe algún `checkedInAt` no nulo.
-      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: { in: ['ASSIGNED', 'NO_SHOW'] } }, data: { status: 'CANCELLED' } });
+      // ORDEN DE BLOQUEO GLOBAL (CN-20260923-013, MEDIO-1): postulación ->
+      // asignación -> turno, el mismo con que las operaciones del trabajador
+      // (`lockedTransaction` en `marketplace.service.ts`) bloquean sus filas. Antes
+      // esto actualizaba primero las asignaciones y luego las postulaciones: si
+      // el trabajador cancelaba a la vez (postulación y luego asignación),
+      // PostgreSQL detectaba un interbloqueo (`40P01`) tras 1 s y una de las dos
+      // llamadas respondía `500`. Ver `docs/reference/api.md`, "Orden de bloqueo".
       await tx.shiftApplication.updateMany({ where: { shiftId: shift.id, status: { in: ['PENDING', 'ACCEPTED'] } }, data: { status: 'CANCELLED' } });
+      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: { in: ['ASSIGNED', 'NO_SHOW'] } }, data: { status: 'CANCELLED' } });
       await tx.shiftCancellation.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', reason: reason.trim() } });
       await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'CANCELLED', detail: reason.trim() } });
       return tx.shift.update({ where: { id: shift.id }, data: { status: 'CANCELLED', confirmedWorkers: 0 }, include: { company: true } });
@@ -314,7 +325,10 @@ export class DatabaseBusinessService implements BusinessOperations {
     endsAt: Date;
     requiredWorkers: number;
   }) {
-    const assignments = await this.prisma.shiftAssignment.findMany({ where: { shiftId: shift.id } });
+    // Orden por `id`: la transacción de abajo actualiza las asignaciones en este
+    // orden, y dos lecturas concurrentes del mismo turno tienen que tomar las
+    // filas en el mismo orden para no bloquearse en círculo (CN-20260923-013).
+    const assignments = await this.prisma.shiftAssignment.findMany({ where: { shiftId: shift.id }, orderBy: { id: 'asc' } });
     const now = new Date();
     const updates: { id: string; status: 'NO_SHOW' | 'ABANDONED' }[] = [];
     const resolved = assignments.map((assignment) => {
@@ -671,17 +685,4 @@ export class DatabaseBusinessService implements BusinessOperations {
     if (!worker) throw new BusinessRecordNotFoundError('WORKER_NOT_FOUND');
     return worker;
   }
-}
-
-/** Reintenta conflictos de serialización/transacción que pueden ocurrir bajo concurrencia real. */
-export async function withSerializableRetry<T>(operation: () => Promise<T>, maxAttempts = 3): Promise<T> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
-      if (code !== 'P2034' || attempt === maxAttempts) throw error;
-    }
-  }
-  throw new Error('UNREACHABLE');
 }

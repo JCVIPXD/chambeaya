@@ -203,11 +203,11 @@ class FakePrisma {
       const externalIdentities = this.externalIdentities.filter((i) => i.userId === session.userId);
       return { ...session, user: user ? { ...user, externalIdentities } : null };
     },
-    delete: async ({ where }: any) => {
-      const index = this.authSessions.findIndex((s) => s.id === where.id);
-      if (index === -1) throw new Error('FAKE_PRISMA: session not found');
-      const [removed] = this.authSessions.splice(index, 1);
-      return removed;
+    // Como el `deleteMany` real: idempotente, devuelve cuántas filas borró y no falla si ya no hay ninguna.
+    deleteMany: async ({ where }: any) => {
+      const before = this.authSessions.length;
+      this.authSessions = this.authSessions.filter((s) => s.id !== where.id);
+      return { count: before - this.authSessions.length };
     },
   };
 }
@@ -344,6 +344,22 @@ describe('DatabaseAuthService — Google Sign-In flow', () => {
         ),
       ).toBe(true);
       expect(prisma.googleProfileSetups).toHaveLength(0);
+    });
+  });
+
+  describe('restore', () => {
+    it('answers INVALID_SESSION for two simultaneous requests with the same expired token (the second delete finds no row) and removes the session', async () => {
+      // CN-20260923-013, BAJO-1: con `delete` la segunda petición fallaba con
+      // P2025 (una 500 en las rutas del trabajador en vez de 401).
+      const { prisma, service } = createService();
+      const user = prisma.seedUser({ email: 'ana@example.com' });
+      prisma.seedAuthSession({ tokenHash: tokenHash('expired-token'), userId: user.id, expiresAt: new Date(Date.now() - 1000) });
+
+      const results = await Promise.allSettled([service.restore('expired-token'), service.restore('expired-token')]);
+
+      expect(results.map((result) => result.status)).toEqual(['rejected', 'rejected']);
+      for (const result of results) expect((result as PromiseRejectedResult).reason).toMatchObject({ code: 'INVALID_SESSION' });
+      expect(prisma.authSessions).toHaveLength(0);
     });
   });
 
