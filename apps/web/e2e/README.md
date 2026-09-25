@@ -197,6 +197,18 @@ Al agregar un caso, verifica el resultado para el usuario y añade explícitamen
 las respuestas necesarias; evita esperas fijas o respuestas genéricas a cualquier
 petición.
 
+**Fechas de los fixtures: siempre relativas al reloj.** La interfaz compara
+varias fechas con "ahora" (turno vencido, filtro "Esta semana" de los pagos,
+vigencia de invitaciones), así que una fecha literal termina cruzando ese límite
+y la prueba caduca con el paso del tiempo (`assignment-resolution.spec.ts`
+"confirmar que sí trabajó…" falló desde 2026-09-24 por eso, BAJO-1 de
+`CN-20260923-017`). Usa `isoFromNow` de `fixtures/dates.ts` (turno terminado hace
+~25 h en `fixtures/shift-assignments.ts`) y nunca escribas un `'2026-…'`.
+Para comprobar que una prueba no caduca, adelanta a la vez las fechas del fixture
+y el `Date` del navegador (por ejemplo con `page.clock.install({ time })` o un
+`addInitScript`); si solo mueves una de las dos, la prueba falla como si hubiera
+caducado.
+
 ## Ejecución automática en GitHub
 
 `.github/workflows/web-tests.yml` ejecuta estas pruebas en pushes y pull requests

@@ -54,6 +54,119 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260923-019 — Auditoría de `CN-20260923-018` (Alcance F: fechas relativas en los fixtures y prueba permanente de `cancelShift` contra `resolve`)
+
+- Fecha: 2026-09-24 23:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260923-018` (corrección auditada), que cierra MEDIO-1 y BAJO-1 de `CN-20260923-017`. Diff sin commitear sobre `8678e9c`.
+- Alcance:
+  - Revisión independiente del diff completo (11 archivos modificados y `apps/web/e2e/fixtures/dates.ts` nuevo).
+  - Repetí la mutación contra `0eda3b1`, la simulación de paso del tiempo y su control negativo. Añadí corridas en 3 zonas horarias más con horas simuladas junto a la medianoche.
+- Archivos:
+  - Revisados: todo el diff; `apps/web/app/page.tsx` (`periodStart`, recorte de `dueAt`, `isShiftExpired`); `apps/api/src/modules/business/business.service.ts` (`resolveAssignment`, `resolveShiftAssignmentsLifecycle`, `ownedShift`); `apps/web/playwright.config.ts`; las pruebas con fechas fijas que no se cambiaron.
+  - Modificado por la auditoría (solo documentación): `docs/reference/api.md`. Ahora dice que, contra `0eda3b1`, la prueba nueva falla en su primera aserción (`resolve` `200`). El pago y el turno `COMPLETED` son el estado persistido que describe la sonda de `017`; la prueba no los llega a medir.
+  - No se tocaron código de producción, pruebas, `CLAUDE.md` ni `.claude/agents/`.
+- Decisiones (hallazgos):
+  - **Críticos, altos y medios: ninguno.**
+  - **Sin cambios de producción.** El diff no toca `apps/api/src`, `apps/web/app`, `apps/web/lib` ni `apps/mobile_flutter/lib`. No se eliminó ni se debilitó ninguna aserción; los cambios de las pruebas Playwright y Flutter son solo de datos de fixture. Cada prueba sigue verificando lo mismo:
+    - el turno sigue vencido: termina hace 25 h;
+    - el pago sigue dentro de "Esta semana";
+    - las invitaciones mantienen su vigencia: `PENDING` vence dentro de 6 días y `DECLINED` venció hace 14;
+    - en `worker_messages_page_test` todas las conversaciones comparten el mismo `updatedAt`, fijado una sola vez (igual que antes), así que su orden no cambia.
+  - **MEDIO-1 cerrado.**
+    - La prueba nueva reproduce el escenario correcto: `resolve` es el primer toque (comprueba antes que la asignación sigue `ASSIGNED`).
+    - La pausa cae en la lectura previa `shiftAssignment.findMany` de `resolveShiftAssignmentsLifecycle`. Es la primera `findMany` del cliente pausado en ese camino: `ownedShift` usa `shift.findFirst`, y la autenticación y `cancelShift` usan el cliente sin pausa.
+    - Es determinista (barrera, sin azar) y exige todo lo pedido.
+    - No es tautológica: con `business.service.ts` de `0eda3b1` da `Tests 4 failed | 1 passed (5)`, y la nueva falla con `expected 200 to be 400` (la respuesta trae `status: COMPLETED`). Restaurado y comprobado con `cmp` y `git diff --quiet`.
+  - **BAJO-1 cerrado.** No quedan fechas literales en `apps/web/e2e` ni en `apps/web/e2e-real`. Las que siguen fijas en Flutter no se comparan con "ahora":
+    - `marketplace_data_test.dart`: solo compara igualdad de valores;
+    - `marketplace_repository_test.dart`: `createdAt`/`updatedAt`/`workerConfirmedAt`/`checkedInAt` históricos, mientras que los `endsAt` que sí dependen del reloj ya eran relativos.
+    - Las unitarias del API con fechas fijas pasan un `now` explícito (`shift-state`) o usan `useFakeTimers` (`marketplace.service`, `talent_invitations.routes`, `business.service`).
+  - **Margen frente al recorte de `dueAt` (producción, fuera de alcance).** `new Date('AAAA-MM-DD')` es medianoche UTC, así que `dueAt` recortado queda entre hace 25 h y hace 49 h. `periodStart` es "ahora − 7 días", y las dos comparaciones son instantes absolutos. El margen es de al menos ~119 h a cualquier hora y en cualquier zona horaria (en zonas con horario de verano, ±1 h). Lo confirmé empíricamente (ver Validaciones).
+  - **Observación (informativa, no es defecto).** `activeSubscription`/`proSubscription` de `business-api.ts` son constantes de módulo: su `startsAt` se evalúa al cargar el módulo, no por llamada. Con −23 días y ninguna comparación contra "ahora", es irrelevante.
+  - **Recomendación (no implementada): una guardia automática barata.** Una comprobación en CI (por ejemplo, un paso con `rg` o una regla ESLint `no-restricted-syntax` sobre literales `/^\d{4}-\d{2}-\d{2}/` en `apps/web/e2e/**`) y otra equivalente para `DateTime(20..`/`'20..-..-..` en `apps/mobile_flutter/test`. Ambas con una lista de excepciones explícita (`marketplace_data_test`, fechas históricas de `marketplace_repository_test`) o un comentario de exención por línea. Es preferible a depender solo de la regla del README.
+- Validaciones (base `chambeaya_test` de `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la de desarrollo; el contenedor ya estaba arriba):
+  - `npx prisma migrate deploy` → `No pending migrations to apply.`
+  - `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - `npm test` en la raíz → API `Test Files 21 passed (21)`, `Tests 341 passed (341)`; Playwright `1 skipped`, `103 passed (2.8m)`, `EXIT=0`.
+  - Mutación con `business.service.ts` de `0eda3b1` → ver MEDIO-1.
+  - Simulación temporal propia (retirada después): `SIM_FIXTURE_MS` en `isoFromNow`, `addInitScript` que desplaza `Date` en el contexto, `page.clock.install({ time })` en las 4 pruebas que usan el reloj y `timezoneId` en la configuración. Suite Playwright completa en cada caso, todos con `1 skipped`, `103 passed`:
+    - +30 días;
+    - +365 días;
+    - UTC a las 00:05 y a las 23:55 (`TZ=UTC`);
+    - `America/Lima` a las 23:55 y a las 00:05;
+    - `Pacific/Kiritimati` (UTC+14) a las 00:05;
+    - `Pacific/Pago_Pago` (UTC−11) a las 23:55.
+  - Control negativo (solo el navegador +30 días): `assignment-resolution.spec.ts:60` → `2 failed` (escritorio y móvil). Falla en la línea 109 (`getByText('Mozo de salón · Empresa de pruebas UI')` en Pagos), el mismo punto que la caducidad original. Con el mismo desplazamiento en fixture y navegador → `2 passed`.
+  - `npm run test:integration` (en `apps/api`), 3 corridas completas → las 3 con `Test Files 11 passed (11)`, `Tests 77 passed (77)` (143–164 s).
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (43.0s)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (solo `info`, los de siempre).
+  - Limpieza:
+    - `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`;
+    - `apps/web/next-env.d.ts` restaurado con `git checkout`;
+    - borrados `apps/web/test-results` y los temporales (respaldos, scripts y registros de la simulación);
+    - la simulación, revertida (`cmp` y `git diff --quiet` sobre los archivos tocados, sin `SIM_` en el árbol).
+    - Sin commit.
+  - No ejecutadas:
+    - adelantar el reloj en Flutter (no hay mecanismo equivalente; las fechas son relativas a `DateTime.now()`);
+    - ejecutar las unitarias del API con fechas fijas bajo un reloj adelantado (solo lectura);
+    - `CHAMBEAYA_LOAD_WORKERS=20`;
+    - Flutter contra la API real o en un dispositivo;
+    - una zona horaria con horario de verano en el día del cambio.
+- Riesgos:
+  - No hay guardia automática contra fechas literales nuevas en los fixtures (ver la recomendación).
+  - El recorte de `dueAt` a fecha en `app/page.tsx` sigue desplazando el filtro unas horas (producción, fuera de alcance). El fixture tiene un margen de días, así que no afecta a las pruebas.
+  - Siguen abiertos, sin cambios, los pendientes que enumera `CN-20260923-018`, entre ellos las rutas de empresa probabilísticas con 20 o más llamadas, el bloqueo en `acceptShift`/`applyToShift`, el `upsert` de `companyFor` y la dependencia del formato de Prisma 6.
+- Siguiente paso:
+  - `CN-20260923-018` queda cerrado; el coordinador puede commitear el diff.
+  - Opcional: `implementador-sonnet` añade la guardia automática contra fechas literales y, aparte, corrige el recorte de `dueAt` en `app/page.tsx`.
+
+### CN-20260923-018 — Alcance F: cierre de BAJO-1 (fechas relativas en los fixtures de Playwright y Flutter) y MEDIO-1 (prueba permanente de `cancelShift` contra `resolve` como primer toque) de `CN-20260923-017`
+
+- Fecha: 2026-09-24 21:00 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260923-017` (auditoría APROBADO con MEDIO-1 y BAJO-1) y `CN-20260923-016` (corrección auditada, sin cambios). Diff sin commitear sobre `8678e9c`. No se toca código de producción.
+- Alcance:
+  - **BAJO-1.** Los fixtures de `apps/web/e2e` dejan de usar fechas literales; todas son relativas al reloj mediante el nuevo `fixtures/dates.ts` (`isoFromNow`, evaluado en cada llamada):
+    - `shift-assignments.ts`: el turno terminó hace 25 h (empezó hace 30 h), siempre en el pasado; el pago vence al terminar el turno (`dueAt = shift.endsAt`), así que cae dentro de "Esta semana"; `workerConfirmedAt`, `checkedInAt`, `checkedOutAt`, `createdAt`, `updatedAt` y `assignedAt` cuelgan de esas referencias;
+    - `business-api.ts`: `startsAt` de las suscripciones `TRIAL` y `PRO` (hace 23 días);
+    - `talent-invite.spec.ts`: `createdAt` (ayer) y `expiresAt` (en 6 días) de la invitación en sus 3 casos.
+  - `apps/web/e2e-real` ya era relativo (`business-real.ts`, `Date.now()`); no cambió. Flutter: `talent_invitation_repository_test.dart` (fechas de invitaciones y turno, ahora relativas), `worker_messages_page_test.dart` (`updatedAt` de las conversaciones, fijado una vez a hace 3 días) y `profile_home_page_test.dart` (`updatedAt` del CV). Ya eran relativas las de `worker_invitations_page_test.dart` y las que dependen de `endsAt`/`expiresAt` de `marketplace_repository_test.dart` (`CN-20260923-002/003`). No se debilita ninguna aserción.
+  - **MEDIO-1.** Prueba nueva en `apps/api/tests/integration/business-lifecycle-revalidation.integration.test.ts`: `resolve` (con `COMPLETED`) como primer toque de una asignación vencida aún `ASSIGNED`, con su lectura previa pausada; `cancelShift` de la empresa se confirma dentro de la barrera; exige `cancel=200`, `resolve=400 ASSIGNMENT_NOT_RESOLVABLE`, 0 pagos, turno y asignación `CANCELLED`, `confirmedWorkers=0`, exactamente 1 `ShiftCancellation` de la empresa, ningún evento `COMPLETED` ni `SYSTEM`.
+- Archivos:
+  - Nuevo: `apps/web/e2e/fixtures/dates.ts`.
+  - Modificados: `apps/web/e2e/fixtures/shift-assignments.ts`, `apps/web/e2e/fixtures/business-api.ts`, `apps/web/e2e/talent-invite.spec.ts`, `apps/web/e2e/README.md` (regla "fechas de los fixtures siempre relativas al reloj" y cómo comprobarla), `apps/api/tests/integration/business-lifecycle-revalidation.integration.test.ts`, `apps/mobile_flutter/test/talent_invitation_repository_test.dart`, `apps/mobile_flutter/test/worker_messages_page_test.dart`, `apps/mobile_flutter/test/profile_home_page_test.dart`.
+  - Documentación: `docs/reference/api.md` (la nota de alcance de `cancel`/`resolve` y la cobertura del ciclo de vida citan la prueba nueva; "fallan 4 de 5") y `docs/product/project-master-plan.md` (Alcance E, quita "sin prueba permanente propia todavía").
+- Decisiones:
+  1. **Turno de hace 25 h, no de fecha fija.** Debe seguir vencido (los casos son de `NO_SHOW`/`ABANDONED` en un turno terminado) y su pago dentro de la ventana de 7 días del filtro "Esta semana" aunque `app/page.tsx` recorte `dueAt` a fecha (medianoche UTC, hasta 24 h antes): 25 h + 24 h queda muy por debajo de 7 días. El recorte de `dueAt` (desplaza el filtro unas horas en UTC−5) es código de producción y queda fuera de este alcance.
+  2. **Comprobación de que no caducan.** Simulación temporal (ya retirada) que adelanta a la vez las fechas del fixture (`Date.now() + N días` en `isoFromNow`) y el `Date` del navegador (`addInitScript` que desplaza `Date`, y `page.clock.install({ time })` en las 4 pruebas que ya usan el reloj de Playwright). Suite completa a +30 días y a +365 días. Control negativo: adelantando solo el navegador (fixture con reloj real), `assignment-resolution.spec.ts:60` falla en escritorio y móvil, como la caducidad original; la simulación no es un no-op.
+  3. **Flutter no se pudo adelantar el reloj**: las fechas son relativas a `DateTime.now()` (`relativeIso`, `_staleUpdatedAt`), así que no dependen de la fecha; no hay simulación equivalente y se declara como tal. `marketplace_data_test.dart` (fechas fijas solo para comparar igualdad de valores) y `createdAt`/`updatedAt` históricos de `marketplace_repository_test.dart` (nunca se comparan con "ahora") se revisaron y se dejaron.
+  4. **Pruebas unitarias del API con fechas fijas** (`shift-state.test.ts`, `business.service.test.ts`, `marketplace.service.test.ts`, `talent_invitations.routes.test.ts`): revisadas solo por lectura, pasan el `now` explícito o usan `useFakeTimers`; no se modificaron ni se simularon.
+  5. **MEDIO-1 reutiliza `pauseAssignmentRead`.** La pausa cuelga de la primera lectura `shiftAssignment.findMany` fuera de transacción del cliente de la empresa, que en `resolve` es la lectura previa del ciclo de vida (`ownedShift` no usa esa lectura). La prueba comprueba antes que la asignación sigue `ASSIGNED` en la base para que sea de verdad el primer toque.
+  6. **Mutación** (contra `business.service.ts` de `0eda3b1`, restaurado y comprobado con `cmp`; en esta rama `HEAD` ya contiene la corrección `016`): `business-lifecycle-revalidation` → `Tests 4 failed | 1 passed (5)`. La prueba nueva falla con `resolve` `200` (`expected 200 to be 400`, la respuesta trae `status: COMPLETED`); también fallan las tres de `016`. Con el código actual: `Tests 5 passed (5)`.
+- Validaciones (base `chambeaya_test` de `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la de desarrollo; el contenedor ya estaba arriba):
+  - `npx prisma migrate deploy` → `No pending migrations to apply.`
+  - `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - Causa del BAJO-1 no reejecutada antes de editar (el fallo de `assignment-resolution.spec.ts:60` en escritorio y móvil es el documentado por `CN-20260923-017`); el control negativo de la decisión 2 la reproduce con el fixture nuevo y el reloj del navegador adelantado 30 días (`2 failed`, los mismos dos proyectos).
+  - `npm test` en la raíz → API `Test Files 21 passed (21)`, `Tests 341 passed (341)`; Playwright `1 skipped`, `103 passed (2.9m)`, 0 fallos.
+  - Playwright completo con el reloj adelantado (simulación temporal): +30 días → `1 skipped`, `103 passed (3.2m)`; +365 días → `1 skipped`, `103 passed (3.1m)`.
+  - `npm run test:integration` (en `apps/api`), 3 corridas completas → las 3 con `Test Files 11 passed (11)`, `Tests 77 passed (77)`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (56.7s)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (los mismos `info` de siempre; ningún `error` ni `warning`).
+  - Limpieza: `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`; `apps/web/next-env.d.ts` restaurado con `git checkout`; `apps/web/test-results` y los archivos temporales (copias de respaldo, registros de la simulación) borrados; la simulación revertida (sin `SIM_DAYS` en el árbol). Sin commit.
+  - No ejecutadas: adelantar el reloj en Flutter (no hay mecanismo equivalente; las fechas son relativas a `DateTime.now()`); la medición estricta con `CHAMBEAYA_LOAD_WORKERS=20`; Flutter contra la API real o en un dispositivo.
+- Riesgos:
+  - El README de `e2e` describe la regla y cómo simularla, pero no hay una comprobación automática que rechace una fecha literal nueva en un fixture; depende de la revisión.
+  - El recorte de `dueAt` a fecha en `app/page.tsx` sigue desplazando el filtro de periodo unas horas en UTC−5 (producción, fuera de alcance); el fixture queda a 25 h del corte, lejos de ese borde.
+  - Las pruebas unitarias del API con fechas fijas solo se revisaron por lectura.
+  - Siguen abiertos y sin tocar los pendientes de `CN-20260923-017`: rutas de empresa probabilísticas con 20 o más llamadas simultáneas, bloqueo de filas en `acceptShift`/`applyToShift`, el `upsert` de `companyFor`, BAJO-1 y BAJO-2 de `CN-20260923-011`, dependencia del formato de mensaje de Prisma 6 y margen del interbloqueo forzado con `deadlock_timeout` menor de ~100 ms; y los datos posiblemente inconsistentes de una base que haya corrido código anterior a `016` (no verificado).
+- Siguiente paso:
+  - `auditor-opus` reaudita `CN-20260923-018` (diff completo sobre `8678e9c`); si aprueba, el coordinador puede commitear.
+
 ### CN-20260923-017 — Auditoría de `CN-20260923-016` (Alcance E: `testTimeout`, robustez de `worker-company-lock-order` y revalidación de `resolveShiftAssignmentsLifecycle`)
 
 - Fecha: 2026-09-24 20:50 (America/Lima)

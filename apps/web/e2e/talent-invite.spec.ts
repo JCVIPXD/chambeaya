@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import { account, expect, test } from './fixtures/business-api';
+import { DAY_MS, isoFromNow } from './fixtures/dates';
 
 // Covers Alcance 5b (CN-20260915-079 → 5b): the "Invitar" button on a talent
 // card must call the real POST route and reflect its actual response, never
@@ -55,9 +56,9 @@ test('envía una invitación real y la refleja en "Invitaciones enviadas" solo t
         id: 'invitation-1',
         status: 'PENDING',
         message: null,
-        expiresAt: '2026-09-23T00:00:00.000Z',
+        expiresAt: isoFromNow(6 * DAY_MS),
         respondedAt: null,
-        createdAt: '2026-09-16T00:00:00.000Z',
+        createdAt: isoFromNow(-1 * DAY_MS),
         shift: null,
         workerTalentProfileId: talentCard.id,
         workerName: talentCard.name,
@@ -112,9 +113,9 @@ test('una carga en vuelo del listado de invitaciones no revierte una invitación
         id: 'invitation-race-1',
         status: 'PENDING',
         message: null,
-        expiresAt: '2026-09-23T00:00:00.000Z',
+        expiresAt: isoFromNow(6 * DAY_MS),
         respondedAt: null,
-        createdAt: '2026-09-16T00:00:00.000Z',
+        createdAt: isoFromNow(-1 * DAY_MS),
         shift: null,
         workerTalentProfileId: talentCard.id,
         workerName: talentCard.name,
@@ -178,9 +179,9 @@ test('cerrar sesión limpia el listado de invitaciones y el estado del botón an
         id: 'invitation-logout-1',
         status: 'PENDING',
         message: null,
-        expiresAt: '2026-09-23T00:00:00.000Z',
+        expiresAt: isoFromNow(6 * DAY_MS),
         respondedAt: null,
-        createdAt: '2026-09-16T00:00:00.000Z',
+        createdAt: isoFromNow(-1 * DAY_MS),
         shift: null,
         workerTalentProfileId: talentCard.id,
         workerName: talentCard.name,

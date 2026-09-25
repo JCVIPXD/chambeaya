@@ -274,7 +274,7 @@ void main() {
       originalName: 'cv-ana.pdf',
       mediaType: 'application/pdf',
       sizeBytes: 1200,
-      updatedAt: DateTime(2026, 9, 21),
+      updatedAt: DateTime.now().subtract(const Duration(days: 3)),
     );
 
     testWidgets('visible profile: only companies she applies to can open it', (

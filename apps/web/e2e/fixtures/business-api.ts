@@ -1,5 +1,6 @@
 import { test as base, expect } from '@playwright/test';
 import type { BusinessSession, CompanyRecord, SubscriptionRecord } from '../../lib/business-api';
+import { DAY_MS, isoFromNow } from './dates';
 
 // Synthetic identities only. These credentials do not belong to an API account.
 export const account = {
@@ -31,7 +32,7 @@ const activeSubscription: SubscriptionRecord = {
   id: 'browser-test-subscription',
   plan: 'PILOT',
   status: 'TRIAL',
-  startsAt: '2026-09-01T00:00:00.000Z',
+  startsAt: isoFromNow(-23 * DAY_MS),
   endsAt: null,
   trialEndsAt: null,
 };
@@ -53,7 +54,7 @@ export const proSubscription: SubscriptionRecord = {
   id: 'browser-test-subscription-pro',
   plan: 'PRO',
   status: 'ACTIVE',
-  startsAt: '2026-09-01T00:00:00.000Z',
+  startsAt: isoFromNow(-23 * DAY_MS),
   endsAt: null,
   trialEndsAt: null,
 };

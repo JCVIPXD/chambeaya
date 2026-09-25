@@ -1038,7 +1038,8 @@ Pendientes conocidos, por prioridad sugerida:
     `cancelShift` y a `resolve` (pago sobre un turno cancelado por la empresa) cuando `resolve`
     era el primer toque de una asignación vencida aún `ASSIGNED`; la garantía de
     `CN-20260923-008/009` solo valía para un `NO_SHOW` ya persistido hasta esta corrección, que
-    también cierra ese caso (sin prueba permanente propia todavía; ver `docs/reference/api.md`). Siguen
+    también cierra ese caso, que tiene prueba permanente desde `CN-20260923-018`
+    (`business-lifecycle-revalidation.integration.test.ts`; ver `docs/reference/api.md`). Siguen
     abiertos, fuera de alcance: rutas de empresa probabilísticas con 20 o más llamadas
     simultáneas, bloqueo de filas en `acceptShift`/`applyToShift` y el `upsert` de `companyFor`
     que puede dar `409` en la primera ráfaga de una empresa nueva.

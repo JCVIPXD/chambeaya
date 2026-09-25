@@ -431,12 +431,19 @@ void _goForeground(WidgetTester tester) {
 Future<void> _unmount(WidgetTester tester) =>
     tester.pumpWidget(const SizedBox.shrink());
 
+// Fija una sola vez (los inicializadores de nivel superior son perezosos) un
+// instante de hace 3 días, para que todas las conversaciones compartan
+// `updatedAt` y su etiqueta no dependa de una fecha calendario fija.
+final DateTime _staleUpdatedAt = DateTime.now().subtract(
+  const Duration(days: 3),
+);
+
 WorkerConversationRecord _conversation(String id, String company) =>
     WorkerConversationRecord(
       id: id,
       company: company,
       subject: 'Postulación · Mozo de Salón',
-      updatedAt: DateTime(2026, 9, 18, 12),
+      updatedAt: _staleUpdatedAt,
       messages: const [],
     );
 

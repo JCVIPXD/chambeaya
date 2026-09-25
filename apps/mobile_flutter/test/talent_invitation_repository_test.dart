@@ -4,6 +4,12 @@ import 'package:chambeaya_mobile/features/profile/talent_invitation_repository.d
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
+/// ISO-8601 (UTC) de `ahora + offset`. Las fechas de estas pruebas son siempre
+/// relativas al reloj real: `isRespondable` compara `expiresAt` con "ahora" y
+/// una fecha fija cruza ese límite con el paso del tiempo (CN-20260923-017).
+String relativeIso(Duration offset) =>
+    DateTime.now().add(offset).toUtc().toIso8601String();
+
 void main() {
   test(
     'HTTP repository lists invitations with the worker session token',
@@ -26,12 +32,12 @@ void main() {
                       'message': 'Queremos contar contigo',
                       'expiresAt': futureExpiry,
                       'respondedAt': null,
-                      'createdAt': '2026-09-16T00:00:00.000Z',
+                      'createdAt': relativeIso(const Duration(days: -1)),
                       'shift': {
                         'id': 'shift-1',
                         'title': 'Mozo de salón',
-                        'startsAt': '2026-09-20T18:00:00.000Z',
-                        'endsAt': '2026-09-21T00:00:00.000Z',
+                        'startsAt': relativeIso(const Duration(days: 3)),
+                        'endsAt': relativeIso(const Duration(days: 3, hours: 6)),
                       },
                       'companyId': 'company-1',
                       'companyName': 'Restaurante La Mar',
@@ -40,9 +46,9 @@ void main() {
                       'id': 'invitation-2',
                       'status': 'DECLINED',
                       'message': null,
-                      'expiresAt': '2026-09-10T00:00:00.000Z',
-                      'respondedAt': '2026-09-09T00:00:00.000Z',
-                      'createdAt': '2026-09-02T00:00:00.000Z',
+                      'expiresAt': relativeIso(const Duration(days: -14)),
+                      'respondedAt': relativeIso(const Duration(days: -15)),
+                      'createdAt': relativeIso(const Duration(days: -22)),
                       'shift': null,
                       'companyId': 'company-2',
                       'companyName': 'Eventos Perú',
@@ -88,9 +94,9 @@ void main() {
                     'id': 'invitation-1',
                     'status': 'ACCEPTED',
                     'message': null,
-                    'expiresAt': '2026-09-23T00:00:00.000Z',
-                    'respondedAt': '2026-09-16T12:00:00.000Z',
-                    'createdAt': '2026-09-16T00:00:00.000Z',
+                    'expiresAt': relativeIso(const Duration(days: 6)),
+                    'respondedAt': relativeIso(const Duration(hours: -12)),
+                    'createdAt': relativeIso(const Duration(days: -1)),
                     'shift': null,
                     'companyId': 'company-1',
                     'companyName': 'Restaurante La Mar',
@@ -183,7 +189,7 @@ void main() {
       'message': null,
       'expiresAt': expiresAt.toUtc().toIso8601String(),
       'respondedAt': null,
-      'createdAt': '2026-09-01T00:00:00.000Z',
+      'createdAt': relativeIso(const Duration(days: -23)),
       'shift': null,
       'companyId': 'company-1',
       'companyName': 'Restaurante La Mar',

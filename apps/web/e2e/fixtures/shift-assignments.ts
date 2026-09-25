@@ -6,19 +6,28 @@ import type {
   ShiftApplicationRecord,
   ShiftRecord,
 } from '../../lib/business-api';
+import { DAY_MS, HOUR_MS, isoFromNow } from './dates';
 
 // API simulada (con estado) de un turno con postulaciones y del cierre manual
 // de asignaciones `NO_SHOW`/`ABANDONED`. Se instala encima del fixture base
 // (`business-api.ts`) con `page.route`, que tiene prioridad sobre su
 // `context.route`; todo lo que no se define aquí cae al fixture base.
+//
+// Todas las fechas son relativas a "ahora" (`./dates`): el turno terminó hace
+// ~25 h, dentro de la ventana "Esta semana" del filtro de pagos y siempre en el
+// pasado (un turno vencido, que es el escenario de estas pruebas). Con fechas
+// fijas la prueba caducaba cuando el pago salía de esa ventana (BAJO-1 de
+// CN-20260923-017). Se evalúan en cada llamada, no al cargar el módulo.
+const SHIFT_STARTS_MS = -30 * HOUR_MS;
+const SHIFT_ENDS_MS = -25 * HOUR_MS;
 
 export function buildShift(overrides: Partial<ShiftRecord> = {}): ShiftRecord {
   return {
     id: 'shift-resolution-1',
     title: 'Mozo de salón',
     location: 'Miraflores',
-    startsAt: '2026-09-18T15:00:00.000Z',
-    endsAt: '2026-09-18T20:00:00.000Z',
+    startsAt: isoFromNow(SHIFT_STARTS_MS),
+    endsAt: isoFromNow(SHIFT_ENDS_MS),
     payCents: 12000,
     requiredWorkers: 1,
     confirmedWorkers: 0,
@@ -59,17 +68,17 @@ export function buildApplication(input: {
     id: `assignment-${input.id}`,
     status: input.assignmentStatus,
     checkInCredential: null,
-    workerConfirmedAt: '2026-09-18T14:00:00.000Z',
-    checkedInAt: input.assignmentStatus === 'ABANDONED' || input.assignmentStatus === 'COMPLETED' ? '2026-09-18T15:05:00.000Z' : null,
-    checkedOutAt: input.assignmentStatus === 'COMPLETED' ? '2026-09-18T20:00:00.000Z' : null,
+    workerConfirmedAt: isoFromNow(SHIFT_STARTS_MS - HOUR_MS),
+    checkedInAt: input.assignmentStatus === 'ABANDONED' || input.assignmentStatus === 'COMPLETED' ? isoFromNow(SHIFT_STARTS_MS + 5 * 60_000) : null,
+    checkedOutAt: input.assignmentStatus === 'COMPLETED' ? isoFromNow(SHIFT_ENDS_MS) : null,
   };
   return {
     id: input.id,
     shiftId,
     workerId: `worker-${input.id}`,
     status: input.applicationStatus ?? 'ACCEPTED',
-    createdAt: '2026-09-17T10:00:00.000Z',
-    updatedAt: '2026-09-17T10:00:00.000Z',
+    createdAt: isoFromNow(-2 * DAY_MS),
+    updatedAt: isoFromNow(-2 * DAY_MS),
     screeningAnswers: null,
     worker: { id: `worker-${input.id}`, name: input.workerName, email: `${input.id}@example.test`, identifier: '70000000', hasCv: input.hasCv ?? false },
     assignment: pendingReview ? null : assignment,
@@ -140,9 +149,10 @@ function paymentFor(shift: ShiftRecord, application: ShiftApplicationRecord): Pa
     amountCents: shift.payCents,
     workerCount: 1,
     status: 'PENDING',
-    dueAt: '2026-09-18T20:00:00.000Z',
+    // Vence al terminar el turno: cae dentro de "Esta semana" (`app/page.tsx`).
+    dueAt: shift.endsAt,
     processedAt: null,
-    createdAt: '2026-09-18T20:00:00.000Z',
+    createdAt: shift.endsAt,
     shift: { id: shift.id, title: shift.title, startsAt: shift.startsAt, endsAt: shift.endsAt },
     assignment: { id: application.assignment!.id, status: 'COMPLETED', worker: { id: application.workerId, name: application.worker.name, email: application.worker.email } },
     workerConfirmedAt: null,
@@ -308,7 +318,7 @@ export async function installShiftAssignmentsApi(
         if (!pending && completedCount > 0) server.shift.status = 'COMPLETED';
       }
       await route.fulfill({
-        json: { ...application.assignment, shiftId: input.shift.id, workerId: application.workerId, applicationId: application.id, assignedAt: '2026-09-17T10:00:00.000Z', completedAt: null },
+        json: { ...application.assignment, shiftId: input.shift.id, workerId: application.workerId, applicationId: application.id, assignedAt: isoFromNow(-2 * DAY_MS), completedAt: null },
       });
     } else {
       // Cualquier otra ruta de negocio (empresa, pendientes, mensajes, ...)

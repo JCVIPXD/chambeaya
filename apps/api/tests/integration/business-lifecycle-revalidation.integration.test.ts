@@ -22,6 +22,8 @@ import { DatabaseMarketplaceService } from '../../src/modules/marketplace/market
 // asignaciones (la del cliente sin transacción), deja obsoleta esa lectura; la
 // operación concurrente se hace y termina dentro de la pausa. Con la corrección
 // la escritura relee y revalida dentro de su transacción y no cambia nada.
+// Incluye el caso más grave: `resolve` como primer toque de una asignación
+// vencida aún `ASSIGNED` frente a `cancelShift` de la empresa (CN-20260923-017).
 // Solo corre con opt-in explícito y contra una base cuyo nombre termina en
 // `_test` (mismo guardia que el resto de `tests/integration`).
 const integrationDatabaseUrl = process.env.DATABASE_URL;
@@ -251,6 +253,47 @@ describe('the company lifecycle revalidates inside its transaction before writin
     expect(shift.status, 'a cancelled shift must not be reopened by a stale lifecycle decision').toBe('CANCELLED');
     expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: setup.assignmentId } })).status).toBe('CANCELLED');
     expect(await systemEvents(setup.shiftId)).toBe(0);
+  });
+
+  // El caso más grave del defecto (MEDIO-1 de CN-20260923-017): `resolve` como
+  // PRIMER toque de una asignación vencida que sigue `ASSIGNED`. Su ciclo de
+  // vida leyó `ASSIGNED` y va a escribir `NO_SHOW`; la empresa cancela el turno
+  // (`cancelShift`) y termina dentro de la pausa. Antes de CN-20260923-016 el
+  // ciclo de vida pisaba la cancelación (`NO_SHOW`, turno `PUBLISHED`) y el
+  // `resolve` posterior lo cerraba con pago: `cancel=200 resolve=200`, 1 pago,
+  // turno `COMPLETED` con su cancelación registrada. Debe quedar todo cancelado.
+  it('a company cancelShift confirmed while resolve is the first touch of an overdue ASSIGNED assignment leaves everything CANCELLED with no payment', async () => {
+    const setup = await overdueAssignedShift();
+    const { app, pause } = businessAppWithPause(1);
+
+    // `resolve` es el primer toque: la asignación sigue `ASSIGNED` en la base.
+    expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: setup.assignmentId } })).status).toBe('ASSIGNED');
+    const resolving = request(app)
+      .post(`/api/business/shifts/${setup.shiftId}/assignments/${setup.assignmentId}/resolve`)
+      .set('Authorization', `Bearer ${businessToken}`)
+      .send({ outcome: 'COMPLETED' })
+      .then((response) => response);
+    await pause.waitReached();
+    // Dentro de la barrera: la lectura previa del ciclo de vida ya vio `ASSIGNED`
+    // y `cancelShift` (empresa) se confirma completo antes de que siga.
+    const cancel = await request(plainApp)
+      .post(`/api/business/shifts/${setup.shiftId}/cancel`)
+      .set('Authorization', `Bearer ${businessToken}`)
+      .send({ reason: 'La empresa ya no necesita el turno' });
+    expect(cancel.status, JSON.stringify(cancel.body)).toBe(200);
+    pause.release();
+    const resolved = await resolving;
+
+    expect(resolved.status, JSON.stringify(resolved.body)).toBe(400);
+    expect(resolved.body).toMatchObject({ error: 'ASSIGNMENT_NOT_RESOLVABLE' });
+    expect(await verifier.payment.count({ where: { shiftId: setup.shiftId } }), 'a cancelled shift must not generate a payment').toBe(0);
+    const shift = await verifier.shift.findUniqueOrThrow({ where: { id: setup.shiftId } });
+    expect(shift.status, 'the shift must not end COMPLETED with its cancellation recorded').toBe('CANCELLED');
+    expect(shift.confirmedWorkers).toBe(0);
+    expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: setup.assignmentId } })).status).toBe('CANCELLED');
+    expect(await verifier.shiftCancellation.count({ where: { shiftId: setup.shiftId, actorRole: 'BUSINESS' } })).toBe(1);
+    expect(await verifier.shiftEvent.count({ where: { shiftId: setup.shiftId, type: 'COMPLETED' } })).toBe(0);
+    expect(await systemEvents(setup.shiftId), 'no automatic NO_SHOW transition may be recorded over the cancellation').toBe(0);
   });
 
   it('two lifecycle resolutions that both read ASSIGNED before either writes record a single NO_SHOW transition', async () => {
