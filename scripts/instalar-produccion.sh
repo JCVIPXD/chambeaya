@@ -21,11 +21,13 @@ ENV_FILE="$PROJECT_DIR/.env.production"
 NGINX_TEMPLATE="$PROJECT_DIR/deploy/nginx/chambeaya.conf.template"
 NGINX_SITE_NAME="chambeaya.conf"
 NEXT_BASE_PATH_VALUE="/empresas"
+PROJECT_NAME="chambeaya-production"
 
 DOMAIN=""
 CERTBOT_FLAG=0
 YES_FLAG=0
 FORCE_NGINX=0
+ADMIN_EMAIL=""
 
 usage() {
   cat <<'EOF'
@@ -39,6 +41,9 @@ Uso: sudo ./scripts/instalar-produccion.sh [opciones]
   --force-nginx      reemplaza un chambeaya.conf ya instalado aunque tenga
                       bloques de Certbot (hace copia de seguridad antes; sin
                       este flag, si detecta Certbot y algo cambió, no lo toca)
+  --admin-email CORREO  correo del primer superadmin (rol ADMIN); si no existe
+                      ningún superadmin todavía, se crea con este correo al
+                      final de la instalación, en modo no interactivo
   -h, --help         muestra esta ayuda
 
 Sin el dominio por flag, el script lo pide de forma interactiva. Se acepta
@@ -48,7 +53,9 @@ Si se pasa por flag, el script no hace ninguna pregunta sobre el dominio.
 
 Es idempotente: si .env.production ya existe, reutiliza la contraseña de
 PostgreSQL y los puertos ya elegidos (nunca los regenera) y solo actualiza la
-configuración de Nginx del host con el dominio indicado.
+configuración de Nginx del host con el dominio indicado. Tampoco crea un
+segundo superadmin ni cambia la contraseña del que ya exista: --admin-email
+solo tiene efecto si todavía no hay ninguno.
 
 TODAS las validaciones (formato del dominio, choques de server_name con otro
 sitio de Nginx, presencia de Nginx) se hacen antes de escribir nada en disco:
@@ -63,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --certbot) CERTBOT_FLAG=1; shift ;;
     -y|--yes) YES_FLAG=1; shift ;;
     --force-nginx) FORCE_NGINX=1; shift ;;
+    --admin-email) [[ $# -ge 2 ]] || { echo "Falta el valor de --admin-email" >&2; exit 2; }; ADMIN_EMAIL="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Opción desconocida: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -618,7 +626,64 @@ fi
 log "Construyendo y levantando los servicios con scripts/deploy-hosting.sh..."
 "$PROJECT_DIR/scripts/deploy-hosting.sh"
 
-# --- 7. Resumen -------------------------------------------------------------
+# --- 7. Primer superadmin (solo si todavía no existe ninguno) --------------
+# La base de datos arranca vacía: sin un superadmin (rol ADMIN), nadie puede
+# crear empresas desde /empresas/admin (POST /api/admin/companies) y el
+# registro público solo acepta trabajadores (BUSINESS_REGISTRATION_DISABLED).
+# Este paso corre DESPUÉS de que deploy-hosting.sh confirmó que los 3
+# servicios están sanos. Un fallo aquí NUNCA deshace el despliegue ya hecho
+# ni toca Nginx: solo informa cómo reintentar con scripts/crear-superadmin.sh.
+admin_compose=(docker compose --project-name "$PROJECT_NAME" --env-file "$ENV_FILE" --file "$PROJECT_DIR/docker-compose.production.yml")
+admin_summary=""
+
+log "Comprobando si ya existe un superadmin..."
+set +e
+admin_status_output="$("${admin_compose[@]}" exec -T api node dist/src/cli/superadmin.js status 2>&1)"
+admin_status_code=$?
+set -e
+
+if [[ "$admin_status_code" -eq 0 ]]; then
+  log "Ya existe al menos un superadmin (rol ADMIN); no se crea ninguno nuevo."
+elif [[ "$admin_status_code" -eq 1 ]]; then
+  admin_email="$ADMIN_EMAIL"
+  if [[ -z "$admin_email" ]] && is_interactive; then
+    read -r -p "Correo del primer superadmin (rol ADMIN, entra en https://${DOMAIN}/empresas/admin): " admin_email
+  fi
+  if [[ -z "$admin_email" ]]; then
+    # Con -y (no interactivo) y sin --admin-email no hay ningún correo del que
+    # partir. Adivinarlo o inventar uno sería inseguro y probablemente
+    # incorrecto; lo seguro es NO crear nada y decirlo con claridad: los
+    # servicios ya quedaron desplegados y correctos, y el operador puede
+    # crear el superadmin en el momento que quiera, sin reinstalar nada.
+    log "AVISO: no existe ningún superadmin y no se indicó --admin-email en modo no interactivo."
+    echo "  El despliegue de los servicios terminó correctamente; esto NO lo afecta." >&2
+    echo "  Crea el primer superadmin cuando quieras con:" >&2
+    echo "    ./scripts/crear-superadmin.sh --email <correo>" >&2
+  else
+    set +e
+    admin_create_output="$("${admin_compose[@]}" exec -T api node dist/src/cli/superadmin.js create --email "$admin_email" --if-none 2>&1)"
+    admin_create_code=$?
+    set -e
+    if [[ "$admin_create_code" -eq 0 ]]; then
+      log "Superadmin creado."
+      admin_summary="$admin_create_output"
+    else
+      log "AVISO: no se pudo crear el superadmin automáticamente (código $admin_create_code)."
+      echo "  El despliegue de los servicios terminó correctamente; esto NO lo afecta ni toca Nginx." >&2
+      echo "  Detalle:" >&2
+      while IFS= read -r admin_line; do echo "    $admin_line"; done <<<"$admin_create_output" >&2
+      echo "  Reintenta con: ./scripts/crear-superadmin.sh --email <correo>" >&2
+    fi
+  fi
+else
+  log "AVISO: no se pudo comprobar si ya existe un superadmin (código $admin_status_code)."
+  echo "  El despliegue de los servicios terminó correctamente; esto NO lo afecta." >&2
+  echo "  Detalle:" >&2
+  while IFS= read -r admin_line; do echo "    $admin_line"; done <<<"$admin_status_output" >&2
+  echo "  Comprueba manualmente con: ./scripts/crear-superadmin.sh --email <correo>" >&2
+fi
+
+# --- 8. Resumen -------------------------------------------------------------
 cat <<EOF
 
 ============================================================
@@ -643,3 +708,14 @@ cat <<EOF
      ./scripts/deploy-hosting.sh --pull   # equivalente, en un solo comando
 ============================================================
 EOF
+
+if [[ -n "$admin_summary" ]]; then
+  cat <<EOF
+
+============================================================
+ Primer superadmin
+============================================================
+$admin_summary
+============================================================
+EOF
+fi

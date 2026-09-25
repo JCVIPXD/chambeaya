@@ -54,6 +54,104 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260925-009 — Auditoría de `CN-20260925-008` (comando para crear el primer superadmin)
+
+- Fecha: 2026-09-25 23:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260925-008`. HEAD `35f7532`; diff sin commitear.
+  - Índice: `scripts/crear-superadmin.sh` en `100755`, igual al árbol, sin CR. Los otros 2 scripts siguen en `100755`.
+- Alcance: revisión independiente de `apps/api/src/cli/superadmin.ts`, `scripts/crear-superadmin.sh`, el paso 7 de `scripts/instalar-produccion.sh`, las pruebas y la documentación, con ejecución real sobre la imagen de producción.
+- Archivos:
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`. Decía que `--if-none` no crea "nunca" un segundo superadmin, lo cual es falso con ejecuciones simultáneas (ver BAJO-1). Lo corregí y advertí no ejecutarlo en paralelo.
+- Decisiones (hallazgos):
+  - **Críticos, altos y medios: ninguno.**
+  - **Seguridad, verificado:**
+    - La contraseña se genera con `crypto.randomInt`: 24 caracteres de un alfabeto de 69, unos 146 bits, con Fisher-Yates.
+    - Nunca entra por argumento: `--password` sale con código 2.
+    - En la imagen de producción, tras `create`, `grep -F` de la contraseña en `docker logs` de `api`, `web` y `db` dio 0, y en todo el sistema de archivos del contenedor `api`, nada.
+    - En la simulación del instalador, la contraseña solo aparece en su stdout: ningún archivo de `/`, `/etc/nginx` ni del repositorio la contiene.
+    - `reset` en la API real: la sesión anterior del admin pasa a `401`, la sesión de otra cuenta sigue en `200`, la contraseña vieja da `401` y la nueva `200`.
+    - `reset` sobre una cuenta `BUSINESS` sale con código 4 y el rol no cambia.
+    - `create` con un correo existente sale con código 4 y no modifica la cuenta.
+  - **BAJO-1. Carrera en `--if-none`** (`apps/api/src/cli/superadmin.ts:180-203`).
+    - La comprobación y la creación no son atómicas: **4 `create --if-none` simultáneos en la imagen real crearon 4 `ADMIN`**.
+    - Se acepta como riesgo bajo: exige ejecuciones paralelas de un operador que ya tiene acceso a Docker (equivale a root), y cada contraseña solo se muestra a quien la generó. No hay escalada de privilegios.
+    - Recomendación: `pg_advisory_xact_lock` dentro de una transacción interactiva.
+  - **BAJO-2.** `scripts/instalar-produccion.sh:649` pide el correo en una terminal interactiva aunque se pase `-y`. El comportamiento no interactivo (sin correo, se omite) sí coincide con lo que se declaró.
+  - **BAJO-3 (cosmético).** El error de validación se imprime dos veces (stdout y stderr) en `runSuperadminCli`, y el instalador los junta con `2>&1`.
+- Validaciones:
+  - `apps/api`: `npx tsc --noEmit` → 0; `npm test` → `22 archivos, 355 pruebas` pasaron.
+  - `npm run test:integration` sobre un `postgres:16-alpine` desechable (`chambeaya-audit008-itest`) con `prisma migrate deploy` → `12 archivos, 84 pruebas` pasaron.
+  - Imagen real de `apps/api/Dockerfile.production` en un stack `-p chambeaya-audit008` (db, api y web, con `NEXT_BASE_PATH=/empresas`) detrás de la plantilla de Nginx:
+    - `status` → 1; `create` → 0 (24 caracteres).
+    - `--if-none` con un admin ya existente → 3; duplicado → 4; correo inválido → 4.
+    - `POST /api/auth/login` con la contraseña generada → `200`, y `/auth/session` da rol `ADMIN`.
+    - `POST /api/admin/companies` → `201`; login de esa empresa → `200`.
+    - `/empresas/admin` → `200`.
+  - `dist/src/demo/demo.seed.js` en la imagen conserva el bloqueo `NODE_ENV !== 'development'` y `CHAMBEAYA_ALLOW_DEMO_SEED`.
+  - Simulación del instalador con el `nginx` real en `ubuntu:24.04`, `sudo` real y `docker`/`systemctl`/`certbot` simulados:
+    - Instalación nueva con `--admin-email` → una sola creación y el bloque "Primer superadmin".
+    - Segunda ejecución → solo `status`, sin creación; `.env` idéntico y el sitio con certbot intacto.
+    - `-y` sin correo → aviso y código 0.
+    - Correo inválido → aviso con código 4 y la instalación termina con 0.
+    - Fallo de BD en `status` y en `create` → aviso con código 5; `/etc/nginx` y `.env` idénticos; `nginx -t` OK.
+    - Un conflicto de `server_name` sigue abortando sin crear `.env` y sin llamar a la CLI.
+    - La batería previa de `CN-20260925-007` (trap, `reload` fallido, Ctrl+C, certbot, idempotencia, esquema viejo) volvió a pasar con este instalador.
+  - `crear-superadmin.sh`: sin `--email` → 2; flag desconocido → 2; `api` caído → 1 con mensaje claro; `--reset` → 0. Usa `-p chambeaya-production --env-file .env.production -f docker-compose.production.yml`.
+  - `bash -n` y `shellcheck` sobre los 3 scripts → 0.
+  - Limpieza:
+    - Eliminé el stack, los volúmenes, la red y las imágenes `chambeaya-audit*`, el contenedor `chambeaya-audit008-itest` y su volumen anónimo `56482881…` (creado por mí en esta auditoría).
+    - Borré los archivos temporales con contraseñas y tokens.
+    - No toqué `chambeaya-stable-postgres-data` ni `chambeaya-private-documents`.
+    - El volumen `42c6895e…` ya no existe; no lo eliminé yo.
+- Riesgos:
+  - `NO_EJECUTADA`: **no inicié sesión en el navegador ni creé la empresa desde la interfaz del panel**. Mis reglas de operación prohíben escribir contraseñas en formularios. Lo cubrí con las mismas llamadas HTTP que usa el panel, a través del Nginx de la plantilla, y con la carga de `/empresas/admin` en `200`.
+  - No se probó en un Ubuntu real con DNS real, certbot real ni systemd.
+  - El panel sigue sin cambio de contraseña desde la sesión: es trabajo pendiente declarado.
+- Siguiente paso: el cambio queda cerrado. BAJO-1 (bloqueo con `pg_advisory_xact_lock`) y BAJO-2 son opcionales para `implementador-sonnet`.
+
+### CN-20260925-008 — Comando de superadmin: crear el primer `ADMIN` sin acceso a la base de datos
+
+- Fecha: 2026-09-25 22:10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: N/A (parte del flujo de despliegue aprobado en `CN-20260925-007`). Diff sin commitear sobre `35f7532`.
+- Alcance: producción arrancaba con la base de datos vacía sin ninguna forma de crear el primer superadmin (rol `ADMIN`): el seed de demo sigue bloqueado fuera de `NODE_ENV=development` (a propósito, no se tocó), el registro público solo acepta `WORKER`, y las empresas solo las crea un `ADMIN` desde `/empresas/admin`.
+  1. **`apps/api/src/cli/superadmin.ts`** (compilado a `dist/src/cli/superadmin.js`, dentro de `dist/src`, lo único que copia `apps/api/Dockerfile.production`). Tres subcomandos:
+     - `create --email <correo> [--if-none]`: crea un `User` `ADMIN` nuevo. Normaliza el correo igual que `POST /admin/companies` (recorta y minúsculas). Falla con mensaje claro si ya existe un usuario (de cualquier rol) con ese correo, sin tocarlo. `--if-none` no crea nada si ya existe cualquier `ADMIN` (lo usa el instalador).
+     - `reset --email <correo>`: genera una contraseña nueva para un `ADMIN` existente e invalida (`AuthSession.deleteMany`) todas sus sesiones en la misma transacción. Falla si el correo no existe o si no es `ADMIN` (nunca convierte a otro rol en superadmin).
+     - `status`: sin argumentos; informa si existe algún `ADMIN` (código 0/1), para que el instalador decida sin necesitar un correo todavía.
+     - Códigos de salida distintos: `0` creado/restablecido, `2` uso incorrecto de la CLI, `3` ya existía (`--if-none`, no es error), `4` validación (correo inválido, correo duplicado, `reset` sobre no-`ADMIN`), `5` error de base de datos.
+  2. **`scripts/crear-superadmin.sh`** (nuevo, `100755`, LF): envoltorio para después del despliegue (otro superadmin, o contraseña olvidada). `--email` y `--reset`; ejecuta `docker compose --project-name chambeaya-production --env-file .env.production --file docker-compose.production.yml exec -T api node dist/src/cli/superadmin.js <create|reset> --email <correo>`. Si el contenedor `api` no existe o no está corriendo, mensaje claro antes de intentar el `exec`.
+  3. **`scripts/instalar-produccion.sh`**: nuevo paso 7 (el resumen pasa a ser el 8), después de que `deploy-hosting.sh` confirma los 3 servicios sanos. Llama a `... superadmin.js status`; si ya existe un `ADMIN`, informa y no hace nada (ni en esta ejecución ni en las siguientes: segunda vez siempre da `status=0` y se detiene ahí). Si no existe ninguno, usa `--admin-email` (nuevo flag) o lo pide de forma interactiva; con ese correo llama a `create --if-none` y muestra la contraseña una sola vez en un bloque final del resumen. Un fallo en este paso (`create` o `status` con código distinto de 0/1) nunca aborta el script ni deshace nada ya desplegado: solo avisa y remite a `crear-superadmin.sh`.
+  4. **Docs**: sección nueva "Primer acceso" en `docs/guides/deployment.md` (orden real: superadmin → empresas → trabajadores se registran solos; cómo crear otro superadmin o recuperar el acceso). Nueva subsección "Cómo se crea la propia cuenta `ADMIN`" en `docs/reference/api.md` (bajo "Superadmin: cuentas empresariales"), documentando que ninguna ruta HTTP crea un `ADMIN` y remitiendo a la CLI.
+- Archivos:
+  - Nuevos: `apps/api/src/cli/superadmin.ts`, `apps/api/tests/cli.superadmin.test.ts`, `apps/api/tests/integration/superadmin-cli.integration.test.ts`, `scripts/crear-superadmin.sh`.
+  - Modificados: `scripts/instalar-produccion.sh`, `docs/guides/deployment.md`, `docs/reference/api.md`.
+  - Índice de git (única modificación de índice, y solo sobre el script tocado): `scripts/crear-superadmin.sh` añadido en `100755` (`git add` + `git update-index --add --chmod=+x`); `scripts/instalar-produccion.sh` y `scripts/deploy-hosting.sh` ya estaban en `100755` desde antes y no se tocó su modo. `git diff --quiet -- scripts/deploy-hosting.sh` confirma que ese script no cambió.
+  - Sin cambios (a propósito): `apps/api/src/demo/demo.seed.ts` (sigue exigiendo `NODE_ENV=development` y `CHAMBEAYA_ALLOW_DEMO_SEED=true`), `apps/api/src/modules/auth/auth.routes.ts` y `auth.service.ts` (el registro público sigue rechazando `ADMIN`).
+- Decisiones:
+  - **Formato de `identifier`**: `ADMIN-<12 hex>` (`generateAdminIdentifier`). `User.identifier` es obligatorio y único en todo el sistema, ya ocupado por DNI de 8 dígitos (`WORKER`) y RUC de 11 (`BUSINESS`); un prefijo con letras y guion no puede colisionar con ninguno de los dos (ambos son exclusivamente numéricos). 48 bits de aleatoriedad hacen la colisión entre dos superadmins astronómicamente improbable, y `createSuperadmin` reintenta con un identificador nuevo (hasta 5 veces) si el `@unique` la detecta igual.
+  - **La contraseña siempre se genera; nunca se pide por stdin.** El enunciado permitía "si ves razonable" aceptarla por stdin sin eco; se descartó a propósito: `docker compose exec -T` (usado por `crear-superadmin.sh` y por el instalador) no asigna pseudo-TTY, así que un prompt interactivo sin eco no funcionaría de forma confiable ahí, y generarla siempre evita contraseñas débiles elegidas a mano. `parseArgs` rechaza explícitamente `--password`/`--password=...` con un mensaje explicando por qué.
+  - **`-y` sin `--admin-email` en el instalador: se omite la creación, sin fallar el script ni inventar un correo.** Adivinar o generar un correo sería inseguro y probablemente incorrecto (nadie podría entrar con él); los 3 servicios ya quedaron desplegados y correctos, así que abortar todo el script por este paso sería peor que solo informarlo. El aviso remite a `./scripts/crear-superadmin.sh --email <correo>` para completarlo cuando el operador quiera, sin reinstalar nada. Verificado en vivo (ver Validaciones).
+  - **Cambio de contraseña desde el panel: no existe.** Se revisó `apps/web/lib/admin-api.ts` y `apps/web/lib/business-api.ts`: ninguno tiene una ruta de cambio de contraseña para una sesión ya autenticada (`setInitialGooglePassword` en la API es solo para completar el alta de una cuenta creada por Google, no aplica a un `ADMIN` local). El mensaje que imprime la CLI lo dice explícitamente y remite a `crear-superadmin.sh --reset`; no se construyó esa función en el panel (fuera de alcance) — queda como trabajo pendiente, no como riesgo de esta entrega.
+  - Corregido durante la implementación (no un hallazgo de auditoría): `normalizeEmail` lanzaba dentro de `createSuperadmin`/`resetSuperadminPassword` sobre un correo mal formado, y `runSuperadminCli` etiquetaba ese error como "de base de datos" (código 5) en vez de "de validación" (código 4). Se aisló con `tryNormalizeEmail` y se agregó una prueba de regresión (con un Prisma que lanza si se le llega a consultar, para probar que ni siquiera se intenta).
+- Validaciones:
+  - `apps/api`: `npm test` → `22 archivos, 355 pruebas, todas pasaron` (353 antes de este cambio + 2 nuevas de la corrección del código de salida; incluye `demo.seed.test.ts` sin cambios, confirmando que el seed de demo sigue bloqueado en producción).
+  - `apps/api/tests/cli.superadmin.test.ts` (14 pruebas, sin base de datos): `normalizeEmail`, `generatePassword` (fuerza y no-repetición), `generateAdminIdentifier` (nunca coincide con 8 ni 11 dígitos), `parseArgs` (incluida la prueba explícita de que `--password`/`--password=` siempre se rechaza), y la regresión de código de salida sobre un Prisma que lanza si se le consulta.
+  - `apps/api/tests/integration/superadmin-cli.integration.test.ts` (7 pruebas) contra PostgreSQL real (contenedor `postgres:16-alpine` desechable, `chambeaya_test`, `CHAMBEAYA_INTEGRATION_TESTS=true`): crear y loguearse con la contraseña generada (`POST /api/auth/login` real, `200`), `--if-none` no crea un segundo admin, `--if-none` sí crea el primero, correo duplicado falla sin tocar la cuenta existente, `reset` invalida la sesión anterior (`GET /api/auth/session` pasa a `401`) y la contraseña vieja deja de servir mientras la nueva sí, `reset` sobre un `WORKER` falla sin convertirlo, `reset` sobre un correo inexistente falla con mensaje claro. `npx vitest run --config vitest.integration.config.mts tests/integration` completo (12 archivos, 84 pruebas) → todas pasaron, sin regresión en el resto de la suite de integración.
+  - `docker build -f apps/api/Dockerfile.production .` real → construye. `dist/src/cli/superadmin.js` ejecutado dentro de la imagen ya construida (`docker run ... node dist/src/cli/superadmin.js status|create|reset`), contra un Postgres real: los 3 subcomandos funcionan igual que en código fuente, confirmando que el comando SÍ llega a `dist/src` (no queda fuera, como pasaría con algo en `apps/api/scripts/`).
+  - Simulación del paso nuevo del instalador (no del instalador completo; ver riesgo) contra un stack Docker real y desechable (`docker-compose.production.yml`, servicios `api`+`db` únicamente, proyecto `chambeaya-installer-audit`, con la imagen real recién construida): se extrajo el bloque de bash del paso 7 tal cual quedó en el archivo y se ejecutó con distintas combinaciones de `ADMIN_EMAIL`/`is_interactive` — (a) sin admin y con correo: crea y muestra la contraseña en `admin_summary`; verificado también por consulta directa a la base (`SELECT ... WHERE role='ADMIN'` → 1 fila) que una segunda ejecución con otro correo NO crea un segundo admin; (b) sin admin, sin correo y no interactivo (`-y` sin `--admin-email`): no crea nada, avisa con claridad, código de salida del paso `0` (no rompe el script); (c) correo inválido: avisa "no se pudo crear" con el detalle exacto y código `4`, sin romper el script (aquí se detectó y corrigió el bug de códigos de salida descrito arriba). `bash -n` y `shellcheck` (imagen `koalaman/shellcheck:stable`) sobre `instalar-produccion.sh` y `crear-superadmin.sh` → sin hallazgos. `npx tsc --noEmit` en `apps/api` → sin errores.
+  - Limpieza: se eliminaron todos los contenedores, la imagen e imágenes intermedias, la red y los 2 volúmenes de `chambeaya-installer-audit` (`docker compose ... down -v` sobre ese proyecto propio, nunca sobre `chambeaya-production`) y el contenedor Postgres desechable `chambeaya-cli-audit-pg`; no se creó ningún `.env.production` en el repositorio (el usado en las pruebas vivió en el directorio de scratchpad de la sesión). `docker volume ls` tras la limpieza solo muestra los 2 volúmenes preexistentes del entorno de desarrollo del usuario (`chambeaya-private-documents`, `chambeaya-stable-postgres-data`), sin tocarlos.
+- Riesgos:
+  - `NO_EJECUTADA`: simulación del **instalador completo** (`instalar-produccion.sh` de punta a punta, incluida toda la lógica de Nginx/Certbot/`systemctl` ya auditada en entradas anteriores) sobre un Ubuntu real con Nginx real, ejercitando el paso 7 nuevo dentro de esa corrida completa. Se validó el paso 7 aislado (ver Validaciones) porque este entorno de implementación es Windows y no tiene `nginx`/`systemctl`/`sudo` reales; la simulación Ubuntu+Nginx completa, con este paso incluido al final, queda pendiente (como en auditorías previas, es más propio del alcance de `auditor-opus`).
+  - El panel no tiene forma de cambiar la contraseña de un `ADMIN` (ni de una `BUSINESS`) desde la sesión ya autenticada; hoy la única vía es `crear-superadmin.sh --reset` (que además cierra todas las sesiones activas de esa cuenta). Es una limitación conocida, no un defecto de esta entrega.
+  - `nginx -T`/conflictos de dominio no se tocaron ni se revalidaron en este cambio (el paso nuevo corre después, sin relación con esa lógica).
+- Siguiente paso: `auditor-opus` revisa el diff completo (CLI, wrapper, instalador, docs) y, si lo considera necesario dado el riesgo `NO_EJECUTADA`, corre la simulación Ubuntu+Nginx completa con `--admin-email` y sin él.
+
 ### CN-20260925-007 — Auditoría conjunta de `CN-20260925-005` (corrección de `004`) y `CN-20260925-006` (un solo dominio con rutas)
 
 - Fecha: 2026-09-25 20:30 (America/Lima)

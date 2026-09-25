@@ -24,6 +24,15 @@ Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar e
 
 El alta exige nombre comercial, RUC de 11 dígitos, correo y contraseña inicial (mínimo 8 caracteres, con mayúscula y número). Los datos de contacto y razón social pueden completarse o editarse después desde el panel.
 
+### Cómo se crea la propia cuenta `ADMIN`
+
+Ninguna ruta HTTP crea una cuenta `ADMIN`: `POST /api/auth/register` responde `403 BUSINESS_REGISTRATION_DISABLED` para cualquier `role` distinto de `WORKER` (incluido `ADMIN`), y `AuthService.register`/`normalizeRegistration` (`apps/api/src/modules/auth/auth.service.ts`) rechaza explícitamente `role: "ADMIN"` con `INVALID_REGISTRATION`. El primer superadmin (y cualquiera adicional) se crea fuera de la API HTTP, con el comando `apps/api/src/cli/superadmin.ts` (compilado a `dist/src/cli/superadmin.js`), que corre dentro del contenedor `api`:
+
+- `scripts/instalar-produccion.sh` lo invoca automáticamente al final de una instalación nueva, solo si todavía no existe ningún `ADMIN`.
+- `scripts/crear-superadmin.sh --email <correo> [--reset]` lo invoca después, para un superadmin adicional o para restablecer una contraseña olvidada.
+
+Su `identifier` (obligatorio y único en `User`, igual que el DNI del trabajador o el RUC de la empresa) tiene el formato `ADMIN-<12 caracteres hexadecimales>` — nunca coincide con un DNI (8 dígitos) ni un RUC (11 dígitos) real, porque ambos son exclusivamente numéricos. La contraseña se genera dentro del comando (nunca se acepta por argumento ni por variable de entorno) y se imprime una sola vez por stdout; no queda registrada en ningún archivo ni log. Ver la sección "Primer acceso" de [la guía de despliegue](../guides/deployment.md#primer-acceso).
+
 ## Empresa
 
 - `GET /api/business/company`: obtiene el perfil. Si la cuenta es anterior a esta implementación, crea el perfil empresarial automáticamente con el nombre y RUC registrados.

@@ -153,6 +153,93 @@ El instalador es idempotente y hace todo esto en un solo paso:
 7. Llama a `scripts/deploy-hosting.sh` para construir y levantar los 4
    servicios, y muestra un resumen con las 3 URLs, los puertos elegidos y los
    pasos pendientes (DNS, Google Sign-In).
+8. Con los 3 servicios ya sanos, comprueba si existe algún superadmin (rol
+   `ADMIN`). Si no existe ninguno, crea el primero: pide el correo (de forma
+   interactiva, o por `--admin-email` en modo no interactivo) y muestra su
+   contraseña generada **una sola vez** por stdout (ver
+   [Primer acceso](#primer-acceso) más abajo). Si ya existe un superadmin, lo
+   informa y no toca nada — ni en esta ejecución ni en ninguna posterior. Un
+   fallo en este paso (por ejemplo, sin `--admin-email` en modo no
+   interactivo) **nunca** deshace el despliegue de los servicios ni toca
+   Nginx: solo explica cómo reintentar con `scripts/crear-superadmin.sh`.
+
+## Primer acceso
+
+La base de datos arranca **vacía**. Sin un superadmin no hay forma de crear
+empresas, porque:
+
+- El registro público (`POST /api/auth/register`) solo acepta `role: "WORKER"`;
+  cualquier otro rol responde `403 BUSINESS_REGISTRATION_DISABLED`
+  (`apps/api/src/modules/auth/auth.routes.ts`).
+- Las empresas las crea el propio superadmin desde el panel
+  (`POST /api/admin/companies`, `apps/api/src/modules/admin/admin.routes.ts`),
+  al que solo puede entrar una cuenta con rol `ADMIN`.
+- El seed de demostración (`apps/api/src/demo/demo.seed.ts`) sigue bloqueado
+  fuera de `NODE_ENV=development` y exige además
+  `CHAMBEAYA_ALLOW_DEMO_SEED=true`: nunca se ejecuta en producción, ni por
+  accidente.
+
+El orden real de una instancia nueva es:
+
+1. **El instalador crea el primer superadmin** al final de
+   `scripts/instalar-produccion.sh` (paso 8 de la lista de arriba), o tú lo
+   creas después con:
+
+   ```bash
+   ./scripts/crear-superadmin.sh --email tucorreo@empresa.com
+   ```
+
+   En ambos casos, la contraseña se genera dentro del contenedor `api`
+   (`apps/api/src/cli/superadmin.ts`, compilado a
+   `dist/src/cli/superadmin.js`) y se imprime **una sola vez** por stdout: no
+   queda escrita en ningún archivo ni log, y el comando nunca la acepta como
+   argumento de línea de comandos ni la pide por stdin. Cópiala de la
+   terminal en ese momento; si la pierdes, no hay forma de recuperarla, solo
+   de generar una nueva (ver más abajo).
+
+2. **El superadmin entra a `https://<tu dominio>/empresas/admin`** con ese
+   correo y esa contraseña, y desde ahí crea cada empresa (nombre, RUC,
+   correo y contraseña de la empresa). El panel todavía no tiene una opción
+   para que el propio superadmin cambie su contraseña desde la sesión; si
+   necesitas una nueva, usa el modo `--reset` de abajo.
+3. **Cada empresa entra a `https://<tu dominio>/empresas`** (sin `/admin`)
+   con el correo y la contraseña que el superadmin eligió al crearla, y
+   publica sus turnos.
+4. **Los trabajadores se registran solos** en `https://<tu dominio>/` (la app
+   Flutter), con su nombre, correo, DNI y contraseña — o con Google, si está
+   configurado. No necesitan que nadie los invite ni los cree.
+
+### Crear otro superadmin, o recuperar el acceso
+
+`scripts/crear-superadmin.sh` requiere que el contenedor `api` del proyecto
+`chambeaya-production` ya esté levantado (`scripts/deploy-hosting.sh`):
+
+```bash
+# Crear un superadmin adicional (falla si ese correo ya existe).
+./scripts/crear-superadmin.sh --email otro-correo@empresa.com
+
+# Olvidaste la contraseña de un superadmin existente: genera una nueva e
+# invalida todas sus sesiones activas. Falla si el correo no existe o no
+# pertenece a una cuenta ADMIN (nunca convierte a otra en superadmin).
+./scripts/crear-superadmin.sh --email tucorreo@empresa.com --reset
+```
+
+Por debajo, ambos invocan el mismo comando dentro del contenedor:
+
+```bash
+docker compose -p chambeaya-production -f docker-compose.production.yml \
+  exec -T api node dist/src/cli/superadmin.js create --email <correo>
+docker compose -p chambeaya-production -f docker-compose.production.yml \
+  exec -T api node dist/src/cli/superadmin.js reset --email <correo>
+```
+
+(El instalador usa además `... create --email <correo> --if-none` y
+`... status`, para no crear un segundo superadmin ni cambiar la contraseña
+del que ya exista en ejecuciones posteriores. `--if-none` comprueba y crea
+en dos pasos separados, sin bloqueo: si dos ejecuciones corren **a la vez**,
+por ejemplo el instalador en dos sesiones SSH, cada una puede crear su propio
+superadmin. Cada contraseña se muestra solo en la terminal que la generó.
+No ejecutes el instalador ni `crear-superadmin.sh` en paralelo.)
 
 ### Por qué nunca se regenera `POSTGRES_PASSWORD` ni los puertos
 
