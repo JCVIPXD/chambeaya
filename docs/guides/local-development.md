@@ -7,7 +7,18 @@ PostgreSQL, panel web y aplicación Flutter.
 
 1. Node.js LTS (incluye npm).
 2. Docker Desktop instalado y con el motor iniciado.
-3. Flutter SDK disponible en `PATH` (solo para la app móvil).
+3. Flutter SDK disponible en `PATH` (solo para la app móvil). **Usa exactamente
+   la versión 3.44.0** (stable) — la misma que fijan
+   `.github/workflows/flutter-tests.yml` y
+   `apps/mobile_flutter/Dockerfile.production`. Un Flutter local distinto
+   puede desalinear `apps/mobile_flutter/pubspec.lock` al correr
+   `flutter pub get` sin darte cuenta (empaqueta versiones distintas de
+   `meta`/`vector_math`/`matcher`/`test_api`), y entonces CI y el build de
+   producción fallan con `Unable to satisfy pubspec.yaml using pubspec.lock`.
+   Si tu Flutter no es 3.44.0, usa siempre
+   `flutter pub get --enforce-lockfile` en vez de `flutter pub get` a secas;
+   ver el detalle y cómo instalar 3.44.0 en
+   [`apps/mobile_flutter/README.md`](../../apps/mobile_flutter/README.md#versión-de-flutter-requerida-3440-stable).
 
 ## 1. Preparar el entorno (una sola vez)
 

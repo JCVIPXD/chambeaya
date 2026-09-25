@@ -108,11 +108,12 @@ class _AuthPageState extends State<AuthPage> {
         setState(() => _error = _messageForFailure(failure));
       }
     } catch (_) {
-      if (mounted)
+      if (mounted) {
         setState(
           () =>
               _error = 'No se pudo completar el acceso. Inténtalo nuevamente.',
         );
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -603,12 +604,15 @@ class _AuthPageState extends State<AuthPage> {
                         contentPadding: fieldContentPadding,
                       ),
                       validator: (value) {
-                        if (value == null || value.length < 8)
+                        if (value == null || value.length < 8) {
                           return 'Mínimo 8 caracteres';
-                        if (!RegExp(r'[A-Z]').hasMatch(value))
+                        }
+                        if (!RegExp(r'[A-Z]').hasMatch(value)) {
                           return 'Incluye al menos una mayúscula';
-                        if (!RegExp(r'\d').hasMatch(value))
+                        }
+                        if (!RegExp(r'\d').hasMatch(value)) {
                           return 'Incluye al menos un número';
+                        }
                         return null;
                       },
                     ),

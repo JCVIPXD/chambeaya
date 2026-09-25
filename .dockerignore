@@ -5,7 +5,23 @@ node_modules
 apps/api/node_modules
 apps/web/node_modules
 apps/mobile
-apps/mobile_flutter
+# apps/mobile_flutter SÍ se copia en el build de producción de la app del
+# trabajador (apps/mobile_flutter/Dockerfile.production): solo se excluyen
+# aquí sus artefactos generados y directorios pesados que Flutter no necesita
+# para `flutter build web` (no se compila para Android/iOS en este Dockerfile).
+apps/mobile_flutter/build
+apps/mobile_flutter/.dart_tool
+apps/mobile_flutter/.idea
+apps/mobile_flutter/.gradle
+apps/mobile_flutter/android/.gradle
+apps/mobile_flutter/android/app/build
+apps/mobile_flutter/ios/Pods
+apps/mobile_flutter/ios/.symlinks
+apps/mobile_flutter/*.iml
+# Rutas locales del SDK de Android de quien compila; no hace falta para
+# `flutter build web` y no debería entrar al contexto de build (BAJO-4 de
+# CN-20260925-002).
+apps/mobile_flutter/android/local.properties
 docs
 *.log
 *.zip

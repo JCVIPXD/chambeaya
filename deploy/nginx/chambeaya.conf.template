@@ -1,0 +1,90 @@
+# Plantilla de Nginx del HOST (fuera de Docker) para el dominio único de
+# Chambeaya. `scripts/instalar-produccion.sh` la copia y sustituye los
+# marcadores __DOMAIN__, __API_PORT__, __WEB_PORT__ y __APP_PORT__ antes de
+# instalarla en /etc/nginx/sites-available/chambeaya.conf (o
+# conf.d/chambeaya.conf). No la edites a mano en el servidor: vuelve a
+# ejecutar el instalador si cambia el dominio o los puertos, o edita el
+# archivo instalado directamente si ya no quieres que un futuro
+# `instalar-produccion.sh` lo reemplace.
+#
+# Los tres servicios de Chambeaya solo escuchan en 127.0.0.1 (ver
+# docker-compose.production.yml): este Nginx del sistema es la única puerta
+# de entrada pública, y certbot añade aquí el bloque 443 con `--nginx`.
+#
+# Un solo dominio, tres rutas (CN-20260925-006; antes eran 3 subdominios):
+#   /         -> worker-app (Flutter web; se queda en la raíz, base href "/")
+#   /empresas -> panel Next.js (basePath=/empresas; el superadmin queda en
+#                /empresas/admin)
+#   /api      -> API (ya cuelga de /api en apps/api/src/app.ts: aquí NUNCA se
+#                recorta el prefijo al reenviarlo)
+server {
+  listen 80;
+  server_name __DOMAIN__;
+
+  # La app sube CV en PDF hasta 5 MB y foto de perfil hasta 3 MB
+  # (apps/api/src/modules/talent/talent.routes.ts); el default de Nginx,
+  # 1 MB, rompería esas subidas.
+  client_max_body_size 8m;
+
+  # Comunes a las tres rutas. Ojo: cualquier `location` que declare su propio
+  # `proxy_set_header` dentro de este bloque deja de heredar automáticamente
+  # estos 4 (es una directiva de tipo lista: declarar una sola línea nueva
+  # descarta TODA la herencia, no solo la que se repite), así que el bloque
+  # de SSE de más abajo los repite explícitamente.
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+
+  # GET /api/shifts/events es el único endpoint SSE del proyecto (ver
+  # apps/api/src/modules/marketplace/marketplace.routes.ts): mantiene abierta
+  # una conexión de eventos en tiempo real que Nginx cortaría o retendría en
+  # búfer con la configuración por defecto. Coincidencia exacta: nginx la
+  # prioriza sobre "location /api/" sin importar el orden en el archivo.
+  location = /api/shifts/events {
+    proxy_pass http://127.0.0.1:__API_PORT__;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+  }
+
+  # nginx matchea "location /api/" por prefijo de CADENA: una petición a
+  # "/api" pelado (sin barra final) NO empieza con la cadena "/api/", así que
+  # sin este bloque exacto caería en "location /" (worker-app) en vez de la
+  # API. La redirección añade la barra para que la siguiente petición sí
+  # entre por el bloque de abajo.
+  location = /api {
+    return 308 /api/;
+  }
+
+  # Sin URI en `proxy_pass` (solo esquema+host+puerto): nginx reenvía la URI
+  # completa tal cual llegó (incluido el "/api" inicial) al backend, que ya
+  # espera ese prefijo por su cuenta — no se recorta nada.
+  location /api/ {
+    proxy_pass http://127.0.0.1:__API_PORT__;
+  }
+
+  # Mismo cuidado que con "/api": un solo "location /empresas" (prefijo)
+  # también matchearía "/empresasX", que NO es el panel. Con la combinación
+  # exacta + prefijo con barra, "/empresasX" no matchea ninguno de los dos y
+  # sigue de largo hasta "location /" (worker-app), que es el fallback
+  # correcto para cualquier ruta que no sea de verdad del panel.
+  location = /empresas {
+    proxy_pass http://127.0.0.1:__WEB_PORT__;
+  }
+
+  location /empresas/ {
+    proxy_pass http://127.0.0.1:__WEB_PORT__;
+  }
+
+  # App del trabajador (Flutter web): todo lo que no sea /api ni /empresas.
+  location / {
+    proxy_pass http://127.0.0.1:__APP_PORT__;
+  }
+}

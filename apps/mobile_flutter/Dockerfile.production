@@ -1,0 +1,46 @@
+# Compila la app Flutter del trabajador para web y la sirve con Nginx.
+#
+# Flutter no publica una imagen oficial en Docker Hub; usamos la imagen de la
+# comunidad `ghcr.io/cirruslabs/flutter` fijada en la misma versión que
+# `.github/workflows/flutter-tests.yml` (stable 3.44.0) para que el build de
+# producción compile con el mismo SDK que valida el CI. Si esa imagen deja de
+# publicarse, la alternativa es instalar el SDK clonando el tag `3.44.0` de
+# https://github.com/flutter/flutter en una imagen Debian (`git clone
+# --depth 1 --branch 3.44.0`) y ejecutar `flutter precache --web` antes de
+# `pub get`.
+FROM ghcr.io/cirruslabs/flutter:3.44.0 AS build
+
+WORKDIR /workspace
+
+# `pubspec.lock` se regeneró con esta misma imagen (Flutter 3.44.0, Dart
+# 3.12.0) tras detectarse que el lockfile anterior venía de un Flutter local
+# más nuevo (3.47.1) y no era compatible con la versión fijada aquí y en
+# `.github/workflows/flutter-tests.yml` (CN-20260925-002, MEDIO-3; corregido
+# en CN-20260925-003). `--enforce-lockfile` garantiza que el build de
+# producción usa exactamente esas versiones, igual que CI.
+COPY apps/mobile_flutter/pubspec.yaml apps/mobile_flutter/pubspec.lock ./
+RUN flutter pub get --enforce-lockfile
+
+COPY apps/mobile_flutter/. .
+# Vuelve a resolver por si `pub get` con solo el manifiesto no bastó (p. ej.
+# plugins con configuración específica de plataforma).
+RUN flutter pub get --enforce-lockfile
+
+ARG API_BASE_URL
+ARG GOOGLE_OAUTH_WEB_CLIENT_ID=""
+# CHAMBEAYA_DEMO_MODE nunca se activa en este build: no se declara como ARG a
+# propósito para que no pueda encenderse por accidente desde
+# scripts/instalar-produccion.sh ni desde docker-compose.production.yml.
+RUN flutter build web --release \
+  --dart-define=API_BASE_URL="${API_BASE_URL}" \
+  --dart-define=GOOGLE_OAUTH_WEB_CLIENT_ID="${GOOGLE_OAUTH_WEB_CLIENT_ID}"
+
+FROM nginx:alpine AS runtime
+
+COPY apps/mobile_flutter/deploy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /workspace/build/web /usr/share/nginx/html
+
+HEALTHCHECK --interval=10s --timeout=5s --retries=12 --start-period=10s \
+  CMD wget -q -O - http://127.0.0.1:8080/ >/dev/null || exit 1
+
+EXPOSE 8080

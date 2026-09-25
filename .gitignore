@@ -29,3 +29,8 @@ apps/mobile_flutter/ios/Pods/
 apps/mobile_flutter/ios/Flutter/ephemeral/
 apps/mobile_flutter/ios/Flutter/Generated.xcconfig
 apps/mobile_flutter/ios/Flutter/flutter_export_environment.sh
+# Generado por scripts/instalar-produccion.sh cuando no hay Nginx en el host
+# (o no corre como root); es específico del servidor, con dominios/puertos
+# reales, y nunca debe commitearse.
+deploy/nginx/chambeaya.conf.generado
+deploy/nginx/*.bak.*

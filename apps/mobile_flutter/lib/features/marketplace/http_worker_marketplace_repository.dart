@@ -96,8 +96,9 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       headers: {..._headers(), 'Content-Type': 'application/json'},
       body: jsonEncode({'isAvailable': isAvailable}),
     );
-    if (response.statusCode != 200)
+    if (response.statusCode != 200) {
       throw StateError('No se pudo actualizar tu disponibilidad');
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_availabilityKey, isAvailable);
   }
@@ -108,8 +109,9 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       _baseUri.resolve('/api/shifts/active'),
       headers: _headers(),
     );
-    if (response.statusCode != 200)
+    if (response.statusCode != 200) {
       throw StateError('No se pudo cargar tu turno activo');
+    }
     final value = jsonDecode(response.body);
     return value is Map<String, dynamic> ? _shiftFromJson(value) : null;
   }

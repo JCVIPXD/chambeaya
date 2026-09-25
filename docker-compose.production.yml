@@ -36,7 +36,10 @@ services:
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-20}
     ports:
-      - "${API_HOST_PORT:-4000}:4000"
+      # Solo loopback: Docker publica puertos saltándose ufw, así que sin
+      # "127.0.0.1:" la API quedaría expuesta sin TLS en todas las interfaces.
+      # El Nginx del host (fuera de Docker) hace proxy_pass hacia este puerto.
+      - "127.0.0.1:${API_HOST_PORT:-4000}:4000"
     volumes:
       - chambeaya-production-private-documents:/private-documents
     depends_on:
@@ -55,17 +58,44 @@ services:
       dockerfile: apps/web/Dockerfile.production
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        # El panel cuelga de /empresas en el dominio único (ver
+        # deploy/nginx/chambeaya.conf.template); basePath se fija en
+        # compilación y no puede cambiarse sin reconstruir esta imagen.
+        NEXT_BASE_PATH: ${NEXT_BASE_PATH:-/empresas}
     restart: unless-stopped
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_BASE_PATH: ${NEXT_BASE_PATH:-/empresas}
     ports:
-      - "${WEB_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
     depends_on:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000 >/dev/null"]
+      # Con basePath fijado, la raíz "/" ya no existe (404): el healthcheck
+      # tiene que pedir una ruta bajo NEXT_BASE_PATH.
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000${NEXT_BASE_PATH:-/empresas} >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  worker-app:
+    build:
+      context: .
+      dockerfile: apps/mobile_flutter/Dockerfile.production
+      args:
+        API_BASE_URL: ${API_BASE_URL}
+        GOOGLE_OAUTH_WEB_CLIENT_ID: ${GOOGLE_OAUTH_WEB_CLIENT_ID:-}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_HOST_PORT:-3100}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080 >/dev/null"]
       interval: 10s
       timeout: 5s
       retries: 12

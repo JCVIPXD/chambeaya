@@ -54,6 +54,400 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260925-007 — Auditoría conjunta de `CN-20260925-005` (corrección de `004`) y `CN-20260925-006` (un solo dominio con rutas)
+
+- Fecha: 2026-09-25 20:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260925-005` y `CN-20260925-006`. HEAD sigue en `6fedbf4`.
+  - Índice: solo los 2 scripts en `100755`; `git diff --quiet -- scripts/` confirma que el índice y el árbol coinciden.
+  - La reauditoría de `005` que empecé antes se interrumpió sin dejar entrada; esta la reemplaza.
+- Alcance: revisión independiente del diff completo: instalador, `deploy-hosting.sh`, plantilla de Nginx, `next.config.ts`, `Dockerfile.production` del panel, compose, los 4 archivos Dart y la documentación.
+- Archivos:
+  - Modificados por la auditoría (solo documentación): `docs/guides/deployment.md` y `.env.production.example`.
+    - La explicación de CORS decía que la API "exige `Origin`" y que el panel y la app "dejan de funcionar" sin la variable. Es falso con un mismo origen, así que la corregí.
+    - Corregí que `/empresas` "redirige": en realidad se sirve directo, y es `/empresas/` la que redirige.
+    - Documenté que el aviso de dominio distinto no detiene el instalador.
+  - Restauré `apps/web/next-env.d.ts` después de correr Playwright.
+- Decisiones (estado de los hallazgos de `004`):
+  - **MEDIO-N1: cerrado.** Ante un conflicto en una instalación nueva, `find` y `md5` del repositorio y de `/etc/nginx` salen idénticos antes y después, sin `.env.production` ni `.generado`, y sin llamadas a `systemctl`, certbot ni `deploy-hosting.sh`.
+  - **MEDIO-3: cerrado.**
+    - Con el código de `HEAD`, `flutter analyze` da código 1 con 10 avisos, **los 10 de `curly_braces_in_flow_control_structures`** (lo comprobé; no hay de otros tipos).
+    - `git diff -w` muestra solo `{`/`}` en 10 `if`, sin cambios de lógica.
+    - En `ghcr.io/cirruslabs/flutter:3.44.0`: `pub get --enforce-lockfile` pasa y deja el lockfile igual; `flutter analyze` da `No issues found!` con código 0; `flutter test` da `+147`.
+    - Son los mismos comandos que corre `.github/workflows/flutter-tests.yml`, así que el CI de Flutter debería pasar.
+  - **BAJO-N1: cerrado.** Probado con el Nginx real de Ubuntu 24.04:
+    - si falla el `reload` tras un `nginx -t` correcto, restaura byte a byte;
+    - con `timeout -s INT` durante un `reload` lento, restaura byte a byte;
+    - un `SIGINT` durante `deploy-hosting.sh`, después de una instalación correcta, **no** restaura, porque el trap ya está desarmado.
+  - **BAJO-N2 a BAJO-N5: cerrados.**
+    - Descartar `environment: flutter:` es correcto: pub ignora el límite superior de esa restricción.
+    - `nginx.conf` sirve `no-cache` en `location /` y `no-store` en los 3 archivos de control.
+  - **Regresión: nada roto.**
+    - `compose config` sigue dando `chambeaya-production` y los mismos volúmenes, con 3 servicios en `127.0.0.1` y `db` sin puertos.
+    - `.env.production` queda como `600 ops:ops` y la actualización sin `sudo` termina en "Despliegue listo".
+    - La normalización de `https://dominio/` funciona.
+    - La idempotencia se mantiene (`.env` y sitio idénticos, sin `systemctl`).
+    - Con bloques de certbot no se sobrescribe; `nginx -t` fallido sin archivo previo retira archivo y enlace; un enlace roto heredado se limpia.
+    - El aviso por `API_TRUST_PROXY=true` sigue en ambos scripts.
+- `006` (un solo dominio), verificado:
+  - `basePath` vale `''` si falta `NEXT_BASE_PATH`. `docker-compose.yml`, las configuraciones de Playwright y `Dockerfile.dev` no la definen.
+  - En `apps/web` busqué `href`, `window.location`, `router.push`, `fetch` a rutas propias y `public/` (no existe) y no encontré nada que `basePath` no corrija. La API usa `NEXT_PUBLIC_API_URL` absoluta.
+  - Las claves de `localStorage` del panel (`chambeaya_admin_session` y la de sesión de empresa) no chocan con las de Flutter (`flutter.chambeaya.*`).
+  - Plantilla probada en `nginx:alpine` con `Host: chambeaya.grupoamayo.com` y backends simulados:
+    - `/`, `/jobs/12`, `/empresasX`, `/empresas-foo`, `/apiX`, `/api-docs` y `/API/health` van a la app;
+    - `/empresas`, `/empresas/`, `/empresas/admin` y `/empresas/_next/...` van al panel;
+    - `/api` responde 308 a `/api/`;
+    - `/api/health` y `/api/shifts/events` llegan a la API con la URI intacta, `Host` correcto, `X-Forwarded-For: 6.6.6.6, 127.0.0.1` (con `1`, la API toma la IP real) y `Connection` vacío en SSE;
+    - `PUT` de 7 MB da 200 y de 9 MB da 413.
+  - Imagen del panel compilada con `NEXT_BASE_PATH=/empresas`, detrás de esa plantilla. En el navegador, `/empresas` y `/empresas/admin` cargan con todos los recursos en `/empresas/_next/...` con 200 y ningún 404 a la raíz.
+  - Healthcheck: `wget /empresas` da OK dentro del contenedor, y `/` da 404, como se espera.
+- Hallazgos nuevos (ningún crítico, alto ni medio):
+  - **BAJO-1.** `scripts/instalar-produccion.sh:337` avisa si el dominio es distinto en una instalación existente, pero sigue adelante.
+    - Sin bloques de certbot, reemplaza el sitio con el dominio nuevo y el anterior deja de responder (probado).
+    - Con un `.env` tipo `HEAD` (sin `API_BASE_URL`), `:420` añade `API_BASE_URL` con el dominio nuevo mientras `NEXT_PUBLIC_API_URL` sigue en el viejo.
+    - Recomendación: abortar ante el desajuste salvo con un flag explícito. Ya quedó documentado.
+  - **BAJO-2.** `NEXT_BASE_PATH` se puede cambiar en `.env` y `deploy-hosting.sh:96` acepta cualquier `/x`, pero la plantilla (`chambeaya.conf.template:78-84`) y el instalador (`:23`) fijan `/empresas`. Un valor distinto rompería el enrutado. Hay que parametrizar la plantilla o validar que sea `/empresas`.
+  - **BAJO-3 (residual).** El trap cubre `INT`/`TERM` pero no `ERR`: un fallo de `cp` en `:551`, por ejemplo con el disco lleno, sale sin restaurar. No lo simulé.
+- Validaciones:
+  - `bash -n` y `shellcheck` → código 0.
+  - Flutter 3.44.0 → ver MEDIO-3.
+  - `apps/web`: `npx tsc --noEmit` → 0; `npx playwright test` → `1 skipped`, `103 passed (2.3m)`.
+  - Simulación de 11 escenarios del instalador con el `nginx` real de `ubuntu:24.04`, `sudo` real y `docker`/`systemctl`/`certbot` simulados → resultados citados arriba.
+  - Esquema viejo de 3 subdominios → se detiene y el `.env` queda sin tocar (`md5`).
+  - Limpieza: eliminé contenedores, redes e imágenes de la auditoría (`chambeaya-audit-*`).
+  - Volumen anónimo `42c6895e…` (creado 2026-09-25T14:06:51Z): es **mío**. Son los datos de PostgreSQL 16 del contenedor desechable `chambeaya-audit-pg` que usé en `CN-20260925-002` para validar `pg_dump`/`psql`; lo eliminé con `docker rm -f` sin `-v`. No contiene datos del usuario. No lo borré, como se pidió.
+- Riesgos:
+  - `NO_EJECUTADAS`: todo lo que depende del DNS real de `chambeaya.grupoamayo.com` y de un Ubuntu real (systemd, certbot real, ufw, convivencia con los sitios reales de ese Nginx, `default_server`).
+  - Con la cabecera `Host` se cubrió la selección por `server_name`. No se cubrió TLS real: redirecciones en `https` ni `X-Forwarded-Proto: https`.
+- Siguiente paso: el cambio queda cerrado. Los BAJO-1 a BAJO-3 son opcionales para `implementador-sonnet` en una tarea aparte. El operador debe crear el registro A y ejecutar certbot en el servidor real.
+
+### CN-20260925-006 — Cambio de diseño: de 3 subdominios a un solo dominio con rutas (`/`, `/empresas`, `/api`)
+
+- Fecha: 2026-09-25 19:40 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260925-005` (sigue en `LISTO_PARA_AUDITORIA`; la reauditoría se interrumpió sin dejar entrada). El auditor revisará ambas entradas juntas. Diff sin commitear sobre `6fedbf4`, salvo el bit ejecutable de los 2 scripts (única modificación del índice, resincronizada al final: `git ls-files -s` → ambos `100755`, `git diff --stat` vacío contra el árbol de trabajo).
+- Alcance: cambio de producto decidido por el usuario — el dominio real es `chambeaya.grupoamayo.com` (ya existe, DNS lo administra la empresa), y en vez de 3 subdominios (API, panel, app) todo cuelga de un solo dominio con 3 rutas: `/` app del trabajador (Flutter web, base href `/` sin cambios), `/empresas` panel Next.js (superadmin en `/empresas/admin`), `/api` API (sin tocar, ya cuelga de `/api`).
+  1. **Panel Next.js con `basePath` configurable.** `apps/web/next.config.ts`: `basePath: process.env.NEXT_BASE_PATH || ''`. Revisé a fondo `apps/web/app`, `apps/web/lib`, `apps/web/components` y `apps/web/features` buscando todo lo que `basePath` no corrige solo (`href="/...\"`, `window.location`, `router.push` con rutas absolutas, `fetch` a rutas propias de Next, `public/`, `next/image`): no encontré ninguno. El panel no tiene `next/link`, `useRouter` ni navegación entre `/` y `/admin` (son dos entradas independientes); las llamadas a la API usan `NEXT_PUBLIC_API_URL`, una URL absoluta con su propio dominio, ajena al `basePath`. `apps/web/public/` no existe. `apps/web/Dockerfile.production` recibe `NEXT_BASE_PATH` como build-arg (y lo reexpone como `ENV` también en la etapa `runtime`, porque `next start` vuelve a leer `next.config.ts` al arrancar; los `ARG` no cruzan de una etapa a otra, así que se redeclara). `docker-compose.production.yml`: el healthcheck de `web` pasa de `http://127.0.0.1:3000` a `http://127.0.0.1:3000${NEXT_BASE_PATH:-/empresas}` (con `basePath` fijado, la raíz da 404).
+  2. **Nginx del host: un solo `server`, tres rutas.** Reescrito `deploy/nginx/chambeaya.conf.template`: `server_name __DOMAIN__` único; `location = /api/shifts/events` (SSE, igual que antes) antes de `location /api/` (sin URI en `proxy_pass`, así que el prefijo `/api` llega intacto al backend, que ya lo espera); `location = /api` con `return 308 /api/` para que `/api` sin barra no caiga en el fallback; el mismo patrón exacto+prefijo para `/empresas`/`/empresas/`, que evita que `/empresasX` caiga por error en el panel (nginx matchea por prefijo de cadena, no por segmento de ruta); `location /` para `worker-app`. Las cabeceras `proxy_set_header` comunes se declaran una vez a nivel `server`, con un comentario explícito de que el bloque SSE debe repetirlas (una directiva de tipo lista se resetea completa, no se fusiona, en cuanto el `location` declara una propia). Se conservan intactas todas las protecciones ya aprobadas: detección de conflicto de `server_name`, respeto de bloques de Certbot, restauración exacta con `trap`, `nginx -t` antes de recargar, symlink nunca colgado.
+  3. **Instalador de un solo dominio.** `scripts/instalar-produccion.sh` reescrito: `--domain` (antes `--api-domain`/`--panel-domain`/`--app-domain`), misma normalización/validación, sin el chequeo de distinción entre 3 dominios (ya no aplica). Genera `NEXT_PUBLIC_API_URL`/`API_BASE_URL=https://<dominio>/api`, `CORS_ALLOWED_ORIGINS=https://<dominio>` (un solo origen: panel, app y API comparten dominio, y ya no hace falta la lógica de "añadir el origen de la app" de `CN-20260925-002` MEDIO-4, que se retiró por no aplicar), `NEXT_BASE_PATH=/empresas`. `certbot --nginx -d <dominio>` (un solo `-d`). El resumen final muestra las 3 URLs y el recordatorio de autorizar `https://<dominio>` en Google Cloud. **Sin compatibilidad con el esquema de 3 dominios** (nadie llegó a desplegar así en producción real): si detecta un `.env.production` sin `NEXT_BASE_PATH` y con más de un origen en `CORS_ALLOWED_ORIGINS`, no lo migra solo — explica los 4 pasos manuales y se detiene.
+  4. **`scripts/deploy-hosting.sh`**: añadido `NEXT_BASE_PATH` a las variables obligatorias, con validación de formato (`/algo`, sin barra final); URLs impresas al terminar reflejan las 3 rutas.
+  5. **Docs**: `docs/guides/deployment.md` reescrita para el dominio único (tabla de rutas, sección propia de `NEXT_BASE_PATH`, migración desde el esquema de 3 subdominios); `.env.production.example` con las 3 URLs sobre un dominio y `NEXT_BASE_PATH=/empresas`. Revisé `docs/` y `README.md` completos por más menciones a `--api-domain`/`--panel-domain`/`--app-domain`/subdominios: solo aparecían en `docs/guides/deployment.md` y `scripts/instalar-produccion.sh`/`deploy/nginx/chambeaya.conf.template` (ya corregidos) y en entradas históricas de `docs/PROGRESO.md` (no se reescriben).
+- Archivos:
+  - Modificados: `apps/web/next.config.ts`, `apps/web/Dockerfile.production`, `docker-compose.production.yml`, `scripts/instalar-produccion.sh` (reescritura completa), `scripts/deploy-hosting.sh`, `deploy/nginx/chambeaya.conf.template` (reescritura completa), `.env.production.example`, `docs/guides/deployment.md` (reescritura completa).
+  - Índice de git (única excepción autorizada): `scripts/deploy-hosting.sh` y `scripts/instalar-produccion.sh` en `100755`.
+  - Sin cambios: `apps/mobile_flutter/Dockerfile.production` y `apps/mobile_flutter/deploy/nginx.conf` (el worker-app ya se quedaba en la raíz; no necesitaba tocarse).
+- Decisiones:
+  1. **`environment: flutter:`** — no aplica a este alcance (era de `CN-20260925-005`).
+  2. **`http://127.0.0.1:8290` en vez del dominio real para la prueba de navegador.** El sandbox de este agente no permite editar `C:\Windows\System32\drivers\etc\hosts` (acceso denegado, sin privilegios de administrador), así que el navegador no puede resolver `chambeaya.grupoamayo.com` hacia el contenedor de prueba. Probé primero con `chambeaya.localtest.me` (un dominio público que resuelve a `127.0.0.1` sin tocar `hosts`), pero el navegador de este entorno lo bloqueó (`net::ERR_BLOCKED_BY_CLIENT` en todos los recursos, consistente con una política de seguridad del propio sandbox contra dominios con apariencia externa). Validé entonces navegando a `http://127.0.0.1:8290` (mismo origen para página + API, sin bloqueos) mientras la plantilla de Nginx generada mantenía `server_name chambeaya.grupoamayo.com` (el valor real, ya validado por separado con `nginx -t`): como es el único `server` para ese `listen`, nginx lo usa por defecto aunque el `Host` de la petición no coincida por nombre, así que la lógica de proxy/rutas/SSE que se ejercitó es exactamente la del archivo real. Lo declaro explícitamente como limitación del entorno, no como validación en el dominio real.
+  3. **Cuentas de prueba insertadas directamente en la base de datos.** El registro de empresas está deshabilitado a propósito en la API (`BUSINESS_REGISTRATION_DISABLED`, `apps/api/src/modules/auth/auth.routes.ts:32`) y el seed de demo exige `NODE_ENV=development` (bloqueado en la imagen de producción). Para probar un login real de empresa y de trabajador, calculé el hash de contraseña con la misma función de la API (`scryptSync` vía `dist/src/modules/auth/auth.service.js`, ejecutada dentro del propio contenedor) e inserté las filas `User`/`Company` por SQL directo. Es una vía de prueba, no algo que quede en ningún script de producto.
+- Validaciones:
+  - `bash -n` y `shellcheck` (`docker run koalaman/shellcheck:stable`) sobre ambos scripts → sin hallazgos.
+  - `docker build` real de `apps/web/Dockerfile.production` con `NEXT_BASE_PATH=/empresas` → construye; contenedor de un solo servicio: `/` → 404, `/empresas` → 200, `/empresas/admin` → 200, assets referenciados como `/empresas/_next/...` (ningún 404 a la raíz).
+  - Stack completo de 4 servicios (`chambeaya-domaintest`, dominio de prueba, puertos propios) + contenedor `nginx:alpine` adicional en la misma red de Compose (`chambeaya-domaintest_default`) usando la plantilla renderizada con los nombres de servicio de Compose (`api`/`web`/`worker-app`) en vez de `127.0.0.1:<puerto>` — la forma correcta de probar "Nginx en un contenedor delante del stack", ya que el `127.0.0.1` de un contenedor no ve el `127.0.0.1` del host. `nginx -t` sobre esa configuración → `successful`. Recorrido con navegador real (Claude Browser):
+    - `/` → app del trabajador (Flutter web) renderizada completa.
+    - `/empresas` → panel Next.js renderizado completo bajo el `basePath`, con sus assets `/empresas/_next/...`.
+    - `/empresas/admin` → pantalla de "Acceso superadmin".
+    - `/empresasX` → cae en la app del trabajador (verificado antes también por `curl`: `200`, no el panel).
+    - `/api` (sin barra) → `308` a `/api/`; `/api/health` → `{"status":"ok"}`.
+    - **Login real en el panel**: con la cuenta de empresa insertada, inicié sesión desde el navegador contra `http://127.0.0.1:8290/empresas` y llegué al dashboard con datos reales ("Buenos días, Empresa de pruebas").
+    - **Login real en la app**: con la cuenta de trabajador insertada, inicié sesión desde el navegador contra `http://127.0.0.1:8290/` y llegué a "Oportunidades para ti".
+    - **SSE a través del proxy**: tras el login del trabajador, la red del navegador registró `GET /api/shifts/events → 200 OK` y la UI mostró "Turnos en tiempo real ­— Las nuevas publicaciones aparecen automáticamente" (indicador de conexión en vivo), confirmando que el feed SSE atraviesa el proxy de un solo dominio.
+    - Ambos logins fueron por la misma ruta de origen (`http://127.0.0.1:8290`), como pidió la tarea.
+    - Stack bajado con `down -v` solo sobre el proyecto propio (`chambeaya-domaintest`); imágenes y contenedor de Nginx adicional eliminados.
+  - Suites del panel sin `basePath` (dev, sin tocar): `npx tsc --noEmit` en `apps/web` → sin errores; `npx playwright test` → `1 skipped`, `103 passed (2.5m)`, igual que el baseline histórico. `apps/web/next-env.d.ts` (autogenerado por Next, cambia de ruta `.next/dev/types/...` a `.next/types/...` al correr un build de producción en el mismo checkout) restaurado con `git checkout` tras las pruebas.
+  - Simulación del instalador con Nginx real (Ubuntu 24.04 + paquete `nginx`, contenedor nuevo, `systemctl`/`certbot`/`docker` como *stubs*, `deploy-hosting.sh` como *stub*): instalación nueva con `--domain chambeaya.grupoamayo.com` → `.env.production` y `chambeaya.conf` correctos, `NEXT_BASE_PATH=/empresas`, `CORS_ALLOWED_ORIGINS` con un solo origen; reinstalación idéntica (idempotencia) → `.env.production` y el sitio de Nginx bit a bit idénticos (`diff`), sin llamar a `systemctl`; conflicto de `server_name` (otro sitio real tomó `chambeaya.grupoamayo.com` primero) → abortó sin escribir `.env.production` ni crear `chambeaya.conf`, sin llamar a `deploy-hosting.sh`; `.env.production` del esquema antiguo de 3 subdominios (sin `NEXT_BASE_PATH`, con 2 orígenes en `CORS_ALLOWED_ORIGINS`) → detectado, explicó los 4 pasos de migración manual y se detuvo sin tocar el archivo.
+  - No ejecutadas (declaradas como riesgo):
+    - Cualquier prueba contra el dominio real `chambeaya.grupoamayo.com` resolviendo de verdad (depende de DNS/Ubuntu real; ver Decisión 2).
+    - `flutter` (no se tocó código Dart en este alcance).
+    - Todo lo específico de un Ubuntu real fuera del contenedor de simulación (systemd, `certbot` real, `ufw`).
+- Riesgos:
+  - La prueba de navegador no usó el nombre de dominio real como origen (ver Decisión 2); la config de Nginx que sí lo usa fue validada por separado con `nginx -t` y es la misma que se ejercitó funcionalmente por `127.0.0.1`.
+  - Persisten los riesgos ya declarados en entradas anteriores sobre lo específico de un Ubuntu real.
+- Siguiente paso: `auditor-opus` audita `CN-20260925-006` junto con `CN-20260925-005` (que sigue pendiente de reauditoría).
+
+### CN-20260925-005 — Corrección de los 2 MEDIOS y 5 BAJOS que dejó abiertos `CN-20260925-004`
+
+- Fecha: 2026-09-25 18:20 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260925-004` (reauditoría `REQUIERE_CAMBIOS` de `CN-20260925-003`; los 5 ALTOS quedaron cerrados, quedaban MEDIO-3 parcial, MEDIO-N1 y BAJO-N1 a BAJO-N5). Diff sin commitear sobre `6fedbf4`, salvo el bit ejecutable de los 2 scripts (única modificación del índice, resincronizada: `git ls-files -s` → ambos `100755`, `git diff --stat` vacío contra el árbol de trabajo).
+- Alcance:
+  - **MEDIO-N1 (conflicto de dominio escribía `.env.production` antes de abortar).** Reordenado `scripts/instalar-produccion.sh`: la detección de Nginx (binario + directorios) y `check_server_name_conflicts()` (antes en la sección 4, después de crear/actualizar `.env.production`) ahora corren en una nueva sección 3, inmediatamente después de validar los 3 dominios y ANTES de tocar `.env.production` o cualquier archivo de Nginx. Un conflicto aborta sin haber escrito nada. Además, para una instalación **existente**, si el `--api-domain` de la corrida no coincide con el dominio ya horneado en `NEXT_PUBLIC_API_URL`, el instalador avisa (sin abortar ni reescribir esa URL, que ya está compilada en las imágenes de `api`/`web`) y explica cómo alinearlo a mano. `docs/guides/deployment.md` actualizado para describir este orden real y el aviso nuevo.
+  - **MEDIO-3 (lo que faltaba: CI de Flutter en rojo por `flutter analyze`).** Corregidos los 10 avisos `curly_braces_in_flow_control_structures` (todos del mismo tipo; ninguno de `unnecessary_to_list_in_spreads` ni `use_build_context_synchronously` estaba presente) envolviendo en `{ }` el cuerpo de los `if` de una sola línea en 4 archivos, sin cambiar ningún comportamiento (mismas condiciones, mismos `return`/`throw`/`setState`). `flutter analyze` pasa ahora con **código 0** dentro de `ghcr.io/cirruslabs/flutter:3.44.0`, el mismo comando exacto que usa `.github/workflows/flutter-tests.yml:34`.
+  - **BAJO-N1 (sin `trap` para Ctrl+C o `reload` fallido).** Nueva función `restore_previous_nginx_state()` (misma lógica que ya usaba el camino de fallo de `nginx -t`) reutilizada por: (a) un `trap on_interrupt INT TERM` armado justo antes de la primera escritura (`cp` a `target_file`) y desarmado (`trap - INT TERM`) en cuanto termina con éxito; (b) `systemctl reload nginx` ahora se captura con `set +e`/`set -e` (el mismo patrón que ya se aplicaba a `nginx -t`) y, si falla, dispara la misma restauración exacta.
+  - **BAJO-N2 (mensaje "algo cambió" engañoso).** Reescrito: ya no afirma que cambiaron dominios o puertos cuando la única diferencia real puede ser el propio bloque que Certbot agregó.
+  - **BAJO-N3 (`deploy-hosting.sh` no avisaba de `API_TRUST_PROXY=true`).** Añadido el mismo aviso de seguridad que ya tenía `instalar-produccion.sh`, ahora también en el camino habitual de actualización.
+  - **BAJO-N4 (`.otf`, `AssetManifest.bin`, `NOTICES` sin `Cache-Control`).** Simplificado `apps/mobile_flutter/deploy/nginx.conf`: en vez de enumerar extensiones (que se queda corto cada vez que Flutter agrega un tipo de archivo nuevo), todo lo que no sea uno de los 3 archivos con `no-store` cae en un único `location /` con `Cache-Control: no-cache`, que cubre automáticamente `.otf`, `.bin`, `NOTICES` (sin extensión) y cualquier archivo futuro.
+  - **BAJO-N5 (Flutter 3.47.1 local desalinea el lockfile).** Documentada la versión exacta requerida (3.44.0) de forma prominente en `apps/mobile_flutter/README.md` (sección nueva al inicio) y `docs/guides/local-development.md` (requisito previo), con instrucciones para instalar 3.44.0 (FVM o archivo de releases) o usar `--enforce-lockfile` si no se tiene. Evalué declarar `environment: flutter: ">=3.44.0 <3.45.0"` en `pubspec.yaml`; comprobado empíricamente con el Flutter local 3.47.1 de esta máquina, `flutter pub get` **no respeta esa restricción en desarrollo local** (solo aplicaría al publicar en pub.dev), así que no habría evitado el problema real y decidí no añadirla para no dar una falsa sensación de protección.
+- Archivos:
+  - Modificados: `scripts/instalar-produccion.sh` (reordenado + trap + mensajes), `scripts/deploy-hosting.sh` (aviso `API_TRUST_PROXY`), `apps/mobile_flutter/deploy/nginx.conf` (caché simplificada), `apps/mobile_flutter/lib/features/auth/auth_page.dart`, `apps/mobile_flutter/lib/features/marketplace/http_worker_marketplace_repository.dart`, `apps/mobile_flutter/lib/features/profile/profile_home_page.dart`, `apps/mobile_flutter/lib/features/profile/talent_profile_repository.dart` (10 avisos de `flutter analyze`), `apps/mobile_flutter/README.md`, `docs/guides/local-development.md`, `docs/guides/deployment.md` (documenta el orden real y los avisos nuevos).
+  - Índice de git (única excepción autorizada): `scripts/deploy-hosting.sh` y `scripts/instalar-produccion.sh` en `100755`, resincronizados al contenido final de este cierre.
+- Decisiones:
+  1. **`environment: flutter:` en `pubspec.yaml` descartado con evidencia, no por intuición.** Antes de decidir, lo probé: agregué `flutter: ">=3.44.0 <3.45.0"` a un `pubspec.yaml` de prueba y corrí `flutter pub get` con el Flutter 3.47.1 instalado en esta máquina — se ejecutó igual, sin ningún error ni aviso sobre la restricción, y resolvió 66 paquetes distintos a los del lockfile. Confirmado que esa restricción no protege nada en desarrollo local; la única barrera real sigue siendo la documentación explícita más `--enforce-lockfile`.
+  2. **Aviso, no aborto, para el dominio de API que no coincide en una instalación existente.** Abortar ahí impediría actualizar Nginx/certificados por un desajuste que además no se puede corregir solo (las imágenes ya están compiladas con el dominio anterior); un aviso claro con la instrucción exacta es más útil y menos disruptivo.
+  3. **BAJO-N1 probado con `timeout -s INT`, no con `kill -INT` a un job en segundo plano.** El primer intento de simular Ctrl+C con `cmd & ...; kill -INT $PID` no funcionó: bash ignora `SIGINT`/`SIGQUIT` por diseño en los procesos que pone en segundo plano con `&` (para que un Ctrl+C real en la terminal no mate jobs en segundo plano sin querer). Lo documento porque me lo encontré en el propio proceso de validar y podría confundir a quien lea las pruebas: `timeout -s INT N ./script` ejecuta el script en primer plano (como lo haría un operador real) y sí entrega la señal a todo el grupo de procesos en primer plano, incluido el hijo que esté bloqueado (`systemctl`/`sleep` en la prueba).
+- Validaciones:
+  - `bash -n` y `shellcheck` (`docker run koalaman/shellcheck:stable`) sobre ambos scripts → sin hallazgos, tras cada cambio.
+  - `git ls-files -s scripts/deploy-hosting.sh scripts/instalar-produccion.sh` → ambos `100755`; `git diff --stat` de esos 2 archivos → vacío (índice y árbol de trabajo coinciden con el contenido final).
+  - Dentro de `ghcr.io/cirruslabs/flutter:3.44.0`, contra el proyecto completo: `flutter pub get --enforce-lockfile` → `Got dependencies!`; `flutter analyze` → **`No issues found!`, código 0** (antes: 10 avisos, código 1); `flutter test` → `+147: All tests passed!`. Confirmé que `.github/workflows/flutter-tests.yml:33-35` ejecuta exactamente `flutter pub get --enforce-lockfile`, `flutter analyze` y `flutter test` sin flags adicionales, así que el CI pasaría con este estado.
+  - `docker build` real de `worker-app` (`chambeaya-test-app3:local`) con el `nginx.conf` nuevo y el código Dart corregido → construye igual. Contenedor levantado (`-p 127.0.0.1:8299:8080`) y verificado con `curl -I`: `assets/NOTICES`, `assets/AssetManifest.bin` y `assets/fonts/MaterialIcons-Regular.otf` (los 3 que BAJO-N4 señaló sin cabecera) ahora responden `Cache-Control: no-cache`; `main.dart.js` también `no-cache`; `index.html` sigue en `no-store`; una ruta profunda (`/jobs/999`) responde `200` (fallback de SPA intacto). Contenedor e imagen eliminados al terminar.
+  - `nginx -t` sobre `apps/mobile_flutter/deploy/nginx.conf` reescrito, vía `docker run nginx:alpine` → `successful`.
+  - Simulación completa con Nginx **real** (Ubuntu 24.04 + paquete `nginx`, contenedor nuevo) y `systemctl`/`certbot`/`docker` como *stubs* (`deploy-hosting.sh` también sustituido por un *stub*, ya validado por separado):
+    - **Conflicto en instalación nueva:** con `otroproyecto.conf` activo usando `server_name app1.test`, el instalador abortó con el mismo mensaje de antes, y confirmé explícitamente con `ls .env.production` que el archivo **no llegó a crearse** (antes sí se creaba y quedaba con el dominio equivocado).
+    - **`reload` fallido tras `nginx -t` exitoso:** con un `systemctl` que hace pasar `nginx -t` pero falla al recargar, el sitio instalado quedó **byte a byte idéntico** (`diff`) al estado anterior a la corrida, y el symlink de `sites-enabled` seguía resolviendo; `nginx -t` real volvió a pasar después.
+    - **Ctrl+C real durante la ventana vulnerable:** con un `systemctl` que tarda 5 s en recargar y `timeout -s INT 2 ./scripts/instalar-produccion.sh ...`, la señal llegó durante la espera del `reload`; el script imprimió "Instalación de Nginx interrumpida; se restauró el estado anterior exacto" y salió con 124 (de `timeout`); el archivo instalado quedó idéntico al anterior a la corrida (`diff`), el symlink seguía resolviendo, no quedó ningún proceso `systemctl`/`sleep` colgado, y `nginx -t` real volvió a pasar.
+    - **Certbot presente sin cambios reales:** reinstalación con los mismos dominios y el bloque de Certbot ya presente → el nuevo mensaje ya no dice "algo cambió (dominios o puertos)".
+    - **Dominio de API distinto en instalación existente:** `--api-domain otroapi.test` contra un `.env.production` con `api1.test` → aviso impreso con la explicación completa; `NEXT_PUBLIC_API_URL` en el archivo se confirmó sin cambios (`grep`).
+    - Repetí también, sin regresiones, los escenarios ya cubiertos por `CN-20260925-003`: instalación nueva limpia, idempotencia (`diff` de `.env.production` y del sitio, ambos idénticos), `--force-nginx` sobre un sitio con Certbot, dominio inválido rechazado, `chown` a `$SUDO_USER`, y Nginx ausente pese a existir los directorios (binario renombrado).
+  - `deploy-hosting.sh --env-file <archivo con API_TRUST_PROXY=true> --no-build` → imprime el aviso de seguridad antes de continuar. (Nota operativa: esta prueba, sin querer, sí disparó un `docker compose up` real porque `--no-build` no evita el `up`; lo detecté de inmediato, bajé la pila con `down -v` y borré las 3 imágenes — el volumen no tenía datos previos, se creó y se destruyó en la misma prueba.)
+  - No ejecutadas (declaradas como riesgo): todo lo que depende de un Ubuntu real fuera de este contenedor de simulación (systemd real, `certbot` real emitiendo certificados, `ufw`, `git pull` real sin `sudo` con el grupo `docker`); el disco lleno como causa de fallo en la copia de seguridad (analizado por lectura de código, no reproducido).
+- Riesgos:
+  - Persisten los riesgos ya declarados en `CN-20260925-001/003` sobre lo específico de un Ubuntu real.
+  - El instalador sigue sin reintentar la validación de dominios cuando los 3 llegan por flag (ver `CN-20260925-003`); un typo por flag exige volver a ejecutar el comando completo.
+  - La observación de la auditoría sobre `server_name` comodín/`default_server` (no enumerada como hallazgo N1–N5) queda sin cambios, fuera de este alcance.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260925-005` contra los hallazgos de `CN-20260925-004`.
+
+### CN-20260925-004 — Reauditoría de `CN-20260925-003` (corrección de los hallazgos de `CN-20260925-002`)
+
+- Fecha: 2026-09-25 15:00 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260925-003`, que corrige los hallazgos de `CN-20260925-002`. HEAD sigue en `6fedbf4`.
+  - Índice: solo `scripts/deploy-hosting.sh` y `scripts/instalar-produccion.sh`, ambos en `100755`. `git diff --quiet -- scripts/` confirma que el índice y el árbol de trabajo coinciden.
+- Alcance: reauditoría independiente del instalador, `nginx.conf` de `worker-app`, el Dockerfile, `pubspec.lock`, `.gitignore`, `.dockerignore` y la guía. Reproduje los escenarios con el Nginx real de Ubuntu.
+- Archivos:
+  - Revisados: todo el diff; `scripts/instalar-produccion.sh` completo.
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`. Añadí que para actualizar sin `sudo` hace falta pertenecer al grupo `docker` (y qué implica), y el caso de un clon hecho como `root`.
+- Decisiones (estado de los hallazgos de `002`):
+  - **ALTO-1: cerrado.**
+    - Con el mismo análisis que `app.ts` y `X-Forwarded-For: 6.6.6.6, 203.0.113.7`: `1` da `req.ip = 203.0.113.7` (la IP real) y `true` da `6.6.6.6` (la falsificada).
+    - Una instalación existente con `true` conserva el valor y recibe el aviso (probado).
+  - **ALTO-2: cerrado.** Probado con el Nginx real de Ubuntu 24.04:
+    - Una nueva ejecución con bloques de certbot deja el archivo intacto (`cmp`) y no llama a `systemctl`.
+    - `--force-nginx` hace una copia idéntica a la anterior, reemplaza el archivo y recarga.
+    - Si `nginx -t` falla con un archivo previo, lo restaura byte a byte y el enlace sigue funcionando.
+    - Si falla sin archivo previo, retira el archivo y el enlace.
+    - Un enlace roto heredado se limpia solo.
+    - En ningún camino queda un enlace roto.
+  - **ALTO-3: cerrado en Nginx.** Aborta sin tocar `/etc/nginx`. Queda la parte de `.env.production`, ver MEDIO-N1.
+  - **ALTO-4: cerrado.** `main.dart.js` y `flutter_bootstrap.js` se sirven con `no-cache`; `index.html`, las rutas profundas y `version.json` con `no-store`.
+  - **ALTO-5: cerrado.** Ambos scripts en `100755`.
+  - **MEDIO-1: cerrado.** `.env.production` queda como `600 ops:ops`, otro usuario no puede leerlo, y `deploy-hosting.sh` sin `sudo` termina en "Despliegue listo" (con `docker` simulado).
+  - **MEDIO-2: cerrado.** Se rechazan `a.x.example;evil` y los dominios repetidos, con código 2.
+  - **MEDIO-3: parcial.**
+    - En `ghcr.io/cirruslabs/flutter:3.44.0`: `pub get --enforce-lockfile` pasa y deja el lockfile sin cambios, y `flutter test` da `+147`. El diff del lockfile solo baja `meta`, `vector_math`, `matcher` y `test_api`.
+    - Pero `flutter analyze` sale con **código 1**: sus 10 avisos `info` bastan para fallar por defecto. El paso `flutter analyze` de `.github/workflows/flutter-tests.yml` seguirá en rojo, así que **el CI de Flutter no volverá a pasar**.
+    - Corrección: resolver los 10 avisos (preferible) o pasar `--no-fatal-infos` en el CI de forma explícita.
+  - **MEDIO-4: cerrado.** El origen de la app se añade a CORS.
+  - **BAJO-1 a BAJO-4: cerrados.**
+- Hallazgos nuevos:
+  - **MEDIO-N1. El conflicto de dominio aborta, pero después de escribir `.env.production`.**
+    - Dónde: `scripts/instalar-produccion.sh:231-289` se ejecuta antes que `:436-438`.
+    - Qué pasa: en una instalación nueva con un dominio en conflicto, el script aborta pero `.env.production` ya quedó creado con ese dominio. Al reintentar con otro dominio, CORS queda así: `https://panel.x.example,https://app.x.example,https://app2.x.example`, con el origen del otro proyecto dentro.
+    - Si el dominio en conflicto era el de la API, `NEXT_PUBLIC_API_URL`/`API_BASE_URL` quedan mal y ninguna ejecución posterior los corrige.
+    - La guía (líneas 102-107 y 341-342) dice "sin escribir nada".
+    - Corrección: comprobar los conflictos antes de escribir `.env.production`, y avisar o abortar si los dominios pasados no coinciden con las URLs del `.env` existente.
+  - **BAJO-N1.** No hay `trap` que restaure al fallar (`:494-533`). Estado que queda en cada caso:
+    - Si falla `reload`: el archivo nuevo queda en disco sin cargar (`nginx -t` OK).
+    - Con `SIGTERM` durante `nginx -t`: el archivo nuevo queda sin validar (código 143).
+    - Con el disco lleno: la copia de respaldo falla antes de tocar el archivo destino (análisis, no simulado).
+    - En ningún caso queda un enlace roto.
+  - **BAJO-N2.** Al volver a ejecutar tras certbot sin cambios, el script dice "algo cambió (dominios o puertos)" (`:480-486`), lo que confunde. Además, `--certbot` repetido invoca certbot sin terminal (sin probar).
+  - **BAJO-N3.** `deploy-hosting.sh`, que es el camino habitual de actualización, no avisa de `API_TRUST_PROXY=true`.
+  - **BAJO-N4.** `apps/mobile_flutter/deploy/nginx.conf:22`: `.otf`, `AssetManifest.bin` y `NOTICES` se sirven sin `Cache-Control` (caché heurística).
+  - **BAJO-N5.** Con Flutter 3.47.1 en local, `flutter pub get` vuelve a desalinear el lockfile. Conviene documentarlo o alinear la versión.
+  - Tampoco se detectan `server_name` comodín ni `default_server`.
+- Validaciones:
+  - Simulación de 11 escenarios con el `nginx` real (`apt`) en `ubuntu:24.04`, con `docker`, `systemctl` y `certbot` simulados y `sudo` real → resultados citados arriba.
+  - Flutter 3.44.0 → pub, analyze (código real 1) y test, como se detalla en MEDIO-3.
+  - `compose config` → `name: chambeaya-production`, volúmenes `chambeaya-production_chambeaya-production-{db,private-documents}` y 3 `host_ip: 127.0.0.1`. La plantilla conserva `client_max_body_size 8m` y el bloque SSE. `CHAMBEAYA_DEMO_MODE` no aparece.
+  - Limpieza: se eliminó la imagen `chambeaya-audit-ubnginx:tmp` y no quedan contenedores.
+- Riesgos: `NO_EJECUTADAS` todas las pruebas en un Ubuntu real (systemd, certbot real, ufw, `git pull` real sin `sudo` con el grupo `docker`).
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-N1 y lo que queda de MEDIO-3 (idealmente también los BAJO-N); después `auditor-opus` vuelve a auditar.
+
+### CN-20260925-003 — Corrección de los 5 hallazgos ALTOS, 4 MEDIOS y 4 BAJOS de `CN-20260925-002`
+
+- Fecha: 2026-09-25 16:45 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260925-002` (auditoría `REQUIERE_CAMBIOS` de `CN-20260925-001`). Diff sin commitear sobre `6fedbf4`, salvo el bit ejecutable de los 2 scripts (única modificación del índice, ver ALTO-5).
+- Alcance: cierra los 5 ALTOS, los 4 MEDIOS y los 4 BAJOS de `CN-20260925-002`.
+  - **ALTO-1 (IP falsificable).** `scripts/instalar-produccion.sh` genera `API_TRUST_PROXY=1` (antes `true`) en instalaciones nuevas; en una ya existente nunca cambia un valor que ya tenga (para no alterar en silencio algo configurado), pero si sigue en `true` imprime un aviso de seguridad explícito con la corrección exacta. `.env.production.example` y `docs/guides/deployment.md` actualizados para recomendar `1`, nunca `true`.
+  - **ALTO-2 (reinstalar destruye Nginx).** Reescrita la sección 4 del instalador: (a) si el `chambeaya.conf` instalado es idéntico al generado, no lo toca; si es distinto y tiene el comentario `managed by Certbot`, no lo sobrescribe salvo `--force-nginx` (flag nuevo), y siempre hace una copia `chambeaya.conf.bak.<fecha-hora>` antes de reemplazar; (b) si `nginx -t` falla tras instalar, restaura el archivo exacto desde esa copia (o lo borra, si no existía antes) y retira el symlink de `sites-enabled` **solo si lo creó esta misma corrida** (si ya existía, se deja intacto: en cuanto se restaura o se borra `target_file` deja de estar colgando). Un symlink roto heredado de una ejecución antigua que apunte a la ruta propia se autolimpia al inicio.
+  - **ALTO-3 (choque de `server_name`).** Nueva función `check_server_name_conflicts()`: parsea `nginx -T` (excluyendo tanto la ruta en `sites-available` como el symlink en `sites-enabled` del propio Chambeaya) y aborta si alguno de los 3 dominios ya es `server_name` de otro sitio, antes de escribir nada. También se trata un `conflicting server name` en la salida de `nginx -t` como fallo (dispara la restauración de ALTO-2) aunque el código de salida sea 0.
+  - **ALTO-4 (caché de un año en archivos sin hash).** `apps/mobile_flutter/deploy/nginx.conf`: la ubicación por extensión (`.js`, `.css`, imágenes, fuentes, ahora también `.json`/`.wasm`) pasa de `public, max-age=31536000, immutable` a `no-cache` (revalida con ETag); `index.html`, `flutter_service_worker.js` y `version.json` siguen en `no-store`, sin cambios.
+  - **ALTO-5 (scripts sin bit ejecutable).** `git add` + `git update-index --chmod=+x` sobre `scripts/deploy-hosting.sh` y `scripts/instalar-produccion.sh`: quedan `100755` en el índice. Es la única modificación del índice de este cierre.
+  - **MEDIO-1 (actualizar exige sudo).** Si el instalador corre con `sudo` (`$SUDO_USER` presente), deja `.env.production` a nombre de esa cuenta (600), no de `root`, para que `./scripts/deploy-hosting.sh --pull` funcione sin sudo después, tal como promete la meta original del flujo (dos comandos, el segundo sin sudo). Se eligió esta opción, y no exigir sudo también para actualizar, porque es la más simple para quien opera el servidor y no contradice la meta ni el resto de la guía.
+  - **MEDIO-2 (dominios sin validar).** Nueva `normalize_domain()` (quita `http(s)://`, ruta y barra final) y `validate_domain_or_die()` (regex de nombre de host), aplicadas a los 3 dominios vengan de flag o de la pregunta interactiva (que ahora reintenta en vez de fallar), más una comprobación de que los 3 sean distintos. Si `.env.production` ya existe y tiene un esquema duplicado (`https://https://...`, secuela de una ejecución antigua sin esta validación) en `NEXT_PUBLIC_API_URL`/`API_BASE_URL`, el instalador lo detecta y se detiene explicando el problema en vez de intentar adivinar la corrección.
+  - **MEDIO-3 (lockfile de Flutter, CI en rojo desde el 16-09).** `apps/mobile_flutter/pubspec.lock` regenerado dentro de `ghcr.io/cirruslabs/flutter:3.44.0` (la misma imagen fijada en CI y en el Dockerfile de producción): solo cambian los 4 paquetes que de verdad lo exigían (los que el propio SDK empaqueta): `meta` 1.19.0→1.18.0, `vector_math` 2.4.2→2.2.0, `matcher` 0.12.20→0.12.19, `test_api` 0.7.12→0.7.11; ningún otro paquete sube de versión (confirmado con `diff` línea por línea contra el lockfile anterior). `apps/mobile_flutter/Dockerfile.production` recupera `--enforce-lockfile` en sus 2 `RUN flutter pub get`.
+  - **MEDIO-4 (CORS no se actualiza en instalaciones existentes).** En una instalación con `.env.production` previo al `worker-app`, si `CORS_ALLOWED_ORIGINS` no incluye `https://<dominio-de-la-app>`, el instalador lo añade (sin tocar el resto de la variable ni ninguna otra) y muestra el valor antes y después. Si `API_TRUST_PROXY` faltaba por completo, se añade como `1` (no como `true`).
+  - **BAJO-1 (`docker image prune -f` afecta a todo el host).** `scripts/deploy-hosting.sh` ahora filtra por la etiqueta que el propio Compose pone en sus imágenes: `docker image prune -f --filter "label=com.docker.compose.project=chambeaya-production"`.
+  - **BAJO-2 (`chambeaya.conf.generado` sin ignorar).** Añadido a `.gitignore` (`deploy/nginx/chambeaya.conf.generado` y `deploy/nginx/*.bak.*`, este último por si alguna vez se genera dentro del repo en una prueba).
+  - **BAJO-3 (Nginx detectado solo por directorios).** La detección ahora exige también `command -v nginx`, no solo `sites-available`/`conf.d`.
+  - **BAJO-4 (`android/local.properties` en el contexto de build).** Añadido a `.dockerignore` bajo las exclusiones ya existentes de `apps/mobile_flutter`.
+- Archivos:
+  - Modificados: `scripts/instalar-produccion.sh` (reescritura extensa: validación/normalización de dominios, `--force-nginx`, respaldo y restauración de Nginx, detección de conflictos de `server_name`, ajuste de propietario de `.env.production`, actualización de `CORS_ALLOWED_ORIGINS`/`API_TRUST_PROXY` en instalaciones existentes), `scripts/deploy-hosting.sh` (prune filtrado por etiqueta), `apps/mobile_flutter/deploy/nginx.conf` (caché), `apps/mobile_flutter/Dockerfile.production` (`--enforce-lockfile` de vuelta), `apps/mobile_flutter/pubspec.lock` (4 versiones), `.env.production.example`, `.gitignore`, `.dockerignore`, `docs/guides/deployment.md` (actualizado sobre lo que ya había corregido la auditoría, sin revertirlo: respaldo con `sh -c`, respaldo de documentos, aclaración de `db` sin puertos, qué hacer sin Nginx u con otro proxy).
+  - Índice de git (única excepción autorizada): `scripts/deploy-hosting.sh` y `scripts/instalar-produccion.sh` en `100755`.
+- Decisiones:
+  1. **Bug propio encontrado y corregido durante la validación: `set -e` abortaba antes de restaurar.** La primera versión de la corrección de ALTO-2 capturaba `nginx_test_output="$(nginx -t 2>&1)"` sin desactivar `errexit`; como `nginx -t` sale con código distinto de cero cuando la config no valida, `set -e` mataba el script en esa misma línea, **antes** de llegar a la lógica de restauración — exactamente la clase de fallo que ALTO-2 quería cerrar, reintroducida por mi propia primera implementación. Lo detecté reproduciendo el escenario en un contenedor con Nginx real (ver Validaciones) y lo corregí con `set +e` / `set -e` alrededor de esa única línea, verificado de nuevo con el mismo escenario hasta que la restauración ocurrió de verdad.
+  2. **Segundo bug propio: la exclusión de ALTO-3 no reconocía la ruta real que reporta `nginx -T`.** Mi primera versión excluía solo `sites-available/chambeaya.conf`, pero `nginx -T` identifica los archivos incluidos vía `sites-enabled/*` por esa ruta (el symlink), no por su destino; el resultado era que una reinstalación con los mismos dominios se marcaba a sí misma como "conflicto". Corregido excluyendo también `sites-enabled/chambeaya.conf`; reproducido y verificado (ver Validaciones, Escenario B).
+  3. **`--force-nginx` en vez de fusionar los bloques de Certbot.** Reconstruir a ciegas los bloques 443/SSL que certbot añadió no es seguro sin invocar certbot de verdad; la opción más simple y explícita es no tocar el archivo si tiene esos bloques y cambió algo, y dejar que un operador decida conscientemente con `--force-nginx` (perdiendo esos certificados hasta volver a correr certbot), como ya sugería la propia auditoría.
+  4. **Lockfile: solo los 4 paquetes estrictamente necesarios.** Un primer intento sin copiar el `pubspec.lock` existente al contenedor de resolución hacía que `pub get` recalculara todo desde cero y subiera 12 paquetes más sin necesidad (`dbus`, `file_picker`, `google_sign_in_ios`, etc.). Copiando el lockfile existente junto al `pubspec.yaml` antes de `flutter pub get` (sin `--enforce-lockfile`), el resolutor de pub prefiere mantener las versión ancladas y sólo cambia las 4 que el SDK 3.44.0 obliga a cambiar. Ninguna dependencia declarada en `pubspec.yaml` exige un SDK mayor a 3.44.0: no hizo falta subir la versión fijada en CI/Dockerfile.
+  5. **MEDIO-1: `chown` al usuario real en vez de exigir sudo también para actualizar.** Ver Alcance; es la lectura más simple de "en un par de comandos, sin rodeos" de la meta original.
+  6. **API_TRUST_PROXY existente no se sobrescribe, solo se avisa.** Cambiar en silencio una variable de seguridad ya configurada por el operador podría sorprenderlo; se prefirió un aviso explícito con la corrección exacta a aplicar.
+- Validaciones:
+  - `bash -n` y `shellcheck` (`docker run koalaman/shellcheck:stable`) sobre ambos scripts → sin hallazgos, en cada iteración (incluidas las 2 rondas de correcciones de los bugs propios de la Decisión 1 y 2).
+  - `git ls-files -s scripts/deploy-hosting.sh scripts/instalar-produccion.sh` → ambos `100755` (verificado también tras volver a `git add` para que el índice reflejara el contenido final, no una versión intermedia).
+  - `docker build` real de las 3 imágenes de producción tras los cambios: `api` y `web` sin cambios; `worker-app` con `pubspec.lock` regenerado y `--enforce-lockfile` restaurado → construye igual (`Got dependencies!`, sin error).
+  - Dentro de `ghcr.io/cirruslabs/flutter:3.44.0`, contra el proyecto completo: `flutter pub get --enforce-lockfile` → `Got dependencies!` (antes fallaba con exit 65); `flutter analyze` → mismos 10 avisos de nivel `info` que ya documentaba `CN-20260923-019` (ninguno nuevo); `flutter test` → `+147: All tests passed!`.
+  - `nginx -t` sobre `deploy/nginx/chambeaya.conf.template` renderizada y sobre `apps/mobile_flutter/deploy/nginx.conf`, vía `docker run nginx:alpine` → `successful` en ambas.
+  - Stack completo de producción levantado de nuevo (proyecto propio `chambeaya-finalcheck`, dominios y puertos de prueba): los 4 servicios `healthy`; `curl` a `main.dart.js` → `Cache-Control: no-cache` (antes `immutable, max-age=31536000`); `index.html` sigue en `no-store`; `docker images -f "label=com.docker.compose.project=chambeaya-finalcheck"` solo lista las 3 imágenes de ese proyecto. Bajado con `down -v` solo sobre ese proyecto propio.
+  - Simulación completa del instalador con Nginx **real** (Ubuntu 24.04 + paquete `nginx`, no una imagen `alpine` de solo lectura) y `systemctl`/`certbot`/`docker` sustituidos por *stubs* que registran sus llamadas, más `scripts/deploy-hosting.sh` sustituido por un *stub* (para no repetir el `docker compose up` real, ya cubierto por la validación anterior). Escenarios, todos reproducidos y con el resultado esperado:
+    - **A. Instalación nueva:** `.env.production` creado (`API_TRUST_PROXY=1`), `chambeaya.conf` instalado y enlazado, `nginx -t`/`systemctl reload` reales exitosos, `certbot --nginx -d ...` invocado (registrado por el stub).
+    - **B. Reinstalación idéntica (idempotencia):** `.env.production` y `chambeaya.conf` bit a bit idénticos antes/después (`diff`); no se llama a `systemctl` (se detecta "ya idéntico" y no se toca).
+    - **C. Sitio con bloque `managed by Certbot` + dominios/puertos que cambiaron:** sin `--force-nginx`, el archivo instalado queda intacto (`diff` confirma) y no se llama a `systemctl`; con `--force-nginx`, se crea la copia de seguridad, se verifica que es idéntica al contenido previo, se instala la versión nueva (sin el bloque de Certbot, puerto actualizado) y se recarga Nginx de verdad.
+    - **D. `nginx -t` falla** (plantilla corrompida a propósito con una directiva inválida): tras el primer intento (que expuso el bug de la Decisión 1), reproducido de nuevo con el fix — el archivo instalado queda **byte a byte idéntico** al estado anterior a la corrida (`diff` contra una copia de referencia), el symlink de `sites-enabled` sigue resolviendo (no cuelga), `nginx -t` vuelve a pasar sobre el estado restaurado, y `systemctl` no se llamó.
+    - **E. Conflicto de dominio:** un sitio ajeno (`otroproyecto.conf`) con `server_name app1.test` ya activo (confirmado que Nginx solo avisa "conflicting server name ... ignored" y sigue sirviendo, tal como describía la auditoría); el instalador aborta antes de escribir nada (`.env.production` y `chambeaya.conf` sin cambios, `deploy-hosting.sh` y `systemctl` no invocados).
+    - Adicional: dominio inválido (`"no es un dominio"`) rechazado sin tocar disco; `.env.production` con esquema duplicado detectado y bloqueado con mensaje explicativo; `--api-domain "https://api2.test/"` normalizado correctamente a `api2.test`; con `SUDO_USER=opsuser` exportado, `.env.production` quedó `opsuser:opsuser` y ese usuario pudo leerlo sin sudo; con el binario `nginx` renombrado temporalmente, el instalador cayó correctamente a la ruta "sin Nginx" pese a existir `sites-available`/`sites-enabled`; una instalación previa al `worker-app` (sin `APP_HOST_PORT`, con `API_TRUST_PROXY=true` y `CORS_ALLOWED_ORIGINS` sin el origen de la app) terminó con `APP_HOST_PORT`/`API_BASE_URL` añadidos, `CORS_ALLOWED_ORIGINS` con el origen de la app agregado (mostrando antes/después) y un aviso de seguridad sobre `API_TRUST_PROXY=true` sin cambiarlo.
+  - No ejecutadas (riesgo):
+    - Todo lo que depende de un Ubuntu real fuera de este contenedor de simulación: `ufw`, `ufw allow`, `ufw` interactuando con Docker, `ip6tables`, un `certbot` real emitiendo certificados de verdad (se usó un *stub*), y `systemd` real (se usó un *stub* que llama a `nginx -s reload` directamente; el Nginx del contenedor de simulación sí es el binario real de Ubuntu, no un doble).
+    - `flutter build web` de `worker-app` en un dispositivo o navegador real, más allá de las capturas de cabeceras HTTP ya hechas.
+- Riesgos:
+  - Persisten los riesgos ya declarados en `CN-20260925-001` sobre lo específico de un Ubuntu real (systemd, `ufw`, `certbot` real) que no se puede reproducir aquí; esta corrección amplía la cobertura simulada (Nginx real, no solo el binario, dentro de un contenedor Ubuntu) pero sigue sin ser el hardware/SO final.
+  - El instalador no reintenta la validación de dominios cuando los 3 llegan por flag (solo reintenta en el modo interactivo); un typo por flag exige volver a ejecutar el comando completo. Se consideró aceptable frente a la complejidad de reconstruir el estado de flags a mitad de validación.
+  - `docker-compose.production.yml` sigue sin fijar `name:` en los volúmenes (comportamiento heredado, no tocado en este alcance).
+- Siguiente paso: `auditor-opus` reaudita `CN-20260925-003` contra los hallazgos de `CN-20260925-002`.
+
+### CN-20260925-002 — Auditoría de `CN-20260925-001` (despliegue "todo en Docker", instalador, `worker-app` y Nginx del host)
+
+- Fecha: 2026-09-25 14:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260925-001`. El diff no está comiteado y parte de `6fedbf4`.
+- Alcance: revisé de forma independiente el diff completo y los archivos nuevos. Reproduje los escenarios de riesgo en contenedores.
+- Archivos:
+  - Revisados: todo el diff; `apps/api/src/app.ts` (CORS y `trust proxy`); `apps/api/src/middleware/rate_limit.ts`; `apps/api/src/modules/marketplace/marketplace.routes.ts` (SSE); `apps/api/src/modules/talent/talent.routes.ts` (límites); `apps/mobile_flutter/lib/main.dart` y `lib/core/config/app_config.dart`; `.github/workflows/flutter-tests.yml`; `apps/mobile_flutter/pubspec.lock`.
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`.
+    - El respaldo con `pg_dump` no funcionaba: las variables se expandían en la shell del host, donde están vacías. Ahora se evalúa dentro del contenedor (`sh -c '...'`), igual que en la sección de instancias Cumple Now.
+    - Añadí el respaldo del volumen de documentos y un procedimiento de restauración.
+    - Aclaré que `db` no publica puertos.
+    - Añadí qué hacer si no hay Nginx o si hay otro proxy.
+- Decisiones (hallazgos):
+  - **Críticos: ninguno.**
+  - **ALTO-1. Suplantación de IP que anula el límite de intentos de `/api/auth`.**
+    - Dónde: `scripts/instalar-produccion.sh:212` (`API_TRUST_PROXY=true`) junto con `deploy/nginx/chambeaya.conf.template:63` (`$proxy_add_x_forwarded_for`).
+    - Qué pasa: con `trust proxy` en `true`, Express toma como `req.ip` la primera dirección de `X-Forwarded-For`, y esa la controla el cliente. Basta rotar la cabecera para esquivar el límite de intentos del login.
+    - Evidencia: con Express del repositorio y `X-Forwarded-For: 6.6.6.6, 203.0.113.7`, `true` da `req.ip = 6.6.6.6` y `1` da `203.0.113.7`.
+    - Corrección: generar `API_TRUST_PROXY=1` (un salto: el Nginx del host) y actualizar la guía.
+  - **ALTO-2. Volver a ejecutar el instalador daña el sitio Nginx.** Está en `scripts/instalar-produccion.sh:286-303`.
+    - (a) `cp` sobrescribe sin respaldo el `chambeaya.conf` que certbot ya modificó, y se pierde HTTPS de los 3 dominios. La app compila `https://` en `API_BASE_URL`, así que deja de funcionar.
+    - (b) Si `nginx -t` falla en una nueva ejecución, se borra el archivo anterior, que sí funcionaba, pero queda el symlink previo colgando en `sites-enabled`. Desde ese momento `nginx -t`, `reload` o un reinicio fallan para **todos** los proyectos del servidor.
+    - Evidencia: simulación como root con `nginx` y `systemctl` falsos: la 2.ª ejecución da "LINEAS DE CERTBOT PERDIDAS", la 3.ª da `open() /etc/nginx/sites-enabled/chambeaya.conf failed`.
+    - Además, la guía afirma lo contrario (líneas 91-93 y 247-250).
+    - Corrección: hacer una copia de respaldo y restaurarla si algo falla; no sobrescribir un archivo que ya contiene `managed by Certbot`, o regenerarlo con 443 conservado.
+  - **ALTO-3. Un dominio que choca con otro proyecto le quita el tráfico.**
+    - Dónde: `scripts/instalar-produccion.sh:296`.
+    - Qué pasa: si un dominio coincide con el `server_name` de otro proyecto, `nginx -t` pasa con un simple aviso (`conflicting server name ... ignored`, código 0) y se recarga. `chambeaya.conf` va primero en orden alfabético, así que se lleva el tráfico del otro proyecto.
+    - Evidencia: `nginx:alpine` con `otroproyecto.conf` y el mismo dominio: la respuesta llegó al `upstream` de Chambeaya (502 hacia `127.0.0.1:3100`).
+    - Corrección: antes de instalar, revisar `nginx -T` en busca de `server_name` ya usados, y tratar `conflicting server name` como fallo con reversión.
+  - **ALTO-4. Los archivos principales de la app del trabajador quedan en caché un año.**
+    - Dónde: `apps/mobile_flutter/deploy/nginx.conf:67-70`.
+    - Qué pasa: se sirven con `immutable, max-age=31536000` aunque **no tienen hash**. Lo verifiqué listando la imagen construida: `main.dart.js`, `flutter_bootstrap.js`, `flutter.js`, `assets/*` y `canvaskit/*.js`. `flutter_bootstrap.js` carga `main.dart.js` sin versión, así que tras un despliegue los navegadores siguen ejecutando la app vieja hasta un año.
+    - Corrección: `no-cache` (revalidar con ETag) para `.js` y `assets/`; `no-store` para `flutter_bootstrap.js`.
+  - **ALTO-5. Los scripts no son ejecutables en un clon de Linux.**
+    - `git ls-files -s` da `100644` para `scripts/deploy-hosting.sh`, y `core.filemode=false` en este equipo, así que `instalar-produccion.sh` también se añadirá sin bit de ejecución.
+    - En un clon de Ubuntu, `sudo ./scripts/instalar-produccion.sh` da `Permission denied`, y lo mismo pasaría con la llamada de la línea 327.
+    - Corrección: `git add --chmod=+x scripts/*.sh`.
+  - **MEDIO-1. Las actualizaciones fallan sin `sudo`.**
+    - `.env.production` queda como `600 root` (verificado), porque el instalador corre con `sudo`.
+    - Así, `./scripts/deploy-hosting.sh --pull` sin `sudo` falla con un engañoso `Falta una variable válida ... POSTGRES_USER`.
+    - Corrección: `chown` a `SUDO_USER` o documentar `sudo` de forma coherente. El resumen final (línea 352) además no menciona `--pull`.
+  - **MEDIO-2. No se validan los dominios.**
+    - Con `--api-domain https://api.x.example`, el script escribe `.env.production` con `https://https://api...` y luego se detiene en `sed` (`unknown option to 's'`). Una nueva ejecución ya no corrige el archivo.
+    - Sin validación, el contenido del dominio también se inyecta en la configuración de Nginx, ejecutada como root.
+    - Corrección: validar con una expresión de nombre de host antes de escribir nada, y exigir 3 dominios distintos.
+  - **MEDIO-3. El lockfile de Flutter no está alineado (la desviación declarada es cierta).**
+    - GitHub Actions: la ejecución `35141098909` de `flutter-quality` (2026-09-16) falla con `Unable to satisfy pubspec.yaml using pubspec.lock` (código 65). El CI de Flutter ya está en rojo y hoy no valida nada.
+    - Decisión: la mitigación no se acepta como permanente. Quitar `--enforce-lockfile` deja una compilación de producción sin lockfile y sin CI.
+    - Corrección: regenerar `pubspec.lock` con Flutter 3.44.0 (se usa ese porque `docker manifest inspect` no encontró `ghcr.io/cirruslabs/flutter:3.47.x`) dentro de la imagen fijada, validar `flutter analyze`/`flutter test` ahí y restaurar `--enforce-lockfile`. La otra opción es subir la versión fijada de forma coherente en CI y en el Dockerfile.
+  - **MEDIO-4. Las instalaciones existentes no se actualizan del todo.**
+    - Con un `.env.production` ya existente, `CORS_ALLOWED_ORIGINS` no incorpora el dominio de la app, así que `worker-app` queda bloqueada por CORS. Tampoco se añade `API_TRUST_PROXY`.
+    - Corrección: avisar o añadir el origen, sin tocar contraseña ni puertos.
+  - **BAJOS.**
+    - BAJO-1: `docker image prune -f` (`deploy-hosting.sh`) afecta a todo el host compartido.
+    - BAJO-2: `deploy/nginx/chambeaya.conf.generado` no está en `.gitignore`.
+    - BAJO-3: la presencia de Nginx se detecta por directorios, no por el binario.
+    - BAJO-4: `apps/mobile_flutter/android/local.properties` entra en el contexto de compilación.
+  - **Verificado sin hallazgo.**
+    - Nombre de proyecto `chambeaya-production` y volúmenes idénticos a `HEAD` (sin datos huérfanos).
+    - Contraseña de 32 caracteres alfanuméricos; `.env.production` idéntico entre ejecuciones (`diff`).
+    - Solo `127.0.0.1` en `compose config`; `db` sin puertos.
+    - `client_max_body_size 8m` (CV de 5 MB y foto de 3 MB).
+    - SSE solo en `/api/shifts/events`, con la ubicación correcta.
+    - `CHAMBEAYA_DEMO_MODE` por defecto en `false` y no expuesto.
+    - Fallback SPA.
+    - `CORS_ALLOWED_ORIGINS` separado por comas, compatible con `resolveCorsOptions`.
+- Validaciones:
+  - `bash -n` en ambos scripts → OK.
+  - `shellcheck` (`koalaman/shellcheck:stable`) → código 0.
+  - Plantilla renderizada con `nginx -t` en `nginx:alpine` → `successful`. Colisión y symlink colgando → ver ALTO-2 y ALTO-3.
+  - `docker build` de `worker-app` (`chambeaya-audit-worker-app:tmp`, luego eliminada) → código 0. La URL de la API está compilada en `main.dart.js`.
+  - Simulación del instalador (4 ejecuciones) en la imagen de Flutter como root → resultados citados arriba.
+  - Respaldo y restauración documentados con `pg_dump`/`psql` sobre un `postgres:16-alpine` desechable → el dato se recuperó (`42`). El contenedor fue eliminado.
+  - `gh run view --log-failed` del CI de Flutter.
+- Riesgos:
+  - `NO_EJECUTADAS`: todo lo que depende de un Ubuntu real (systemd, certbot real, ufw, convivencia con otro Nginx, `git pull` con `sudo` y `safe.directory`).
+  - No levanté el stack completo de producción.
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1 a ALTO-5 y MEDIO-1 a MEDIO-4, alinea la guía y registra una corrección; después `auditor-opus` vuelve a auditar.
+
+### CN-20260925-001 — Despliegue de producción "todo en Docker" en un servidor propio: script de instalación, servicio `worker-app` (Flutter web) y Nginx del host
+
+- Fecha: 2026-09-25 09:30 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: N/A (primera vez que se añade instalación automatizada de producción y el servicio `worker-app`)
+- Alcance:
+  - `apps/mobile_flutter/Dockerfile.production` (nuevo): compila la app Flutter del trabajador con `flutter build web --release` sobre `ghcr.io/cirruslabs/flutter:3.44.0` (la misma versión que fija `.github/workflows/flutter-tests.yml`; confirmé con un `docker pull` real que esa imagen existe) y la sirve en runtime con `nginx:alpine` (`apps/mobile_flutter/deploy/nginx.conf`, puerto interno 8080): fallback SPA a `index.html`, `Cache-Control: no-store` en `index.html`/`flutter_service_worker.js`/`version.json` y `public, max-age=31536000, immutable` en los assets con hash (`main.dart.js`, `flutter.js`, `assets/*`). `API_BASE_URL` y `GOOGLE_OAUTH_WEB_CLIENT_ID` entran como build-args (`--dart-define`); `CHAMBEAYA_DEMO_MODE` no se declara como ARG a propósito, así que no puede activarse desde este flujo.
+  - `docker-compose.production.yml`: nuevo servicio `worker-app` (`restart: unless-stopped`, healthcheck, publicado en `127.0.0.1:${APP_HOST_PORT:-3100}`); `api` y `web` pasan de publicarse en todas las interfaces a `127.0.0.1:${..._HOST_PORT}` (Docker se salta `ufw`, así que sin el prefijo de loopback quedaban expuestos sin TLS).
+  - `scripts/instalar-produccion.sh` (nuevo, idempotente, `bash -n` y `shellcheck` limpios): comprueba Docker/Compose v2; pide los 3 dominios (interactivo o `--api-domain`/`--panel-domain`/`--app-domain`); si `.env.production` no existe lo genera (contraseña aleatoria de 32 caracteres alfanuméricos, `DATABASE_URL` derivada, `NEXT_PUBLIC_API_URL`/`API_BASE_URL`/`CORS_ALLOWED_ORIGINS` a partir de los dominios, `API_TRUST_PROXY=true`, 3 puertos libres elegidos con `ss` desde 4100/3100/8100, `chmod 600`); si ya existe, nunca toca contraseña ni puertos (solo añade variables nuevas que falten, para instalaciones previas al `worker-app`); renderiza `deploy/nginx/chambeaya.conf.template` (nuevo) sustituyendo dominios/puertos y, si hay Nginx en el host y el script corre como root, instala únicamente `chambeaya.conf` en `sites-available`+`sites-enabled` (o `conf.d`), valida con `nginx -t` y solo si pasa hace `systemctl reload nginx` (si falla, retira el symlink y aborta sin tocar nada más); ofrece `certbot --nginx` (flag `--certbot`/`-y` o confirmación); termina llamando a `scripts/deploy-hosting.sh` y muestra un resumen (URLs, puertos, DNS pendiente, aviso de Google Sign-In).
+  - `deploy/nginx/chambeaya.conf.template` (nuevo): 3 `server` (API/panel/app) con `proxy_pass` a `127.0.0.1:<puerto>` y cabeceras `Host`/`X-Real-IP`/`X-Forwarded-For`/`X-Forwarded-Proto`; bloque de la API con `client_max_body_size 8m` (confirmé en `apps/api/src/modules/talent/talent.routes.ts` los límites reales: CV PDF 5 MB en `PUT /workers/me/cv`, foto 3 MB en `PUT /workers/me/photo`) y una ubicación específica para `GET /api/shifts/events` (único endpoint SSE del proyecto, confirmado por `grep` de `text/event-stream` en `apps/api/src`; montado en `apps/api/src/app.ts:128`) con `proxy_buffering off`, `proxy_http_version 1.1`, `Connection ""` y `proxy_read_timeout 1h`.
+  - `scripts/deploy-hosting.sh`: valida también `API_BASE_URL` (mismo criterio que `NEXT_PUBLIC_API_URL`: rechaza `tudominio.com`/`localhost`/`127.0.0.1`), espera además el healthcheck de `worker-app`, agrega `--pull` (`git pull --ff-only` antes de construir) y ejecuta `docker image prune -f` tras un despliegue exitoso.
+  - `.env.production.example`: documenta `APP_HOST_PORT`, `API_BASE_URL` y por qué `CORS_ALLOWED_ORIGINS` debe incluir también el dominio de la app.
+  - `.dockerignore`: cambia la exclusión total de `apps/mobile_flutter` (que habría dejado el build de `worker-app` sin código fuente) por exclusiones puntuales de sus artefactos pesados (`build`, `.dart_tool`, `.idea`, `android/.gradle`, `ios/Pods`, etc.).
+  - `docs/guides/deployment.md`: reescrita para el flujo de dos comandos (`sudo ./scripts/instalar-produccion.sh` la primera vez, `./scripts/deploy-hosting.sh` para actualizar), documenta los 4 servicios, por qué nunca se regenera `POSTGRES_PASSWORD`/los puertos, el límite de subida y SSE de Nginx, qué toca y qué no toca el instalador en el Nginx del host, y refuerza la advertencia de no usar `down -v` en producción.
+- Decisiones:
+  1. **`--enforce-lockfile` retirado del build de Flutter.** El `pubspec.lock` comprometido (`apps/mobile_flutter/pubspec.lock`, último commit `99d59a8`) fue resuelto con un Flutter/Dart más nuevo (verifiqué que el Flutter local de esta máquina es 3.47.1/Dart 3.13.1) que el 3.44.0 fijado en CI y en este Dockerfile (Dart 3.12.0 exacto). Con `--enforce-lockfile`, `flutter pub get` falla con `Unable to satisfy pubspec.yaml using pubspec.lock` (código 65) tanto copiando solo el manifiesto como el proyecto completo (lo reproduje de las dos formas). La causa son 4 paquetes que el propio SDK de Flutter empaqueta (`meta`, `vector_math`, `matcher`, `test_api`): sus versiones ancladas en el lockfile (resueltas con 3.47.1) no existen en el 3.44.0 exacto que usan CI y este build. Esto implica que el job `flutter-quality` de CI, que también fija `flutter-version: '3.44.0'` y ejecuta `flutter pub get --enforce-lockfile`, muy probablemente falla hoy con el mismo error si corre sobre este `pubspec.lock` — es un hallazgo nuevo, no algo que haya causado yo, y queda fuera de alcance corregirlo aquí (tocar el lockfile de la app móvil excede "despliegue" y necesita su propia validación de `flutter test`/`flutter analyze`/dispositivos reales). Quité el flag únicamente en `Dockerfile.production`: `flutter pub get` resuelve entonces dentro de los rangos de `pubspec.yaml` (no arbitrario) usando el propio SDK 3.44.0; dejé un comentario extenso en el Dockerfile explicando esto y por qué no se tocó el lockfile. Ver Riesgos.
+  2. **Puerto interno del contenedor `worker-app` en 8080, no 80.** Evita depender de capacidades de root dentro del contenedor solo para escuchar en un puerto privilegiado; el mapeo público a `APP_HOST_PORT` lo decide `docker-compose.production.yml`.
+  3. **Nginx del host recargado únicamente si `nginx -t` pasa**, y solo se instala/toca `chambeaya.conf`: cumple el requisito de no arriesgar los otros proyectos que ese Nginx ya atiende.
+  4. **`instalar-produccion.sh` no exige `EUID=0` de forma dura.** Si detecta Nginx pero no corre como root, dej a el archivo generado en `deploy/nginx/chambeaya.conf.generado` con instrucciones, en vez de abortar. Los pasos que si tocan el sistema (escritura en `/etc/nginx`, `systemctl reload`, `certbot`) sí están condicionados a `EUID -eq 0`.
+  5. **Corrección durante la propia validación: `SIGPIPE` con `set -o pipefail`.** Las funciones `random_password()` (`tr | head -c 32`) y `port_in_use()` (`ss | grep -q .`) truncaban la tubería desde el lado derecho; con `pipefail`, el código de salida no-cero de la etapa cortada (no el de `head`/`grep`) abortaba el script (`random_password`) o podía hacer que un puerto ocupado se reportara como libre (`port_in_use`, no llegué a verlo fallar en la práctica porque el script abortaba antes por `random_password`, pero el defecto era real y lo reproduje leyendo el código). Corregido: `|| true` en `random_password`, y `port_in_use` ahora captura la salida de `ss` en una variable en vez de canalizarla a `grep -q`.
+- Validaciones:
+  - `docker build` real de las 3 imágenes de producción (Docker Desktop 29.7.2, Compose v5.4.0, arrancado para esta tarea): API y web construyen sin cambios; `worker-app` construye tras retirar `--enforce-lockfile` (ver Decisión 1). Confirmé con `docker pull ghcr.io/cirruslabs/flutter:3.44.0` que la imagen existe (no hizo falta el fallback de Debian+clonar el SDK).
+  - `bash -n` sobre ambos scripts → sin errores. `shellcheck` (vía `docker run koalaman/shellcheck:stable`, no había binario local) sobre ambos → sin hallazgos (corregí un aviso `SC2034`, variable `ENV_EXAMPLE` sin usar, antes de la corrida limpia).
+  - Validación de los 2 Nginx generados con `docker run --rm -v <archivo>:/etc/nginx/conf.d/default.conf:ro nginx:alpine nginx -t` → `syntax is ok` / `test is successful` para `deploy/nginx/chambeaya.conf.template` (renderizada con dominios/puertos de prueba) y para `apps/mobile_flutter/deploy/nginx.conf`.
+  - Stack completo de producción en local con un `.env.production` de prueba (dominios `*.chambeaya-test.local`, puertos libres 4177/3177/8177, `--project-name chambeaya-validation` propio): los 4 servicios llegan a `healthy`; `GET /` y una ruta profunda (`/jobs/123/detail`) en `worker-app` devuelven el mismo `index.html` byte a byte (fallback SPA); `Cache-Control: no-store` en `index.html`/`version.json`/`flutter_service_worker.js` y `public, max-age=31536000, immutable` en `main.dart.js`/`flutter.js`; `GET /api/health` responde `{"status":"ok"}`; `GET /api/shifts/events` responde `Content-Type: text/event-stream` con `Cache-Control: no-cache, no-transform` y `X-Accel-Buffering: no` (la propia API ya pone esta cabecera; el `proxy_buffering off` de Nginx la complementa). Los 3 puertos publicados (`api`, `web`, `worker-app`) verificados en `127.0.0.1` con `docker ps --format`. Bajado con `down -v` solo sobre el proyecto propio (`chambeaya-validation`), volúmenes con prefijo distinto a cualquier despliegue real; confirmé que no quedaron contenedores/volúmenes/red de ese proyecto.
+  - Prueba de extremo a extremo de `scripts/instalar-produccion.sh` en un `git worktree` desechable (`git worktree add`, con los archivos nuevos/modificados copiados encima) con los 3 dominios por flag (modo no interactivo): primera corrida genera `.env.production` (contraseña de 32 caracteres, puertos 4100/3100/8100 libres en esta máquina), construye y levanta los 4 servicios reales hasta `healthy`, y como no hay Nginx del sistema en esta máquina Windows deja `deploy/nginx/chambeaya.conf.generado` con las instrucciones. Segunda corrida (idempotencia): `diff` del `.env.production` antes/después de la segunda ejecución → idéntico (contraseña y puertos sin cambios). Nota de riesgo: esta prueba usa forzosamente el mismo nombre de proyecto Compose que producción real (`chambeaya-production`, fijo en `deploy-hosting.sh`); confirmé antes de correrla que no existía ningún recurso Docker con ese nombre en esta máquina, y limpié con `down -v` + `docker rmi` de las 3 imágenes `chambeaya-production-*` y el worktree (`git worktree remove`) al terminar.
+  - `--help` de ambos scripts, y modo no interactivo con un dominio faltante (`instalar-produccion.sh --api-domain a.example.com </dev/null`) → falla rápido con mensaje claro (`ERROR: Falta el panel web...`) antes de tocar Docker o el sistema, código de salida 2.
+  - No ejecutadas (declaradas como riesgo):
+    - Todo lo específico de Ubuntu real: instalación de Docker/Compose desde cero, `systemctl`, `certbot --nginx`, `ufw`, y la interacción real con un Nginx de sistema que atienda otros proyectos (aquí no hay Nginx ni systemd; el bloque correspondiente del script no se ejercitó).
+    - `flutter analyze`/`flutter test` de `apps/mobile_flutter` bajo el `pubspec.lock` tal como está (no se tocó; ver Decisión 1 y Riesgos).
+    - Reconstrucción de `worker-app` en un cambio posterior de `API_BASE_URL` (documentado, no ejecutado).
+- Riesgos:
+  - **Hallazgo nuevo, fuera de este alcance: `apps/mobile_flutter/pubspec.lock` probablemente no satisface `--enforce-lockfile` bajo Flutter 3.44.0**, la versión que fija `.github/workflows/flutter-tests.yml`. Si el job `flutter-quality` de CI no ha corrido recientemente sobre este lockfile, es posible que esté fallando en rojo por esta causa (drift entre el Flutter local de quien generó el lockfile, 3.47.1, y el 3.44.0 fijado en CI). Recomendación para una tarea aparte: regenerar `pubspec.lock` con exactamente Flutter 3.44.0 (o subir el pin de CI a la versión local) y validar con `flutter analyze`/`flutter test`. El Dockerfile de producción no se ve afectado en la práctica porque no usa `--enforce-lockfile`, pero pierde la garantía de reproducibilidad exacta del lockfile (queda acotado por los rangos de `pubspec.yaml`).
+  - No se pudo probar en un Ubuntu real: la detección de `sites-available` vs `conf.d`, la recarga de `systemctl`, el flujo de `certbot`, ni la convivencia real con otro Nginx sirviendo otros proyectos (aquí solo se validó que el script, sin Nginx presente, genera el archivo y no toca nada del sistema).
+  - `docker-compose.production.yml` no fija `name:` en los volúmenes, así que el nombre real en Docker queda `<project-name>_chambeaya-production-db` (prefijado por el nombre de proyecto de Compose); no es un cambio de este alcance, pero conviene que quien opere el servidor lo tenga presente al inspeccionar volúmenes con `docker volume ls`.
+  - El instalador no valida que los 3 dominios sean distintos entre sí ni que tengan un formato de dominio válido; un typo produce un `.env.production` y una config de Nginx sintácticamente correctos pero apuntando mal.
+- Siguiente paso: `auditor-opus` audita `CN-20260925-001` (código, scripts y `docs/guides/deployment.md`) y decide si el hallazgo del lockfile de Flutter amerita una tarea de corrección separada.
+
 ### CN-20260923-019 — Auditoría de `CN-20260923-018` (Alcance F: fechas relativas en los fixtures y prueba permanente de `cancelShift` contra `resolve`)
 
 - Fecha: 2026-09-24 23:30 (America/Lima)

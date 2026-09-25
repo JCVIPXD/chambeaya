@@ -1350,11 +1350,12 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
       );
       if (mounted) Navigator.pop(context, profile);
     } catch (_) {
-      if (mounted)
+      if (mounted) {
         setState(
           () => _error =
               'No se pudo guardar. Revisa los campos e inténtalo otra vez.',
         );
+      }
     } finally {
       if (mounted) setState(() => _saving = false);
     }

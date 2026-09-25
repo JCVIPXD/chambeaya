@@ -456,8 +456,9 @@ class HttpTalentProfileRepository implements TalentProfileRepository {
     final response = await _client
         .get(_baseUri.resolve('/api/workers/me/profile'), headers: _headers)
         .timeout(const Duration(seconds: 8));
-    if (response.statusCode != 200)
+    if (response.statusCode != 200) {
       throw StateError('No se pudo cargar tu perfil');
+    }
     return TalentProfile.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );
@@ -468,8 +469,9 @@ class HttpTalentProfileRepository implements TalentProfileRepository {
     final response = await _client
         .get(_baseUri.resolve('/api/specialties'), headers: _headers)
         .timeout(const Duration(seconds: 8));
-    if (response.statusCode != 200)
+    if (response.statusCode != 200) {
       throw StateError('No se pudieron cargar las especialidades');
+    }
     return (jsonDecode(response.body) as List<dynamic>)
         .map((value) => Specialty.fromJson(value as Map<String, dynamic>))
         .toList(growable: false);
@@ -484,8 +486,9 @@ class HttpTalentProfileRepository implements TalentProfileRepository {
           body: jsonEncode(draft.toJson()),
         )
         .timeout(const Duration(seconds: 8));
-    if (response.statusCode != 200)
+    if (response.statusCode != 200) {
       throw StateError('No se pudo guardar tu perfil');
+    }
     return TalentProfile.fromJson(
       jsonDecode(response.body) as Map<String, dynamic>,
     );

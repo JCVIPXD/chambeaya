@@ -2,6 +2,42 @@
 
 Aplicación adaptable de empleos temporales para Android, iOS y web. Incluye onboarding por rol, registro/login, descubrimiento de empleos, filtros, guardados, postulaciones, mensajes y perfil profesional.
 
+## Versión de Flutter requerida: 3.44.0 (stable)
+
+`pubspec.lock` está resuelto para **exactamente Flutter 3.44.0** (Dart
+3.12.0), la misma versión que fijan `.github/workflows/flutter-tests.yml` y
+`apps/mobile_flutter/Dockerfile.production`. Comprueba la tuya con
+`flutter --version` antes de tocar dependencias.
+
+Un Flutter local más nuevo (por ejemplo 3.47.x) trae internamente otras
+versiones de paquetes que el propio SDK empaqueta (`meta`, `vector_math`,
+`matcher`, `test_api`, usados por `flutter_test`). Un `flutter pub get` **sin**
+`--enforce-lockfile` con esa versión desalinea `pubspec.lock` en silencio
+(sube esos 4 paquetes a lo que trae tu SDK), y entonces el siguiente
+`flutter pub get --enforce-lockfile` — el que corre CI y
+`Dockerfile.production` — falla con `Unable to satisfy pubspec.yaml using
+pubspec.lock` (código 65). Esto ya pasó una vez (`CN-20260925-002`,
+`CN-20260925-004`).
+
+Evaluamos declarar `flutter: ">=3.44.0 <3.45.0"` en `environment:` de
+`pubspec.yaml` para que el propio SDK rechazara ejecutarse; comprobado en la
+práctica, `flutter pub get` **no aplica esa restricción en desarrollo local**
+(solo importa para publicar en pub.dev), así que no habría evitado el
+problema y solo daría una falsa sensación de estar protegidos. Por eso la
+única barrera real es esta: **no ejecutes nada que resuelva dependencias con
+un Flutter que no sea 3.44.0, salvo con `--enforce-lockfile`.**
+
+- Si tu Flutter local no es 3.44.0, usa siempre
+  `flutter pub get --enforce-lockfile` (nunca `flutter pub get` a secas, ni
+  `flutter pub upgrade`): falla en vez de desalinear el lockfile.
+- Para instalar exactamente 3.44.0: con [FVM](https://fvm.app/),
+  `fvm install 3.44.0 && fvm use 3.44.0`; o descárgala del
+  [archivo de releases de Flutter](https://docs.flutter.dev/release/archive).
+- Si de verdad necesitas cambiar una dependencia en `pubspec.yaml`, hazlo con
+  Flutter 3.44.0 exacto (o dentro de `ghcr.io/cirruslabs/flutter:3.44.0`, la
+  misma imagen que usa `Dockerfile.production`) y commitea el `pubspec.lock`
+  resultante.
+
 ## Ejecutar con la API local
 
 ```powershell
