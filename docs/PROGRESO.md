@@ -54,6 +54,152 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260923-017 — Auditoría de `CN-20260923-016` (Alcance E: `testTimeout`, robustez de `worker-company-lock-order` y revalidación de `resolveShiftAssignmentsLifecycle`)
+
+- Fecha: 2026-09-24 20:50 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260923-016` (corrección auditada), `CN-20260923-015` (reauditoría con BAJO-1 y BAJO-2) y `CN-20260918-002` (BAJO-3 original). Diff sin commitear sobre `0eda3b1`.
+- Alcance:
+  - Revisión independiente del diff completo: primero corrección, concurrencia y seguridad; después pruebas y documentación.
+  - Repetí las mutaciones declaradas, la sonda de `deadlock_timeout` (100, 200 y 500 ms, solo en `chambeaya_test`), 10 corridas completas válidas de integración y la carga con `CHAMBEAYA_LOAD_ROUNDS=8`.
+  - Añadí dos sondas propias con la barrera determinista contra `0eda3b1` y contra la corrección (estado persistido tras `cancelShift` y `resolve` como primer toque). Fueron temporales y ya están borradas.
+- Archivos:
+  - Revisados: `apps/api/src/modules/business/business.service.ts` (`resolveShiftAssignmentsLifecycle`, `getShift`, `listShiftApplications`, `cancelShift`, `decideShiftApplication`, `resolveAssignment`), `operations/shift-state.ts`, `operations/serializable-retry.ts`, `marketplace/marketplace.service.ts` (`lockedTransaction`, `resolveAndPersistLifecycle`), `vitest.integration.config.mts` y las cinco pruebas modificadas o nuevas.
+  - Modificados por la auditoría (solo documentación):
+    - `docs/reference/api.md`: nota sobre el alcance real de la garantía `cancel`/`resolve` antes de `016`, con una consulta para detectar datos afectados;
+    - `docs/product/project-master-plan.md`: estado del Alcance E del pendiente 13 y la misma nota.
+  - No se tocó código de producción, pruebas, `CLAUDE.md` ni `.claude/agents/`.
+- Decisiones (hallazgos):
+  - **Críticos y altos: ninguno.**
+  - **`resolveShiftAssignmentsLifecycle`: correcto.**
+    - La relectura (turno con `findUnique`, asignaciones por `id`), el cálculo, las escrituras y los eventos ocurren todos en la misma transacción `Serializable`, dentro de `withSerializableRetry`, así que cada intento relee.
+    - La lectura previa solo decide si se abre la transacción; ningún valor suyo llega a una escritura.
+    - Orden de bloqueo sin cambios: lecturas simples, sin bloqueo; después `UPDATE` de asignaciones por `id` y al final el turno. Es subsecuencia de postulación → asignación → turno, así que no aparece ningún ciclo nuevo con `lockedTransaction` (`READ COMMITTED`: asignación → turno) ni con las rutas de empresa.
+    - Una escritura concurrente confirmada después de la relectura sobre la asignación o el turno produce `40001`/`P2034` al actualizar la fila, y se reintenta releyendo. La transacción siempre escribe el turno, así que también detecta el check-in de otro cupo (`READ COMMITTED`, fuera del grafo SSI).
+    - No cambian `deriveShiftStatus` (`CN-20260922-013`), la ventana de check-in con `assignedAt` (`006`), `cancelShift` ni `resolveAssignment` (`008/009`), ni el bloqueo del trabajador (`010/012/014`).
+    - ¿Puede la lectura previa ocultar algo que persistir? Solo en el borde de milisegundos en que la ventana vence entre las dos lecturas, o si otra operación crea una asignación ya vencida después de la lectura previa. En ambos casos el `NO_SHOW` se persiste en el siguiente toque (el ciclo de vida es perezoso por diseño), y `resolve` responde `ASSIGNMENT_NOT_RESOLVABLE` igual que antes. No se pierde un `NO_SHOW`; se aplaza.
+  - **Gravedad del defecto corregido (comprobada contra `0eda3b1`).** Confirmé el estado persistido tras la carrera con la empresa: turno `PUBLISHED`, asignación `NO_SHOW` y la `ShiftCancellation` registrada. Mi sonda propia muestra además que el defecto rompía la garantía de `CN-20260923-008/009`: con `resolve` como primer toque de una asignación vencida aún `ASSIGNED` y un `cancelShift` confirmado dentro de la barrera, contra `0eda3b1` responden `cancel=200 resolve=200`, queda 1 pago y el turno termina `COMPLETED` con su cancelación registrada. Con la corrección: `cancel=200`, `resolve=400 ASSIGNMENT_NOT_RESOLVABLE`, 0 pagos y todo `CANCELLED`.
+    - `shift-cancel-resolve-race` parte de un `NO_SHOW` ya persistido y nunca cubrió ese camino. Lo aprobado en `009` era cierto para ese caso, pero incompleto.
+    - `001`, `003` y `007` no hicieron afirmaciones de concurrencia sobre este camino.
+    - Impacto en datos reales: exige dos operaciones simultáneas de la misma empresa (dos pestañas o dos usuarios) en una ventana de milisegundos. No revisé la base de desarrollo (fuera del alcance permitido). `api.md` documenta la consulta de detección.
+  - **MEDIO-1 (no bloqueante): falta la prueba permanente del caso más grave.** Ninguna prueba del diff fija `cancelShift` contra `resolve` como primer toque de una asignación vencida `ASSIGNED`, el caso que genera un pago sobre un turno cancelado. La corrección lo cubre (mi sonda), pero una regresión futura solo la detectaría de forma indirecta la prueba de la empresa. Recomendación: añadir a `business-lifecycle-revalidation` una prueba con `resolve` pausado en la lectura previa y `cancelShift` dentro de la barrera, que exija `400 ASSIGNMENT_NOT_RESOLVABLE`, 0 pagos y turno `CANCELLED`.
+  - **BAJO-1 (previo, fuera del diff): fixture de Playwright vencido por fecha.** `apps/web/e2e/assignment-resolution.spec.ts:60` ("confirmar que sí trabajó…") falla en `chromium-desktop` y `chromium-mobile` desde ~2026-09-24 19:00 (Lima), de forma determinista.
+    - Causa: `paymentFor` fija `dueAt` en `2026-09-18T20:00Z`; `app/page.tsx` lo recorta a `2026-09-18` (medianoche UTC) y el filtro predeterminado "Esta semana" (`now − 7 días`) ya lo excluye.
+    - El código web no cambió en este diff. Mismo patrón que el fixture vencido de Flutter de `CN-20260923-002/003`.
+    - Recomendación: fechas relativas en el fixture. Aparte, el recorte de `dueAt` a fecha desplaza el filtro unas horas en UTC−5.
+  - **BAJO-1 de `015` (`testTimeout`): resuelto.**
+    - Una prueba colgada falla en 20 013 ms (`Test timed out in 20000ms`).
+    - Un `{ timeout: 25_000 }` propio se respeta: una prueba de 22 s pasa.
+    - En 10 corridas válidas, la prueba más lenta de las que usan el global tardó 2,0 s (con Playwright en paralelo en la primera corrida). Las que tienen timeout propio llegaron a 11,4 s (`worker-assignment-load`, 300 s), 10,0 s (`business-routes-load`, 300 s), 8,7 s (`shift-cancel-resolve-race`, 60 s), 5,3 s (`real:`, 60 s) y 4,9 s (`lock-order`, 60 s).
+    - Todas las pruebas de `worker-company-lock-order` fijan su timeout.
+  - **BAJO-2 de `015`: resuelto.**
+    - Margen derivado: pasa con 100, 200 y 500 ms. La versión de `HEAD` de la prueba con 200 ms da `2 failed | 18 passed` ("the test transaction must not be the deadlock victim").
+    - Quitar el filtro `application_name`: la prueba de sesiones ajenas falla (`1 failed | 20 passed`). No es tautológica: su control positivo exige ver la sesión ajena por su nombre, lo que además prueba que Prisma aplica `application_name` desde la URL.
+    - La dependencia del formato de Prisma 6 queda documentada.
+  - **Mutación de `business.service.ts` de `HEAD`:** integración `3 failed | 1 passed (4)` (asignación `NO_SHOW` en vez de `CANCELLED`; turno no `CANCELLED`; `expected 2 to be 1`); unitarias `3 failed | 53 passed (56)`. Las pruebas unitarias nuevas no son tautológicas: la de reintento exige 2 relecturas y la de "sin escritura" exige 0 `update`/`create`.
+- Validaciones (base `chambeaya_test` de `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la de desarrollo):
+  - `npx prisma migrate deploy` → `No pending migrations to apply.`
+  - `npx vitest run --exclude "tests/integration/**"` (API) → `Test Files 21 passed (21)`, `Tests 341 passed (341)`.
+  - `npx tsc -p tsconfig.json --noEmit` (API) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - `npm run test:integration`, 11 corridas completas:
+    - 10 válidas, todas con `Tests 76 passed (76)` (148–316 s cada una);
+    - 1 descartada: el equipo entró en suspensión (Modern Standby, en el registro de Windows) en mitad de una prueba de `worker-assignment-load` y la prueba "duró" 12 849 s. Es un artefacto del entorno, no un fallo.
+  - Sonda de `deadlock_timeout` → descrita arriba. Después, `ALTER DATABASE chambeaya_test RESET deadlock_timeout`, `pg_db_role_setting` → `count 0` y `SHOW` → `1s`.
+  - Carga larga `CHAMBEAYA_LOAD_ROUNDS=8` (`worker-assignment-load`, `business-routes-load`, `worker-company-lock-order`) → `Test Files 3 passed (3)`, `Tests 47 passed (47)`.
+  - Playwright completo (`npm run test:web`) → `2 failed`, `1 skipped`, `101 passed (3.8m)`. Los 2 fallos son BAJO-1: la misma prueba en los dos proyectos, repetida suelta con el mismo resultado. Una primera corrida en paralelo con la integración perdió su resumen y coincidió con la suspensión, así que no cuenta.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (54.4s)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (los mismos `info`; ningún `error` ni `warning`).
+  - No ejecutadas:
+    - la medición estricta opt-in con `CHAMBEAYA_LOAD_WORKERS=20`;
+    - Flutter contra la API real o en un dispositivo;
+    - revisión de datos de la base de desarrollo.
+  - Limpieza:
+    - `apps/web/next-env.d.ts` restaurado con `git checkout`;
+    - `apps/web/test-results`, las pruebas temporales y las copias de mutación borradas; archivos restaurados y comprobados con `cmp`;
+    - `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`.
+  - Sin commit.
+- Riesgos:
+  - MEDIO-1 y BAJO-1 de esta entrada, abiertos. BAJO-1 deja `npm test` de la raíz en rojo hasta que se corrija el fixture.
+  - Posibles datos inconsistentes (pago o turno reabierto tras una cancelación de la empresa) en una base que haya corrido código anterior bajo operaciones simultáneas. No verificado.
+  - La lectura previa puede aplazar un `NO_SHOW` hasta el siguiente toque en el borde de la ventana (aceptado, por diseño perezoso).
+  - Siguen abiertos y sin tocar:
+    - rutas de empresa probabilísticas con ≥20 llamadas simultáneas;
+    - sin bloqueo de filas en `acceptShift`/`applyToShift`;
+    - el `upsert` de `companyFor` (`409`);
+    - BAJO-1 y BAJO-2 de `CN-20260923-011`;
+    - dependencia del formato de mensaje de Prisma 6;
+    - margen del interbloqueo forzado con `deadlock_timeout` menor de ~100 ms.
+  - Mediciones en una sola máquina y con latencia local.
+- Siguiente paso:
+  - `CN-20260923-016` queda cerrado; el coordinador puede commitear.
+  - En alcances aparte, a cargo de `implementador-sonnet`: MEDIO-1 (prueba permanente de `cancelShift` contra `resolve` como primer toque) y BAJO-1 (fechas relativas en `apps/web/e2e/fixtures/shift-assignments.ts`), y después la reauditoría de `auditor-opus`.
+
+### CN-20260923-016 — Alcance E: cierre de los bajos de `CN-20260923-015` (`testTimeout`, robustez de `worker-company-lock-order`) y BAJO-3 de `CN-20260918-002` (`resolveShiftAssignmentsLifecycle` revalida dentro de la transacción)
+
+- Fecha: 2026-09-24 16:55 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260923-015` (reauditoría APROBADO con BAJO-1 y BAJO-2, y BAJO-3 declarado de nuevo), `CN-20260923-011` (BAJO-1 y BAJO-2, sin tocar) y `CN-20260918-002` (BAJO-3 original). Diff sin commitear sobre `0eda3b1`.
+- Alcance:
+  - **BAJO-1 de `CN-20260923-015`.** `testTimeout` global de `apps/api/vitest.integration.config.mts` de 60 s a 20 s. Timeout propio de 60 s solo para las pruebas de carrera: `shift-cancel-resolve-race` y las cinco `real:` de `worker-assignment-concurrency`. `worker-company-lock-order` (60 s y 120 s la matriz), `worker-assignment-load` y `business-routes-load` (300 s) ya lo fijaban.
+  - **BAJO-2 de `CN-20260923-015`.** En `worker-company-lock-order.integration.test.ts`:
+    - (a) el margen del interbloqueo forzado se deriva de `SHOW deadlock_timeout` (un tercio, entre 10 y 300 ms);
+    - (b) `waitUntilSomeSessionIsBlocked` filtra por `application_name` propio del cliente Prisma de la prueba (`chambeaya-lock-order-<pid>`) y por `datname`, y una prueba nueva lo fija con dos sesiones ajenas bloqueadas por un bloqueo consultivo;
+    - la dependencia del formato de mensaje de Prisma 6 para reconocer `40P01` queda documentada en el encabezado del archivo, en `isDeadlock` y en `api.md`.
+  - **BAJO-3 de `CN-20260918-002`.** `resolveShiftAssignmentsLifecycle` (`business.service.ts`): la lectura previa (fuera de la transacción) ya solo decide si hay algo que persistir; cuando lo hay, la transacción `Serializable` relee el turno y las asignaciones (por `id`), recalcula `NO_SHOW`/`ABANDONED` y el estado del turno sobre esa lectura y solo escribe lo vigente. Si ya no queda nada por cambiar, no escribe, no crea eventos y devuelve el turno releído.
+- Archivos:
+  - Código: `apps/api/src/modules/business/business.service.ts`.
+  - Configuración: `apps/api/vitest.integration.config.mts`.
+  - Pruebas:
+    - nuevo `apps/api/tests/integration/business-lifecycle-revalidation.integration.test.ts` (4 pruebas);
+    - `apps/api/tests/integration/worker-company-lock-order.integration.test.ts`;
+    - `apps/api/tests/integration/shift-cancel-resolve-race.integration.test.ts`;
+    - `apps/api/tests/integration/worker-assignment-concurrency.integration.test.ts`;
+    - `apps/api/tests/business.service.test.ts` (mocks de la transacción con `shift.findUnique` y `shiftAssignment.findMany`; 2 pruebas unitarias nuevas).
+  - Documentación: `docs/reference/api.md` (fila del ciclo de vida en la tabla de orden de bloqueo, párrafo "Ciclo de vida de la empresa", robustez de las pruebas de orden y "Tiempos de las pruebas de integración") y `docs/product/project-master-plan.md` (pendiente 13, Alcance E).
+  - No se tocaron esquema, migraciones, Dockerfile, lockfile ni `marketplace.service.ts`.
+- Decisiones:
+  1. **BAJO-3 se reprodujo antes de corregir**, con una barrera determinista (pausa de un solo uso tras la lectura previa de `shiftAssignment.findMany` del cliente sin transacción; la operación concurrente termina dentro de la pausa) contra el código de `0eda3b1`, `Tests 3 failed | 1 passed (4)`:
+     - una asignación `CANCELLED` por el trabajador volvía a `NO_SHOW` (y `resolve` la cerraba con pago en lugar de responder `400 ASSIGNMENT_NOT_RESOLVABLE`);
+     - un turno `CANCELLED` por la empresa volvía a `PUBLISHED` (defecto más grave que el declarado);
+     - dos aperturas simultáneas registraban dos eventos `SYSTEM` de la misma transición (`expected 2 to be 1`).
+
+     Con la corrección las 4 pasan.
+  2. **La lectura previa se conserva solo como vista previa** para no abrir una transacción `Serializable` en cada `GET` del turno cuando no hay nada que persistir. No es base de escritura ni siquiera en los reintentos: `withSerializableRetry` reejecuta toda la operación y relee.
+  3. **Sin bloqueos explícitos (`FOR NO KEY UPDATE`)** en esta transacción: sigue `Serializable`, como la original, así que el orden de bloqueo global no cambia (asignaciones por `id` → turno; el turno se lee sin bloqueo antes de las escrituras). Una cancelación del trabajador que se confirme entre la relectura y la escritura produce `P2034` y un reintento que relee. No se alteran `deriveShiftStatus` (`CN-20260922-013`), la ventana de check-in (`CN-20260923-006`) ni las garantías de `CN-20260923-008/010/012/014`.
+  4. **`testTimeout` en 20 s (no 15).** Máximos medidos en 11 corridas completas: los archivos que quedan con el global no pasan de 1,1 s (`assignment-checkin-lifecycle`); los que fijan su timeout llegan a 8,4 s (`worker-assignment-load`, 300 s), 6,6 s (`business-routes-load`, 300 s), 5,9 s (`shift-cancel-resolve-race`, 60 s), 4,5 s (`worker-assignment-concurrency`, 60 s) y 4,3 s (`worker-company-lock-order`, 60 s). 20 s deja más de 15x sobre lo que queda con el global y una prueba colgada falla en ~20 s (medido).
+  5. **Margen del interbloqueo:** basta cualquier margen menor que `deadlock_timeout` (la operación empezó a esperar antes, así que su temporizador vence primero con el ciclo ya formado); un tercio deja holgura a la latencia del sondeo de 20 ms. Por debajo de unos 100 ms esa latencia ya no cabe (documentado).
+  6. `SHOW deadlock_timeout` se lee con `verifier`, que abre su conexión después del `ALTER DATABASE ... SET`, así que ve el mismo valor que las de la prueba.
+- Validaciones (base `chambeaya_test` de `cumplenow-db-1`, `127.0.0.1:5433`, `CHAMBEAYA_INTEGRATION_TESTS=true`; nunca la de desarrollo; Docker Desktop estaba apagado y se arrancó):
+  - `npx prisma migrate deploy` → `No pending migrations to apply.`
+  - Línea base antes de tocar: `npm run test:integration` → `Test Files 10 passed (10)`, `Tests 71 passed (71)`.
+  - `npx vitest run --exclude "tests/integration/**"` (API) → `Test Files 21 passed (21)`, `Tests 341 passed (341)`.
+  - `npx tsc -p tsconfig.json --noEmit` (API, incluye `tests`) → `TSC_API=0`; `npx tsc --noEmit` (web) → `TSC_WEB=0`.
+  - **`npm run test:integration`, 11 corridas completas seguidas** → las 11 con `Test Files 11 passed (11)`, `Tests 76 passed (76)`, sin ningún `×` ni `timed out` (169-207 s la primera, ~170 s las demás). Duración máxima por prueba entre las 11 corridas, por archivo: `worker-assignment-load` 8363 ms, `business-routes-load` 6597 ms, `shift-cancel-resolve-race` 5870 ms, `worker-assignment-concurrency` 4498 ms, `worker-company-lock-order` 4336 ms, `assignment-checkin-lifecycle` 1060 ms, el resto menos de 600 ms.
+  - Prueba colgada temporal (`await new Promise(() => undefined)`, borrada) → `Test timed out in 20000ms`, `Tests 1 failed (1)`, `Duration 20.25s`.
+  - `deadlock_timeout` (solo `ALTER DATABASE chambeaya_test SET ...`, restaurado con `RESET` y comprobado con `pg_db_role_setting` → `count 0`):
+    - `200ms`, versión nueva de `worker-company-lock-order` completa, 3 corridas → `Tests 21 passed (21)` las 3;
+    - `200ms`, versión de `HEAD` de la prueba (margen fijo de 300 ms) → `2 failed`, ambas con "the test transaction must not be the deadlock victim";
+    - `100ms` y `500ms`, versión nueva, pruebas de interbloqueo y entrelazados → `Tests 4 passed` cada una.
+  - Carga larga `CHAMBEAYA_LOAD_ROUNDS=8` (`worker-assignment-load`, `business-routes-load`, `worker-company-lock-order`) → `Test Files 3 passed (3)`, `Tests 47 passed (47)`.
+  - Mutaciones (archivo restaurado y comprobado con `cmp` después de cada una):
+    - `business.service.ts` de `HEAD`: `business-lifecycle-revalidation` → `Tests 3 failed | 1 passed (4)`; unitarias de `business.service.test.ts` → `Tests 3 failed | 53 passed (56)`;
+    - quitar el filtro `application_name` de `waitUntilSomeSessionIsBlocked`: la prueba de sesiones ajenas → `Tests 1 failed`.
+  - `npm test` en la raíz → API `Tests 341 passed (341)`; Playwright `1 skipped`, `103 passed (4.3m)`.
+  - `npm run test:web:admin-real` (`CHAMBEAYA_E2E_DATABASE_URL` hacia `chambeaya_test`) → `3 passed (1.3m)`.
+  - `flutter test` → `+147: All tests passed!`; `flutter analyze` → `10 issues found.` (los mismos `info` previos).
+  - Limpieza: `apps/web/next-env.d.ts` restaurado con `git checkout`, `apps/web/test-results` y temporales borrados, `TRUNCATE "User" CASCADE` en `chambeaya_test` → `count 0`. Sin commit.
+- Riesgos:
+  - No ejecutado: la medición estricta opt-in con `CHAMBEAYA_LOAD_WORKERS=20`; Flutter contra la API real o en un dispositivo.
+  - Mediciones de tiempo en una sola máquina y con latencia local; en un CI más lento el margen del global de 20 s sobre lo que queda con él (1,1 s) es amplio, pero las pruebas con timeout propio dependen de ese timeout (el menor es 60 s frente a un máximo medido de 5,9 s). Una prueba nueva de carrera o carga debe fijar su propio `timeout` (documentado en `api.md` y en la configuración).
+  - El margen de las pruebas de interbloqueo forzado no cubre un `deadlock_timeout` menor de unos 100 ms.
+  - Fuera de alcance y siguen abiertos, sin tocar: rutas de empresa probabilísticas con 20 o más llamadas simultáneas (`500` atómicos y repetibles), bloqueo de filas en `acceptShift`/`applyToShift`, el `upsert` de `companyFor` que puede dar `409` en la primera ráfaga de una empresa nueva, y BAJO-1 y BAJO-2 de `CN-20260923-011` (`409 ASSIGNMENT_NOT_ACTIONABLE` sin persistir en el borde de la ventana; `checkOut` con lectura previa obsoleta).
+  - Git avisa de fin de línea (`LF will be replaced by CRLF`) por `core.autocrlf=true`; el diff no se ve afectado.
+- Siguiente paso: `auditor-opus` audita `CN-20260923-016` sobre el diff sin commitear de `0eda3b1`: repetir la mutación de `business.service.ts` y la del filtro de sesiones, comprobar con `deadlock_timeout` reducido solo en `chambeaya_test`, revisar que la relectura no altere el orden de bloqueo ni las garantías de `008/010/012/014`, y decidir si el bloqueo de filas de las rutas de empresa y de `acceptShift`/`applyToShift` se aborda en un alcance aparte.
+
 ### CN-20260923-015 — Reauditoría de `CN-20260923-014` (corrección de MEDIO-1, MEDIO-2 y BAJO-1 de `CN-20260923-013`), cierre conjunto de `CN-20260923-010`, `012` y `014`
 
 - Fecha: 2026-09-24 11:30 (America/Lima)

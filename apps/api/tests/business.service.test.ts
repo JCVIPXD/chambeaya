@@ -214,10 +214,12 @@ describe('DatabaseBusinessService.getShift', () => {
       company: { upsert: companyUpsert() },
       shift: { findFirst: vi.fn(async () => shift) },
       shiftAssignment: { findMany: vi.fn(async () => [staleAssignment]) },
+      // La escritura relee el turno y las asignaciones DENTRO de la transacción
+      // (BAJO-3 de CN-20260918-002); aquí siguen siendo las mismas.
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
-        shiftAssignment: { update: assignmentUpdate },
+        shiftAssignment: { findMany: vi.fn(async () => [staleAssignment]), update: assignmentUpdate },
         shiftEvent: { create: shiftEventCreate },
-        shift: { update: shiftUpdate },
+        shift: { findUnique: vi.fn(async () => shift), update: shiftUpdate },
       })),
     };
     const service = new DatabaseBusinessService(prisma as never);
@@ -254,6 +256,75 @@ describe('DatabaseBusinessService.getShift', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(result).toBe(shift);
   });
+
+  // BAJO-3 de CN-20260918-002: la lectura previa (fuera de la transacción) solo
+  // decide si hay algo que escribir; la decisión y la escritura salen de la
+  // relectura hecha dentro de la transacción.
+  it('does not write anything when the transaction re-read shows the assignment is no longer ASSIGNED', async () => {
+    const shift = {
+      id: 'shift-3', companyId: 'company-1', status: 'ASSIGNED' as const, requiredWorkers: 1,
+      startsAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+      endsAt: new Date(Date.now() + 60 * 60 * 1000),
+    };
+    const staleAssignment = { id: 'assignment-3', shiftId: 'shift-3', status: 'ASSIGNED', checkedInAt: null, checkedOutAt: null };
+    const currentShift = { ...shift, status: 'PUBLISHED' as const };
+    const assignmentUpdate = vi.fn(async () => undefined);
+    const shiftUpdate = vi.fn(async () => undefined);
+    const shiftEventCreate = vi.fn(async () => undefined);
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      shift: { findFirst: vi.fn(async () => shift) },
+      shiftAssignment: { findMany: vi.fn(async () => [staleAssignment]) },
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
+        shiftAssignment: { findMany: vi.fn(async () => [{ ...staleAssignment, status: 'CANCELLED' }]), update: assignmentUpdate },
+        shiftEvent: { create: shiftEventCreate },
+        shift: { findUnique: vi.fn(async () => currentShift), update: shiftUpdate },
+      })),
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    const result = await service.getShift(session, 'shift-3');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(assignmentUpdate).not.toHaveBeenCalled();
+    expect(shiftEventCreate).not.toHaveBeenCalled();
+    expect(shiftUpdate).not.toHaveBeenCalled();
+    expect(result).toBe(currentShift);
+  });
+
+  it('re-reads inside every retry of the lifecycle transaction instead of reusing the stale read', async () => {
+    const shift = {
+      id: 'shift-4', companyId: 'company-1', status: 'ASSIGNED' as const, requiredWorkers: 1,
+      startsAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
+      endsAt: new Date(Date.now() + 60 * 60 * 1000),
+    };
+    const assigned = { id: 'assignment-4', shiftId: 'shift-4', status: 'ASSIGNED', checkedInAt: null, checkedOutAt: null };
+    const assignmentUpdate = vi.fn(async () => undefined);
+    const txFindMany = vi.fn(async () => [assigned]);
+    let attempts = 0;
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      shift: { findFirst: vi.fn(async () => shift) },
+      shiftAssignment: { findMany: vi.fn(async () => [assigned]) },
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+        attempts += 1;
+        const outcome = await callback({
+          shiftAssignment: { findMany: txFindMany, update: assignmentUpdate },
+          shiftEvent: { create: vi.fn(async () => undefined) },
+          shift: { findUnique: vi.fn(async () => shift), update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...shift, ...data })) },
+        });
+        // El primer intento se aborta por fallo de serialización tras escribir.
+        if (attempts === 1) throw Object.assign(new Error('serialization failure'), { code: 'P2034' });
+        return outcome;
+      }),
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    await service.getShift(session, 'shift-4');
+
+    expect(attempts).toBe(2);
+    expect(txFindMany).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('DatabaseBusinessService.listShiftApplications', () => {
@@ -281,9 +352,9 @@ describe('DatabaseBusinessService.listShiftApplications', () => {
       shiftAssignment: { findMany: vi.fn(async () => [staleAssignment]) },
       shiftApplication: { findMany: vi.fn(async () => applicationsAfterResolution) },
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
-        shiftAssignment: { update: assignmentUpdate },
+        shiftAssignment: { findMany: vi.fn(async () => [staleAssignment]), update: assignmentUpdate },
         shiftEvent: { create: shiftEventCreate },
-        shift: { update: shiftUpdate },
+        shift: { findUnique: vi.fn(async () => shift), update: shiftUpdate },
       })),
     };
     const service = new DatabaseBusinessService(prisma as never);
@@ -700,6 +771,8 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
       const noShowInTx = { ...noShow, shift: { ...noShow.shift, status: 'CANCELLED' as const } };
       const shiftUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...freshShift, ...data }));
       const shiftEventCreate = vi.fn(async (_args: { data: Record<string, unknown> }) => undefined);
+      // Compartido por las dos transacciones: 1.ª lectura, la del ciclo de vida; las siguientes, la de la resolución.
+      const txAssignmentsFindMany = vi.fn().mockImplementationOnce(async () => [staleAssignment]).mockImplementation(async () => [{ status: 'COMPLETED' }]);
       const prisma = {
         company: { upsert: companyUpsert() },
         shift: { findFirst: vi.fn(async () => freshShift) },
@@ -707,11 +780,11 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
         $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
           shiftAssignment: { findFirst: vi.fn(async () => noShowInTx),
             update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...noShow, ...data })),
-            findMany: vi.fn(async () => [{ status: 'COMPLETED' }]),
+            findMany: txAssignmentsFindMany,
           },
           shiftEvent: { create: shiftEventCreate },
           payment: { upsert: vi.fn(async () => undefined) },
-          shift: { update: shiftUpdate },
+          shift: { findUnique: vi.fn(async () => freshShift), update: shiftUpdate },
           shiftCancellation: { findFirst: cancellationFindFirstOver([]) },
         })),
       };
@@ -730,6 +803,8 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
       const noShow = { ...noShowAssignment(), shift: { ...staleRead, company: { id: 'company-1', name: 'Restaurante Demo' } } };
       const noShowInTx = { ...noShow, shift: { ...noShow.shift, status: 'CANCELLED' as const } };
       const shiftUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...staleRead, ...data }));
+      // Compartido por las dos transacciones: 1.ª lectura, la del ciclo de vida; las siguientes, la de la resolución.
+      const txAssignmentsFindMany = vi.fn().mockImplementationOnce(async () => [staleAssignment]).mockImplementation(async () => [{ status: 'COMPLETED' }]);
       const prisma = {
         company: { upsert: companyUpsert() },
         shift: { findFirst: vi.fn(async () => staleRead) },
@@ -737,11 +812,11 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
         $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
           shiftAssignment: { findFirst: vi.fn(async () => noShowInTx),
             update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...noShow, ...data })),
-            findMany: vi.fn(async () => [{ status: 'COMPLETED' }]),
+            findMany: txAssignmentsFindMany,
           },
           shiftEvent: { create: vi.fn(async () => undefined) },
           payment: { upsert: vi.fn(async () => undefined) },
-          shift: { update: shiftUpdate },
+          shift: { findUnique: vi.fn(async () => staleRead), update: shiftUpdate },
           shiftCancellation: { findFirst: cancellationFindFirstOver([companyCancellation]) },
         })),
       };

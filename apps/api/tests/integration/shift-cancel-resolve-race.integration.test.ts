@@ -41,6 +41,10 @@ function requireTestDatabase() {
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const ROUNDS = 12;
+// `ROUNDS` carreras seguidas: ~4-6 s medidas en reposo, con poco margen frente al
+// `testTimeout` global de 20 s de `vitest.integration.config.mts`, así que esta
+// prueba tiene el suyo (CN-20260923-015 BAJO-1).
+const RACE_TIMEOUT_MS = 60_000;
 
 describe('cancelShift and resolveAssignment never both win a real concurrent race', () => {
   const prisma = new PrismaClient();
@@ -133,7 +137,7 @@ describe('cancelShift and resolveAssignment never both win a real concurrent rac
     return { shiftId, assignmentId: assignment.id };
   }
 
-  it(`leaves a serial outcome in each of ${ROUNDS} simultaneous cancel/resolve races`, async () => {
+  it(`leaves a serial outcome in each of ${ROUNDS} simultaneous cancel/resolve races`, { timeout: RACE_TIMEOUT_MS }, async () => {
     const outcomes: string[] = [];
     for (let round = 1; round <= ROUNDS; round += 1) {
       const { shiftId, assignmentId } = await shiftWithNoShow(round);

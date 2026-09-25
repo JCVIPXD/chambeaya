@@ -48,6 +48,11 @@ function requireTestDatabase() {
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const ROUNDS = 8;
+// Las pruebas `real:` repiten `ROUNDS` carreras simultáneas contra la base: la más
+// lenta (8 cancelaciones dobles) medida en ~10 s en una máquina en reposo, por
+// encima del `testTimeout` global de 20 s de `vitest.integration.config.mts`
+// solo con poco margen, así que tienen el suyo (CN-20260923-015 BAJO-1).
+const RACE_TIMEOUT_MS = 60_000;
 const REACHED_TIMEOUT_MS = 10_000;
 
 type Hook = () => Promise<void>;
@@ -268,7 +273,7 @@ describe('a worker acting on their own assignment never produces a double effect
     expect((await verifier.shift.findUniqueOrThrow({ where: { id: setup.shiftId } })).status).toBe('CHECKED_IN');
   });
 
-  it(`real: ${ROUNDS} simultaneous double check-ins leave a single CHECKED_IN event and one checkedInAt`, async () => {
+  it(`real: ${ROUNDS} simultaneous double check-ins leave a single CHECKED_IN event and one checkedInAt`, { timeout: RACE_TIMEOUT_MS }, async () => {
     for (let round = 1; round <= ROUNDS; round += 1) {
       const setup = await assignedShift({ confirmed: true, checkedIn: false });
       const [a, b] = await Promise.all([checkIn(setup.shiftId, setup.token, setup.credential), checkIn(setup.shiftId, setup.token, setup.credential)]);
@@ -313,7 +318,7 @@ describe('a worker acting on their own assignment never produces a double effect
     await expectSingleCompletion(setup, fulfilled[0]!.value.checkedOutAt, 'deterministic double check-out');
   });
 
-  it(`real: ${ROUNDS} simultaneous double check-outs complete once each (one event, one payment, one completedAt)`, async () => {
+  it(`real: ${ROUNDS} simultaneous double check-outs complete once each (one event, one payment, one completedAt)`, { timeout: RACE_TIMEOUT_MS }, async () => {
     for (let round = 1; round <= ROUNDS; round += 1) {
       const setup = await assignedShift({ confirmed: true, checkedIn: true });
       const [a, b] = await Promise.all([checkOut(setup.shiftId, setup.token), checkOut(setup.shiftId, setup.token)]);
@@ -415,7 +420,7 @@ describe('a worker acting on their own assignment never produces a double effect
     await expectCancelledNotCheckedIn(setup, 'check-in after a cancellation that held the lock');
   });
 
-  it(`real: ${ROUNDS} simultaneous cancel/check-in races have a single coherent winner`, async () => {
+  it(`real: ${ROUNDS} simultaneous cancel/check-in races have a single coherent winner`, { timeout: RACE_TIMEOUT_MS }, async () => {
     const winners: string[] = [];
     for (let round = 1; round <= ROUNDS; round += 1) {
       const setup = await assignedShift({ confirmed: true, checkedIn: false });
@@ -461,7 +466,7 @@ describe('a worker acting on their own assignment never produces a double effect
     expect(await eventCount(setup.shiftId, 'ASSIGNMENT_CONFIRMED')).toBe(0);
   });
 
-  it(`real: ${ROUNDS} simultaneous cancel/confirm races never confirm a cancelled assignment`, async () => {
+  it(`real: ${ROUNDS} simultaneous cancel/confirm races never confirm a cancelled assignment`, { timeout: RACE_TIMEOUT_MS }, async () => {
     for (let round = 1; round <= ROUNDS; round += 1) {
       const setup = await assignedShift({ confirmed: false, checkedIn: false });
       const [cancelResponse, confirmResponse] = await Promise.all([cancel(setup.shiftId, setup.token), confirm(setup.shiftId, setup.token)]);
@@ -488,7 +493,7 @@ describe('a worker acting on their own assignment never produces a double effect
 
   // ------------------------------------------------------- cancelar dos veces
 
-  it(`real: ${ROUNDS} simultaneous double cancellations record a single cancellation`, async () => {
+  it(`real: ${ROUNDS} simultaneous double cancellations record a single cancellation`, { timeout: RACE_TIMEOUT_MS }, async () => {
     for (let round = 1; round <= ROUNDS; round += 1) {
       const setup = await assignedShift({ confirmed: true, checkedIn: false });
       const [a, b] = await Promise.all([cancel(setup.shiftId, setup.token), cancel(setup.shiftId, setup.token)]);

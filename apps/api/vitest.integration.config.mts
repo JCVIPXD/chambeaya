@@ -16,11 +16,15 @@ export default defineConfig({
     // real dentro de un mismo archivo, que sigue usando `Promise.all` contra
     // la misma base de datos.
     fileParallelism: false,
-    // Las pruebas de carrera con varias rondas (p. ej. las 12 rondas de
-    // `shift-cancel-resolve-race`) tardan ~4,3 s en una máquina en reposo, muy
-    // cerca del límite predeterminado de 5 s: en 2 de 10 corridas completas de
-    // CN-20260923-014 expiraron sin ningún fallo real. Un límite holgado evita
-    // esa falla por tiempo; las pruebas con carga larga ya fijan el suyo.
-    testTimeout: 60_000,
+    // Límite global moderado: una prueba colgada (un bloqueo real, una pausa que
+    // nunca se libera) tiene que fallar rápido en vez de retener CI un minuto por
+    // prueba (BAJO-1 de CN-20260923-015; antes 60 s global). Duraciones medidas
+    // en reposo: la inmensa mayoría de las pruebas dura menos de 4 s; las más
+    // lentas (8 cancelaciones dobles simultáneas, ~10 s; las 12 rondas de
+    // `shift-cancel-resolve-race`, ~4-6 s; las rondas de carga y la matriz
+    // trabajador x empresa) fijan su PROPIO `timeout` en el archivo, mayor, porque
+    // dependen del número de rondas y de la contención, no de este valor. Una
+    // prueba nueva de carrera o carga con varias rondas debe fijar el suyo también.
+    testTimeout: 20_000,
   },
 });

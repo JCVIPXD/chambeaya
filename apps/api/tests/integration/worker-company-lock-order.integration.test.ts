@@ -33,6 +33,28 @@ import { DatabaseMarketplaceService } from '../../src/modules/marketplace/market
 //     llamada secuencial. Cubren las dos formas del error de Prisma (`P2010` de
 //     `$queryRaw` del trabajador y el error sin código de `updateMany` de la
 //     empresa).
+//
+// Dependencias del entorno que esta prueba fija a propósito:
+//  - Margen del interbloqueo forzado: PostgreSQL aborta a quien primero vea el
+//    ciclo cuando vence SU `deadlock_timeout`. Para que la víctima sea la
+//    operación bajo prueba (que empezó a esperar antes) y no la transacción de
+//    prueba, la de prueba tiene que entrar al ciclo antes de que venza el
+//    temporizador de la operación: el margen se deriva de `SHOW deadlock_timeout`
+//    (un tercio) y no es un valor fijo, así que la prueba no da falsos fallos si
+//    la base usa un valor menor que el predeterminado de 1 s (verificado con
+//    200 ms; por debajo de unos 100 ms la propia latencia de la prueba ya no
+//    cabe en el margen).
+//  - Las sesiones bloqueadas se cuentan solo entre las conexiones de esta prueba
+//    (`application_name` propio de su cliente Prisma), no las de otros clientes
+//    de la misma base.
+//  - Reconocer `40P01`: Prisma 6 (motor de consultas Rust) entrega el interbloqueo
+//    de `updateMany`/`update`/`create` como un error SIN `code` cuyo mensaje trae
+//    `PostgresError { code: "40P01"` (y el de `$queryRaw` como `P2010` con
+//    `meta.code`). `isDeadlock` de aquí y `isRetryableTransactionError` de
+//    `serializable-retry.ts` dependen de ese formato. Si un cambio de Prisma (o de
+//    su motor) altera el mensaje, el síntoma es que los interbloqueos forzados de
+//    abajo dejan de ver el `40P01` ("PostgreSQL must have aborted the first
+//    attempt") y que la empresa vuelve a responder `500` en vez de reintentar.
 // Solo corre con opt-in explícito y contra una base cuyo nombre termina en
 // `_test` (mismo guardia que el resto de `tests/integration`).
 const integrationDatabaseUrl = process.env.DATABASE_URL;
@@ -53,6 +75,25 @@ const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const WAIT_TIMEOUT_MS = 10_000;
 const TEST_TIMEOUT_MS = 60_000;
+
+// `application_name` de las conexiones de ESTA prueba (una distinta por proceso):
+// `waitUntilSomeSessionIsBlocked` solo mira sesiones con este nombre.
+const OWN_APPLICATION_NAME = `chambeaya-lock-order-${process.pid}`;
+
+/** Misma base que `DATABASE_URL`, con un `application_name` propio en las conexiones del cliente. */
+function clientNamed(applicationName: string) {
+  const url = new URL(integrationDatabaseUrl as string);
+  url.searchParams.set('application_name', applicationName);
+  return new PrismaClient({ datasources: { db: { url: url.toString() } } });
+}
+
+/** Milisegundos de un valor de `SHOW deadlock_timeout` (`1s`, `200ms`, `1min`...). */
+function parseDurationMs(value: string) {
+  const match = /^(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)$/.exec(value.trim());
+  if (!match) throw new Error(`UNPARSEABLE_DEADLOCK_TIMEOUT: ${value}`);
+  const factor = { us: 0.001, ms: 1, s: 1000, min: 60_000, h: 3_600_000, d: 86_400_000 }[match[2] as 'us'];
+  return Number(match[1]) * factor;
+}
 
 type Hook = () => Promise<void>;
 type AnyFunction = (...args: unknown[]) => unknown;
@@ -99,6 +140,12 @@ function hookDelegate(delegate: object, method: string, hook: Hook) {
   });
 }
 
+/**
+ * `true` si el error es un interbloqueo (`40P01`). Depende del formato de error
+ * de Prisma 6 (ver la nota del principio del archivo): `P2010` con `meta.code`
+ * (`$queryRaw`) o, sin `code`, el texto `PostgresError { code: "40P01"` del
+ * mensaje (`updateMany`).
+ */
 function isDeadlock(error: unknown) {
   if (typeof error !== 'object' || error === null) return false;
   const meta = (error as { meta?: { code?: unknown } }).meta;
@@ -152,7 +199,7 @@ function instrument(base: PrismaClient, seen: { errors: unknown[]; transactions:
 }
 
 describe('worker and company operations that lock the same rows in opposite order never fail with a deadlock', () => {
-  const prisma = new PrismaClient();
+  const prisma = clientNamed(OWN_APPLICATION_NAME);
   const verifier = new PrismaClient();
   const plainApp = createApp({
     rateLimit: false,
@@ -164,11 +211,16 @@ describe('worker and company operations that lock the same rows in opposite orde
   let businessToken = '';
   let databaseReady = false;
   let counter = 0;
+  // Margen entre que la operación se bloquea y la transacción de prueba entra al
+  // ciclo (`forceDeadlock`): un tercio de `deadlock_timeout`, entre 10 y 300 ms.
+  let deadlockMarginMs = 300;
 
   beforeAll(async () => {
     requireTestDatabase();
     await prisma.$connect();
     await verifier.$connect();
+    const [{ deadlock_timeout: deadlockTimeout } = { deadlock_timeout: '1s' }] = await verifier.$queryRaw<{ deadlock_timeout: string }[]>`SHOW deadlock_timeout`;
+    deadlockMarginMs = Math.min(300, Math.max(10, Math.floor(parseDurationMs(deadlockTimeout) / 3)));
     await prisma.$executeRawUnsafe('TRUNCATE TABLE "User" CASCADE');
     databaseReady = true;
 
@@ -265,12 +317,17 @@ describe('worker and company operations that lock the same rows in opposite orde
     .send({ reason: 'La empresa ya no necesita el turno' })
     .then((response) => response);
 
-  /** Espera a que PostgreSQL informe una sesión bloqueada esperando un bloqueo de fila/transacción. */
-  async function waitUntilSomeSessionIsBlocked() {
-    const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  /**
+   * Espera a que PostgreSQL informe una sesión de ESTA prueba (`application_name`
+   * propio) bloqueada esperando un bloqueo de fila/transacción. Las sesiones de
+   * otros clientes de la misma base no cuentan.
+   */
+  async function waitUntilSomeSessionIsBlocked(applicationName = OWN_APPLICATION_NAME, timeoutMs = WAIT_TIMEOUT_MS) {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const rows = await verifier.$queryRaw<{ blocked: bigint }[]>`
-        SELECT count(*) AS blocked FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+        SELECT count(*) AS blocked FROM pg_stat_activity
+        WHERE datname = current_database() AND application_name = ${applicationName} AND wait_event_type = 'Lock'`;
       if (Number(rows[0]?.blocked ?? 0) > 0) return;
       await sleep(20);
     }
@@ -341,6 +398,37 @@ describe('worker and company operations that lock the same rows in opposite orde
     expect(raced.worker.transactions, 'the worker needs a single transaction').toBe(1);
   });
 
+  // ------------------------------------------------- la espera solo cuenta sesiones propias
+
+  it('waiting for a blocked session ignores blocked sessions of other clients of the same database', { timeout: TEST_TIMEOUT_MS }, async () => {
+    const foreignName = `${OWN_APPLICATION_NAME}-foreign`;
+    const holder = clientNamed(foreignName);
+    const waiter = clientNamed(foreignName);
+    let releaseHolder!: () => void;
+    const holderReleased = new Promise<void>((resolve) => { releaseHolder = resolve; });
+    let holding!: () => void;
+    const holdingLock = new Promise<void>((resolve) => { holding = resolve; });
+    // Dos sesiones ajenas: una toma un bloqueo consultivo y la otra queda esperándolo.
+    const held = holder.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(424242)`;
+      holding();
+      await holderReleased;
+    }, { timeout: 30_000 });
+    let waiting: Promise<unknown> = Promise.resolve();
+    try {
+      await holdingLock;
+      waiting = waiter.$transaction(async (tx) => { await tx.$executeRaw`SELECT pg_advisory_xact_lock(424242)`; }, { timeout: 30_000 });
+      // Control positivo: la consulta SÍ ve la sesión bloqueada cuando se pide por su nombre...
+      await waitUntilSomeSessionIsBlocked(foreignName);
+      // ...y la espera de esta prueba, con su `application_name`, no la cuenta.
+      await expect(waitUntilSomeSessionIsBlocked(OWN_APPLICATION_NAME, 400)).rejects.toThrow('NO_SESSION_BLOCKED');
+    } finally {
+      releaseHolder();
+      await Promise.allSettled([held, waiting]);
+      await Promise.all([holder.$disconnect(), waiter.$disconnect()]);
+    }
+  });
+
   // ------------------------------------- interbloqueos forzados por un tercero en orden inverso
 
   /**
@@ -360,8 +448,10 @@ describe('worker and company operations that lock the same rows in opposite orde
       await tx.$queryRaw`SELECT "id" FROM "ShiftAssignment" WHERE "id" = ${setup.assignmentId} FOR NO KEY UPDATE`;
       signalHolding();
       await operationBlocked;
-      // La operación lleva esperando desde antes: su temporizador de interbloqueo vence primero.
-      await sleep(300);
+      // La operación lleva esperando desde antes: su temporizador de interbloqueo
+      // vence primero, con el ciclo ya formado, siempre que este margen sea menor
+      // que `deadlock_timeout` (se deriva de él, ver el principio del archivo).
+      await sleep(deadlockMarginMs);
       await tx.$queryRaw`SELECT "id" FROM "ShiftApplication" WHERE "id" = ${setup.applicationId} FOR NO KEY UPDATE`;
     }, { maxWait: WAIT_TIMEOUT_MS, timeout: 30_000 }).then(() => null, (error: unknown) => error);
 

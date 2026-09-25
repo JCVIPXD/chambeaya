@@ -1024,6 +1024,24 @@ Pendientes conocidos, por prioridad sugerida:
     transacción no deja efecto y repetirla funciona); darles el bloqueo de filas del trabajador
     quedó fuera de alcance por riesgo. `acceptShift`/`applyToShift` del trabajador siguen sin
     este tratamiento.
+    **Alcance E (`CN-20260923-016`, cierre de los bajos de `CN-20260923-015` y BAJO-3 de
+    `CN-20260918-002`; aprobado por la auditoría `CN-20260923-017`):** (a) `testTimeout` global de las pruebas de
+    integración vuelve a 20 s y solo las pruebas de carrera o carga fijan uno mayor; (b) las
+    pruebas de interbloqueo forzado derivan su margen de `SHOW deadlock_timeout`, la espera de
+    "sesión bloqueada" solo cuenta las sesiones de la propia prueba y queda documentada la
+    dependencia del formato de mensaje de Prisma 6 para reconocer `40P01`; (c)
+    `resolveShiftAssignmentsLifecycle` (ciclo de vida de la empresa) ya no escribe una decisión
+    tomada con una lectura hecha fuera de su transacción: relee y revalida dentro de la
+    `Serializable` (reproducido antes: una cancelación del trabajador o de la empresa quedaba
+    pisada por `NO_SHOW`/`PUBLISHED` y dos aperturas simultáneas duplicaban el evento). La
+    auditoría `CN-20260923-017` comprobó además que el mismo defecto dejaba ganar a la vez a
+    `cancelShift` y a `resolve` (pago sobre un turno cancelado por la empresa) cuando `resolve`
+    era el primer toque de una asignación vencida aún `ASSIGNED`; la garantía de
+    `CN-20260923-008/009` solo valía para un `NO_SHOW` ya persistido hasta esta corrección, que
+    también cierra ese caso (sin prueba permanente propia todavía; ver `docs/reference/api.md`). Siguen
+    abiertos, fuera de alcance: rutas de empresa probabilísticas con 20 o más llamadas
+    simultáneas, bloqueo de filas en `acceptShift`/`applyToShift` y el `upsert` de `companyFor`
+    que puede dar `409` en la primera ráfaga de una empresa nueva.
 
 Sin verificar de extremo a extremo: dos sesiones simultáneas; `ABANDONED`, multi-cupo y
 la cancelación de la empresa con `cancelShift` seguida de `resolve` sí se ejecutaron

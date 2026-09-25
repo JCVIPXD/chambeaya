@@ -325,21 +325,43 @@ export class DatabaseBusinessService implements BusinessOperations {
     endsAt: Date;
     requiredWorkers: number;
   }) {
+    // Lectura previa SIN escritura (BAJO-3 de CN-20260918-002): solo decide si hay
+    // algo que persistir, para que abrir un turno (`getShift`, `listShiftApplications`)
+    // no abra una transacción `Serializable` cuando nada cambia. Nunca sirve de
+    // base para escribir: puede quedar obsoleta en cualquier momento.
     // Orden por `id`: la transacción de abajo actualiza las asignaciones en este
     // orden, y dos lecturas concurrentes del mismo turno tienen que tomar las
     // filas en el mismo orden para no bloquearse en círculo (CN-20260923-013).
-    const assignments = await this.prisma.shiftAssignment.findMany({ where: { shiftId: shift.id }, orderBy: { id: 'asc' } });
-    const now = new Date();
-    const updates: { id: string; status: 'NO_SHOW' | 'ABANDONED' }[] = [];
-    const resolved = assignments.map((assignment) => {
-      const lifecycle = resolveAssignmentLifecycle(assignment, shift, now);
-      if (lifecycle.changed) updates.push({ id: assignment.id, status: lifecycle.status as 'NO_SHOW' | 'ABANDONED' });
-      return { ...assignment, status: lifecycle.status };
-    });
-    if (updates.length === 0) return { shift, assignments: resolved };
-    const nextStatus = deriveShiftStatus(shift.status, shift.requiredWorkers, resolved, shift);
-    const confirmedWorkers = resolved.filter((assignment) => assignment.status === 'ASSIGNED').length;
-    const updatedShift = await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+    const preview = await this.prisma.shiftAssignment.findMany({ where: { shiftId: shift.id }, orderBy: { id: 'asc' } });
+    const previewNow = new Date();
+    const previewResolved = preview.map((assignment) => ({ ...assignment, status: resolveAssignmentLifecycle(assignment, shift, previewNow).status }));
+    if (!preview.some((assignment, index) => previewResolved[index]?.status !== assignment.status)) {
+      return { shift, assignments: previewResolved };
+    }
+    // Todo lo que decide y escribe ocurre DENTRO de la transacción reintentable: el
+    // turno y las asignaciones se releen en cada intento, la decisión se recalcula
+    // sobre esa lectura y la asignación que dejó de ser `ASSIGNED` (una cancelación
+    // del trabajador o de la empresa confirmada entre la lectura previa y esta
+    // escritura, o la misma transición ya registrada por otra apertura simultánea)
+    // no se pisa ni se duplica. Antes se escribía la decisión de la lectura previa,
+    // también en cada reintento, y una asignación `CANCELLED` volvía a `NO_SHOW`
+    // (resoluble con pago) y un turno `CANCELLED` a `PUBLISHED`. Orden de bloqueo
+    // global postulación -> asignación -> turno (`docs/reference/api.md`): esta
+    // transacción solo escribe asignaciones (por `id`) y después el turno.
+    return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      const current = await tx.shift.findUnique({ where: { id: shift.id } });
+      if (!current) throw new BusinessRecordNotFoundError('SHIFT_NOT_FOUND');
+      const assignments = await tx.shiftAssignment.findMany({ where: { shiftId: current.id }, orderBy: { id: 'asc' } });
+      const now = new Date();
+      const updates: { id: string; status: 'NO_SHOW' | 'ABANDONED' }[] = [];
+      const resolved = assignments.map((assignment) => {
+        const lifecycle = resolveAssignmentLifecycle(assignment, current, now);
+        if (lifecycle.changed) updates.push({ id: assignment.id, status: lifecycle.status as 'NO_SHOW' | 'ABANDONED' });
+        return { ...assignment, status: lifecycle.status };
+      });
+      if (updates.length === 0) return { shift: current, assignments: resolved };
+      const nextStatus = deriveShiftStatus(current.status, current.requiredWorkers, resolved, current);
+      const confirmedWorkers = resolved.filter((assignment) => assignment.status === 'ASSIGNED').length;
       for (const update of updates) {
         await tx.shiftAssignment.update({ where: { id: update.id }, data: { status: update.status } });
         // Rastro de auditoría de la transición automática (ver MEDIO-1 de
@@ -349,7 +371,7 @@ export class DatabaseBusinessService implements BusinessOperations {
         // `SYSTEM` y el detalle deja constancia de cuál de los dos ocurrió.
         await tx.shiftEvent.create({
           data: {
-            shiftId: shift.id,
+            shiftId: current.id,
             actorId: null,
             actorRole: 'SYSTEM',
             type: 'CANCELLED',
@@ -359,9 +381,9 @@ export class DatabaseBusinessService implements BusinessOperations {
           },
         });
       }
-      return tx.shift.update({ where: { id: shift.id }, data: { status: nextStatus, confirmedWorkers } });
+      const updatedShift = await tx.shift.update({ where: { id: current.id }, data: { status: nextStatus, confirmedWorkers } });
+      return { shift: updatedShift, assignments: resolved };
     }, { isolationLevel: 'Serializable' }));
-    return { shift: updatedShift, assignments: resolved };
   }
 
   async resolveAssignment(session: AuthSession, shiftId: string, assignmentId: string, outcome: AssignmentResolutionOutcome, reason?: string) {
