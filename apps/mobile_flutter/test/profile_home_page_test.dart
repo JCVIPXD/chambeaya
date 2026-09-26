@@ -1,3 +1,4 @@
+import 'package:chambeaya_mobile/features/auth/auth_repository.dart';
 import 'package:chambeaya_mobile/features/profile/profile_home_page.dart';
 import 'package:chambeaya_mobile/features/profile/talent_profile_repository.dart';
 import 'package:flutter/material.dart';
@@ -347,6 +348,236 @@ void main() {
       );
     });
   });
+
+  // "Cambiar contraseña" (CN-20260926-B): la tarjeta "Seguridad" solo
+  // aparece con una sesión real (`authRepository` + `sessionToken`), llama a
+  // `AuthRepository.changePassword`, valida en el cliente con la misma regla
+  // que la API y muestra el mensaje adecuado para una cuenta solo de Google.
+  group('Cambiar contraseña', () {
+    Future<void> pumpWithSession(
+      WidgetTester tester, {
+      AuthRepository? authRepository,
+      String? sessionToken = 'token-de-prueba',
+      bool googleOnlyAccount = false,
+    }) async {
+      tester.view.physicalSize = const Size(390, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ProfileHomePage(
+            talentProfileRepository: _ProfileRepository(),
+            authRepository: authRepository,
+            sessionToken: sessionToken,
+            googleOnlyAccount: googleOnlyAccount,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+      'no muestra la tarjeta de Seguridad sin una sesión real (modo demo)',
+      (tester) async {
+        await pumpWithSession(
+          tester,
+          authRepository: null,
+          sessionToken: null,
+        );
+
+        expect(find.text('Seguridad', skipOffstage: false), findsNothing);
+        expect(
+          find.byKey(const ValueKey('open-change-password'), skipOffstage: false),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'cuenta solo de Google: muestra la explicación en vez del formulario',
+      (tester) async {
+        final repository = _RecordingAuthRepository();
+        await pumpWithSession(
+          tester,
+          authRepository: repository,
+          googleOnlyAccount: true,
+        );
+
+        expect(find.text('Seguridad', skipOffstage: false), findsOneWidget);
+        expect(
+          find.textContaining(
+            'todavía no tiene una contraseña propia',
+            skipOffstage: false,
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('open-change-password'), skipOffstage: false),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'cambia la contraseña: llama al repositorio y avisa que se cerraron las demás sesiones',
+      (tester) async {
+        final repository = _RecordingAuthRepository();
+        await pumpWithSession(tester, authRepository: repository);
+
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('open-change-password')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('open-change-password')));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-current')),
+          'ClaveActual1',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-new')),
+          'NuevaClaveSegura2',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-confirm')),
+          'NuevaClaveSegura2',
+        );
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('change-password-submit')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('change-password-submit')));
+        await tester.pumpAndSettle();
+
+        expect(repository.calls, 1);
+        expect(repository.lastToken, 'token-de-prueba');
+        expect(repository.lastCurrentPassword, 'ClaveActual1');
+        expect(repository.lastNewPassword, 'NuevaClaveSegura2');
+        expect(
+          find.text(
+            'Tu contraseña se actualizó. Se cerraron tus demás sesiones.',
+          ),
+          findsOneWidget,
+        );
+        // La hoja se cerró tras el éxito.
+        expect(
+          find.byKey(const ValueKey('change-password-submit'), skipOffstage: false),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'muestra el error de la API cuando la contraseña actual es incorrecta y no cierra la hoja',
+      (tester) async {
+        final repository = _RecordingAuthRepository(
+          failure: const AuthFailure(
+            AuthFailureKind.invalidCredentials,
+            statusCode: 401,
+            code: 'INVALID_CURRENT_PASSWORD',
+          ),
+        );
+        await pumpWithSession(tester, authRepository: repository);
+
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('open-change-password')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('open-change-password')));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-current')),
+          'Incorrecta1',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-new')),
+          'NuevaClaveSegura2',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-confirm')),
+          'NuevaClaveSegura2',
+        );
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('change-password-submit')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('change-password-submit')));
+        await tester.pumpAndSettle();
+
+        expect(repository.calls, 1);
+        expect(
+          find.text('La contraseña actual no es correcta.'),
+          findsOneWidget,
+        );
+        // La hoja sigue abierta: el campo de la nueva contraseña sigue ahí.
+        expect(
+          find.byKey(const ValueKey('change-password-new'), skipOffstage: false),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'valida en el cliente antes de llamar al repositorio: contraseña débil o distinta de la confirmación',
+      (tester) async {
+        final repository = _RecordingAuthRepository();
+        await pumpWithSession(tester, authRepository: repository);
+
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('open-change-password')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('open-change-password')));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-current')),
+          'ClaveActual1',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-new')),
+          'clavedebil',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-confirm')),
+          'clavedebil',
+        );
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('change-password-submit')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('change-password-submit')));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text('Debe tener 8 caracteres, una mayúscula y un número.'),
+          findsOneWidget,
+        );
+
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-new')),
+          'NuevaClaveSegura2',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('change-password-confirm')),
+          'OtraClaveSegura3',
+        );
+        await tester.ensureVisible(
+          find.byKey(const ValueKey('change-password-submit')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('change-password-submit')));
+        await tester.pumpAndSettle();
+
+        expect(find.text('La confirmación no coincide.'), findsOneWidget);
+        // Ninguna llamada llegó al repositorio: ambas se rechazaron en el cliente.
+        expect(repository.calls, 0);
+      },
+    );
+  });
 }
 
 const _hiddenProfile = TalentProfile(
@@ -517,4 +748,29 @@ class _ProfileRepository implements TalentProfileRepository {
 
   @override
   Future<Uint8List?> profilePhoto() async => null;
+}
+
+/// Doble de `AuthRepository` que registra la llamada a `changePassword` y,
+/// opcionalmente, la hace fallar con [failure] (mismo patrón que
+/// `_FailingAuthRepository` en `auth_page_test.dart`).
+class _RecordingAuthRepository extends AuthRepository {
+  _RecordingAuthRepository({this.failure});
+  final AuthFailure? failure;
+  var calls = 0;
+  String? lastToken;
+  String? lastCurrentPassword;
+  String? lastNewPassword;
+
+  @override
+  Future<void> changePassword({
+    required String token,
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    calls++;
+    lastToken = token;
+    lastCurrentPassword = currentPassword;
+    lastNewPassword = newPassword;
+    if (failure != null) throw failure!;
+  }
 }

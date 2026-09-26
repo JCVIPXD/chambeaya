@@ -135,6 +135,46 @@ class AuthRepository {
     return _sessionFromResponse(response);
   }
 
+  /// Cambia la contraseña de una cuenta que YA tiene una contraseña local
+  /// configurada. Exige `currentPassword` y borra todas las demás sesiones
+  /// del usuario; la que hizo esta llamada sigue activa. Distinto de
+  /// [setInitialGooglePassword], que solo sirve para fijar la primera
+  /// contraseña de una cuenta creada con Google. Ver `docs/reference/api.md`.
+  ///
+  /// Lanza [AuthFailure] con `code` en:
+  /// `INVALID_CURRENT_PASSWORD` (401), `WEAK_PASSWORD` (400),
+  /// `PASSWORD_UNCHANGED` (400), `GOOGLE_ONLY_ACCOUNT` (409, la cuenta
+  /// todavía no tiene contraseña local) o `INVALID_SESSION` (401).
+  Future<void> changePassword({
+    required String token,
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    late final http.Response response;
+    try {
+      response = await _client
+          .post(
+            _endpoint('password/change'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $token',
+            },
+            body: jsonEncode({
+              'currentPassword': currentPassword,
+              'newPassword': newPassword,
+            }),
+          )
+          .timeout(_requestTimeout);
+    } on http.ClientException {
+      throw const AuthFailure(AuthFailureKind.connectivity);
+    } on TimeoutException {
+      throw const AuthFailure(AuthFailureKind.connectivity);
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      _throwFailure(response);
+    }
+  }
+
   Future<void> logout(String token) async {
     try {
       await _client

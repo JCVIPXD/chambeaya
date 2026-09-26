@@ -54,6 +54,20 @@ export interface AuthService {
     token: string,
     password: string,
   ): Promise<AuthSession> | AuthSession;
+  /**
+   * Cambia la contraseña de una cuenta que YA tiene una contraseña local
+   * configurada (cualquier rol). Distinto de `setInitialGooglePassword`, que
+   * solo sirve para fijar la PRIMERA contraseña de una cuenta creada con
+   * Google (`localPasswordConfigured=false`). Verifica `currentPassword`,
+   * exige que `newPassword` sea válida y distinta de la actual, y borra
+   * todas las demás `AuthSession` del usuario conservando la que hizo la
+   * petición.
+   */
+  changePassword(
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<AuthSession> | AuthSession;
 }
 
 interface Account extends Omit<RegisterInput, "password"> {
@@ -74,7 +88,12 @@ export class AuthError extends Error {
       | "GOOGLE_EMAIL_ALREADY_REGISTERED"
       | "GOOGLE_PROFILE_SETUP_EXPIRED"
       | "PASSWORD_SETUP_NOT_AVAILABLE"
-      | "GOOGLE_SIGN_IN_UNAVAILABLE",
+      | "GOOGLE_SIGN_IN_UNAVAILABLE"
+      | "INVALID_CURRENT_PASSWORD"
+      | "WEAK_PASSWORD"
+      | "PASSWORD_UNCHANGED"
+      | "GOOGLE_ONLY_ACCOUNT"
+      | "PASSWORD_CHANGED_CONCURRENTLY",
   ) {
     super(code);
   }
@@ -206,6 +225,34 @@ export class LocalAuthService implements AuthService {
 
   setInitialGooglePassword(_token: string, _password: string): AuthSession {
     throw new AuthError('GOOGLE_SIGN_IN_UNAVAILABLE');
+  }
+
+  changePassword(
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+  ): AuthSession {
+    const tokenHash = hashToken(token);
+    const account = this.sessions.get(tokenHash);
+    if (!account) throw new AuthError('INVALID_SESSION');
+    if (!account.localPasswordConfigured) {
+      throw new AuthError('GOOGLE_ONLY_ACCOUNT');
+    }
+    if (!passwordMatches(currentPassword, account)) {
+      throw new AuthError('INVALID_CURRENT_PASSWORD');
+    }
+    if (!isValidPassword(newPassword)) throw new AuthError('WEAK_PASSWORD');
+    if (passwordMatches(newPassword, account)) {
+      throw new AuthError('PASSWORD_UNCHANGED');
+    }
+    account.salt = randomBytes(16).toString('hex');
+    account.passwordHash = hashPassword(newPassword, account.salt);
+    for (const [hash, sessionAccount] of this.sessions) {
+      if (sessionAccount === account && hash !== tokenHash) {
+        this.sessions.delete(hash);
+      }
+    }
+    return publicSession(token, account);
   }
 
   private sessionFor(account: Account): AuthSession {
@@ -404,6 +451,81 @@ export class DatabaseAuthService implements AuthService {
       },
     });
     return publicSession(token, this.toAccount(account));
+  }
+
+  async changePassword(
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<AuthSession> {
+    if (!token) throw new AuthError('INVALID_SESSION');
+    const currentTokenHash = hashToken(token);
+    const session = await this.prisma.authSession.findUnique({
+      where: { tokenHash: currentTokenHash },
+      include: { user: true },
+    });
+    if (!session || session.expiresAt <= new Date()) {
+      // Idempotente por la misma razón que en `restore` (CN-20260923-013, BAJO-1).
+      if (session) await this.prisma.authSession.deleteMany({ where: { id: session.id } });
+      throw new AuthError('INVALID_SESSION');
+    }
+    const account = this.toAccount(session.user);
+    if (!account.localPasswordConfigured) {
+      throw new AuthError('GOOGLE_ONLY_ACCOUNT');
+    }
+    if (!passwordMatches(currentPassword, account)) {
+      throw new AuthError('INVALID_CURRENT_PASSWORD');
+    }
+    if (!isValidPassword(newPassword)) throw new AuthError('WEAK_PASSWORD');
+    if (passwordMatches(newPassword, account)) {
+      throw new AuthError('PASSWORD_UNCHANGED');
+    }
+    const salt = randomBytes(16).toString('hex');
+    const passwordHash = hashPassword(newPassword, salt);
+    // El hash leído más arriba (`session.user.passwordHash`), fuera de esta
+    // transacción, es lo que acabamos de verificar contra `currentPassword`.
+    const readPasswordHash = session.user.passwordHash;
+
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      // Control de concurrencia optimista (CN-20260926-008, MEDIO-1): dos
+      // peticiones simultáneas con la misma contraseña actual leen el mismo
+      // `passwordHash` fuera de la transacción y las dos pasan la
+      // verificación de arriba. Sin condicionar este `update` al hash que
+      // cada una leyó, ambas lo sobrescribirían igual ("la última en escribir
+      // gana" en silencio): las dos responderían `200`, pero solo una
+      // contraseña quedaría vigente y cada transacción habría borrado la
+      // sesión de la otra (reproducido 20/20 por `auditor-opus`). `updateMany`
+      // con `passwordHash: readPasswordHash` en el `where` hace que solo la
+      // primera transacción en comprometerse afecte una fila: la de después
+      // ve `count === 0` porque el hash ya cambió, y no borra ninguna sesión.
+      const updated = await tx.user.updateMany({
+        where: { id: session.userId, passwordHash: readPasswordHash },
+        data: { salt, passwordHash },
+      });
+      if (updated.count === 0) {
+        throw new AuthError('PASSWORD_CHANGED_CONCURRENTLY');
+      }
+      // Se ejecuta DESPUÉS del `update` y dentro de la MISMA transacción:
+      // borra toda sesión que exista en este momento salvo la actual (sin
+      // filtrar por fecha), lo que también alcanza a una sesión creada por
+      // un login concurrente que ya se había confirmado antes de este punto.
+      //
+      // Riesgo residual, documentado (no cerrado por esta corrección): un
+      // login que ya haya leído la fila del usuario con el hash viejo antes
+      // de que el `update` de arriba se comprometa, y que recién inserte su
+      // `AuthSession` después de que este `deleteMany` corra, sobrevive.
+      // `login()` no comparte transacción ni bloqueo con `changePassword()`,
+      // así que esta ventana no se puede cerrar solo desde aquí; cerrarla
+      // exigiría serializar `login()` contra `changePassword()` a nivel de
+      // fila (por ejemplo con un bloqueo consultivo por usuario), un cambio
+      // en la ruta más caliente de la API que se deja fuera de esta
+      // corrección (ver riesgos de `CN-20260926-009` en `docs/PROGRESO.md`).
+      await tx.authSession.deleteMany({
+        where: { userId: session.userId, tokenHash: { not: currentTokenHash } },
+      });
+      return tx.user.findUniqueOrThrow({ where: { id: session.userId } });
+    });
+    return publicSession(token, this.toAccount(updatedUser));
   }
 
   private async sessionFor(account: User): Promise<AuthSession> {

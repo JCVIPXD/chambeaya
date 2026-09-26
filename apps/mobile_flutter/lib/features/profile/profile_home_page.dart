@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 
 import '../../theme/app_theme.dart';
 import '../../theme/theme_mode_controller.dart';
+import '../auth/auth_repository.dart';
 import 'talent_profile_repository.dart';
 
 class ProfileHomePage extends StatefulWidget {
@@ -13,6 +14,9 @@ class ProfileHomePage extends StatefulWidget {
     this.showNavigation = true,
     this.onLogout,
     this.themeModeController,
+    this.authRepository,
+    this.sessionToken,
+    this.googleOnlyAccount = false,
     super.key,
   });
 
@@ -24,6 +28,22 @@ class ProfileHomePage extends StatefulWidget {
   /// to it. Widget tests that build `ProfileHomePage` directly can omit it,
   /// in which case the toggle is not rendered (matching prior behavior).
   final ThemeModeController? themeModeController;
+
+  /// Optional: when both `authRepository` and `sessionToken` are provided,
+  /// this page shows a "Cambiar contraseña" card that calls
+  /// `AuthRepository.changePassword`. Omitted in demo mode (no real backend
+  /// session to change) and in widget tests that build `ProfileHomePage` in
+  /// isolation, in which case the card is not rendered.
+  final AuthRepository? authRepository;
+  final String? sessionToken;
+
+  /// Whether the signed-in account still has no local password configured
+  /// (a Google-only account, per `AuthSession.requiresPasswordSetup`). In
+  /// practice the app never lets such a session reach this page today (see
+  /// `main.dart`, that flow forces the first-password screen first), but the
+  /// card checks it defensively and shows an explanatory message instead of
+  /// the form if it were ever true.
+  final bool googleOnlyAccount;
 
   @override
   State<ProfileHomePage> createState() => _ProfileHomePageState();
@@ -184,6 +204,9 @@ class _ProfileHomePageState extends State<ProfileHomePage> {
             data: data,
             onLogout: widget.onLogout,
             themeModeController: widget.themeModeController,
+            authRepository: widget.authRepository,
+            sessionToken: widget.sessionToken,
+            googleOnlyAccount: widget.googleOnlyAccount,
             uploadingCv: _uploadingCv,
             onUploadCv: () => _uploadCv(data),
             uploadingPhoto: _uploadingPhoto,
@@ -271,6 +294,9 @@ class _ProfileContent extends StatelessWidget {
     required this.uploadingPhoto,
     this.onLogout,
     this.themeModeController,
+    this.authRepository,
+    this.sessionToken,
+    this.googleOnlyAccount = false,
   });
   final _ProfileScreenData data;
   final VoidCallback onEdit;
@@ -280,6 +306,9 @@ class _ProfileContent extends StatelessWidget {
   final bool uploadingPhoto;
   final VoidCallback? onLogout;
   final ThemeModeController? themeModeController;
+  final AuthRepository? authRepository;
+  final String? sessionToken;
+  final bool googleOnlyAccount;
 
   @override
   Widget build(BuildContext context) => CustomScrollView(
@@ -421,6 +450,19 @@ class _ProfileContent extends StatelessWidget {
                         subtitle: 'Idiomas que hablas',
                         child: _LanguagesDetail(profile: profile),
                       ),
+                      if (authRepository != null && sessionToken != null) ...[
+                        const SizedBox(height: 18),
+                        _ProfileCard(
+                          icon: Icons.lock_outline_rounded,
+                          title: 'Seguridad',
+                          subtitle: 'Contraseña de tu cuenta',
+                          child: _SecurityDetail(
+                            authRepository: authRepository!,
+                            sessionToken: sessionToken!,
+                            googleOnlyAccount: googleOnlyAccount,
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 18),
                       const _PrivacyNote(),
                     ],
@@ -1106,6 +1148,240 @@ class _LanguagesDetail extends StatelessWidget {
               .toList(),
         ),
     ],
+  );
+}
+
+/// Cuerpo de la tarjeta "Seguridad": un botón "Cambiar" que abre
+/// [_ChangePasswordSheet], o — para una cuenta sin contraseña local todavía
+/// (ver `ProfileHomePage.googleOnlyAccount`) — una explicación en vez del
+/// formulario.
+class _SecurityDetail extends StatelessWidget {
+  const _SecurityDetail({
+    required this.authRepository,
+    required this.sessionToken,
+    required this.googleOnlyAccount,
+  });
+  final AuthRepository authRepository;
+  final String sessionToken;
+  final bool googleOnlyAccount;
+
+  @override
+  Widget build(BuildContext context) {
+    if (googleOnlyAccount) {
+      return const _EmptyProfileDetail(
+        icon: Icons.info_outline_rounded,
+        text:
+            'Tu cuenta usa Google para iniciar sesión y todavía no tiene una '
+            'contraseña propia. Complétala desde el paso que te pedimos justo '
+            'después de iniciar sesión con Google.',
+      );
+    }
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Text(
+            'Cambia tu contraseña cuando quieras. Al guardar, se cerrarán '
+            'todas tus demás sesiones activas.',
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+        ),
+        const SizedBox(width: 12),
+        OutlinedButton(
+          key: const ValueKey('open-change-password'),
+          onPressed: () => showModalBottomSheet<void>(
+            context: context,
+            isScrollControlled: true,
+            builder: (_) => _ChangePasswordSheet(
+              authRepository: authRepository,
+              sessionToken: sessionToken,
+            ),
+          ),
+          child: const Text('Cambiar'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Formulario de "Cambiar contraseña" (hoja modal). Misma regla de validez
+/// que `auth_page.dart` (`_isValidPassword`) y que la API
+/// (`isValidPassword` en `apps/api/src/modules/auth/auth.service.ts`): al
+/// menos 8 caracteres, una mayúscula y un número.
+class _ChangePasswordSheet extends StatefulWidget {
+  const _ChangePasswordSheet({
+    required this.authRepository,
+    required this.sessionToken,
+  });
+  final AuthRepository authRepository;
+  final String sessionToken;
+
+  @override
+  State<_ChangePasswordSheet> createState() => _ChangePasswordSheetState();
+}
+
+class _ChangePasswordSheetState extends State<_ChangePasswordSheet> {
+  final _formKey = GlobalKey<FormState>();
+  final _currentPassword = TextEditingController();
+  final _newPassword = TextEditingController();
+  final _confirmPassword = TextEditingController();
+  var _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _currentPassword.dispose();
+    _newPassword.dispose();
+    _confirmPassword.dispose();
+    super.dispose();
+  }
+
+  bool _isValidPassword(String password) =>
+      password.length >= 8 &&
+      RegExp(r'[A-Z]').hasMatch(password) &&
+      RegExp(r'\d').hasMatch(password);
+
+  String _messageForFailure(AuthFailure failure) {
+    switch (failure.code) {
+      case 'INVALID_CURRENT_PASSWORD':
+        return 'La contraseña actual no es correcta.';
+      case 'WEAK_PASSWORD':
+        return 'Debe tener al menos 8 caracteres, una mayúscula y un número.';
+      case 'PASSWORD_UNCHANGED':
+        return 'La nueva contraseña debe ser distinta de la actual.';
+      case 'GOOGLE_ONLY_ACCOUNT':
+        return 'Tu cuenta todavía no tiene una contraseña propia; usa el '
+            'flujo de primera contraseña en vez de este formulario.';
+      case 'INVALID_SESSION':
+        return 'Tu sesión ya no es válida. Vuelve a iniciar sesión.';
+    }
+    return failure.kind == AuthFailureKind.connectivity
+        ? 'Revisa tu conexión e inténtalo nuevamente.'
+        : 'No se pudo cambiar la contraseña. Inténtalo nuevamente.';
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await widget.authRepository.changePassword(
+        token: widget.sessionToken,
+        currentPassword: _currentPassword.text,
+        newPassword: _newPassword.text,
+      );
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Tu contraseña se actualizó. Se cerraron tus demás sesiones.',
+            ),
+          ),
+        );
+      }
+    } on AuthFailure catch (failure) {
+      if (mounted) setState(() => _error = _messageForFailure(failure));
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _error =
+              'No se pudo cambiar la contraseña. Inténtalo nuevamente.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        18,
+        20,
+        20 + MediaQuery.viewInsetsOf(context).bottom,
+      ),
+      child: SingleChildScrollView(
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Cambiar contraseña',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Se cerrarán todas tus demás sesiones activas al guardar.',
+                style: TextStyle(color: context.palette.muted),
+              ),
+              const SizedBox(height: 18),
+              TextFormField(
+                key: const ValueKey('change-password-current'),
+                controller: _currentPassword,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Contraseña actual',
+                ),
+                validator: (value) => (value == null || value.isEmpty)
+                    ? 'Ingresa tu contraseña actual.'
+                    : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                key: const ValueKey('change-password-new'),
+                controller: _newPassword,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Nueva contraseña',
+                  helperText:
+                      'Mínimo 8 caracteres, una mayúscula y un número.',
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Ingresa la nueva contraseña.';
+                  }
+                  if (!_isValidPassword(value)) {
+                    return 'Debe tener 8 caracteres, una mayúscula y un número.';
+                  }
+                  if (value == _currentPassword.text) {
+                    return 'Debe ser distinta de la actual.';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                key: const ValueKey('change-password-confirm'),
+                controller: _confirmPassword,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Confirmar nueva contraseña',
+                ),
+                validator: (value) => value != _newPassword.text
+                    ? 'La confirmación no coincide.'
+                    : null,
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(_error!, style: const TextStyle(color: Colors.red)),
+              ],
+              const SizedBox(height: 18),
+              FilledButton(
+                key: const ValueKey('change-password-submit'),
+                onPressed: _saving ? null : _submit,
+                child: Text(_saving ? 'Guardando...' : 'Guardar cambios'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
   );
 }
 

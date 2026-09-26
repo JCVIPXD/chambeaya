@@ -120,6 +120,17 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
         await route.fulfill({ status: 204 });
         return;
       }
+      if (path === '/api/auth/password/change' && method === 'POST') {
+        const body = request.postDataJSON() as
+          | { currentPassword?: string; newPassword?: string }
+          | null;
+        if (body?.currentPassword !== account.password) {
+          await route.fulfill({ status: 401, json: { error: 'INVALID_CURRENT_PASSWORD' } });
+          return;
+        }
+        await route.fulfill({ json: session });
+        return;
+      }
 
       const data: Record<string, unknown> = {
         '/api/business/company': company,

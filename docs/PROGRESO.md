@@ -54,6 +54,229 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260926-010 — Reauditoría de `CN-20260926-009` y cierre del Alcance B (`CN-20260926-007`, `009`)
+
+- Fecha: 2026-09-26 10:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-007` (implementación) y `CN-20260926-009` (corrección de los hallazgos de `CN-20260926-008`). Sin comitear, sobre HEAD `1065156`. Con esta entrada se **cierra el Alcance B**.
+- Alcance: reauditoría de MEDIO-1, MEDIO-2 y BAJO-1 a BAJO-5 de `008`, con regresión completa. Decisión sobre la ventana del login concurrente con la contraseña anterior.
+- Archivos:
+  - Revisados: los de `009`.
+  - Modificado por la auditoría (solo documentación): `docs/reference/api.md`. Añadí `409 PASSWORD_CHANGED_CONCURRENTLY`, `500 INTERNAL_ERROR` y el riesgo residual con su solución acotada.
+- Decisiones (hallazgos):
+  - **Críticos, altos y medios: ninguno. MEDIO-1 y MEDIO-2 de `008` están cerrados.**
+    - MEDIO-1: `updateMany` condicionado al `passwordHash` leído, dentro de una transacción interactiva junto con el `deleteMany`. En `READ COMMITTED`, el segundo `UPDATE` espera el bloqueo de fila y, al reevaluar el `WHERE`, afecta 0 filas: es determinista.
+    - MEDIO-2: `setPassword("")` al iniciar sesión y al salir.
+  - BAJO-1 a BAJO-5 de `008`: corregidos y verificados. La trampa de foco completa sigue fuera de alcance; está aceptada.
+  - **BAJO-1 (nuevo, abierto, no bloquea) — Ventana del login concurrente con la contraseña anterior** (`auth.service.ts`, `login()` y `sessionFor()`).
+    - Lo reproduje de forma determinista, intercalando los pasos a mano: la sesión creada con la contraseña anterior sobrevive.
+    - La justificación de `009` exagera el costo. No hace falta serializar `login()` de forma global: basta crear la sesión en una transacción con `SELECT 1 FROM "User" WHERE id=$1 AND "passwordHash"=$2 FOR UPDATE`. Solo compite con los logins y cambios de la misma cuenta, son unas 10 líneas y cubre los dos órdenes posibles.
+    - Lo probé en el mismo escenario y la sesión ya no se crea.
+    - El otro camino, guardar una versión de la contraseña en la sesión y rechazarla en `restore()`, necesita una migración.
+    - Decisión: se acepta como riesgo residual en este alcance, por el impacto real.
+      - Solo puede aprovecharlo quien ya conoce la contraseña anterior; por ejemplo, el superadmin conoce la contraseña inicial de cada empresa.
+      - Su login tendría que caer justo en la ventana entre la lectura y el commit del cambio, que dura milisegundos con una sola réplica. El atacante no puede observar esa ventana, y el limitador permite 20 intentos cada 15 minutos por IP.
+      - Mi sonda natural dio 0 de 40.
+    - Recomendación: aplicar la solución `FOR UPDATE` antes de escalar a varias réplicas o de abrir el piloto. El modo `--reset` de `cli/superadmin.ts:296-301` tiene la misma ventana.
+  - **BAJO-2 (nuevo) — Mensaje genérico para `PASSWORD_CHANGED_CONCURRENTLY`.** El modal web (`change-password-modal.tsx`) y Flutter (`profile_home_page.dart`) no mapean ese código: la web muestra "Revisa tu conexión…". Es cosmético y el caso es muy raro.
+- Validaciones:
+  - API:
+    - `tsc --noEmit`: 0 errores.
+    - `npm test`: 22 archivos, 371/371.
+  - Integración: contenedor `cn-audit010-pg` (Postgres 16, `chambeaya_audit_test`, puerto 5549), `migrate deploy` y `test:integration`: 13 archivos, 88/88.
+  - Sonda de 20 cambios simultáneos: exactamente un `200` y un `PASSWORD_CHANGED_CONCURRENTLY` en 20 de 20. Ya no hay dos `200` ni contraseñas perdidas (antes: 20 de 20 con fallo).
+  - Sonda del login:
+    - Natural: 0 de 40.
+    - Forzada: sobrevive con el código actual y no se crea con `FOR UPDATE`.
+  - Códigos 4xx con la API real: sin Bearer y Bearer falso dan `401 INVALID_SESSION`; además `401 INVALID_CURRENT_PASSWORD`, `400 WEAK_PASSWORD` y `400 PASSWORD_UNCHANGED`.
+  - Con Postgres detenido: `500 {"error":"INTERNAL_ERROR"}`, sin detalles en el cuerpo. El registro del servidor tiene el error de Prisma y ninguna contraseña (lo busqué con grep).
+  - Web:
+    - `tsc --noEmit`: 0 errores.
+    - Playwright rápido: 119 pasaron y 1 omitida (preexistente).
+  - Navegador, build de producción con `NEXT_BASE_PATH=/empresas` contra la API real:
+    - Superadmin: al abrir el modal, el foco va a "Contraseña actual"; Escape lo cierra y el foco vuelve al botón.
+    - "Salir" con el `DELETE` colgado a propósito limpia al instante: el campo de contraseña queda vacío y se conserva el correo.
+    - "Salir" normal revoca el token (`401`).
+    - Panel de empresa: tras "Cerrar sesión", el correo y la contraseña quedan vacíos porque `BusinessAuth` se desmonta. La afirmación de `009` es correcta.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`, sobre una copia dentro del contenedor:
+    - `pub get --enforce-lockfile`: correcto.
+    - `analyze`: sin problemas (código 0).
+    - `flutter test`: 155 pasaron.
+    - `pubspec.lock` quedó sin cambios.
+  - Limpieza:
+    - Borré el contenedor y su volumen anónimo.
+    - Detuve los procesos en `:3400` y `:4400`.
+    - Revertí `next-env.d.ts`.
+    - No toqué `chambeaya-stable-postgres-data`.
+- Riesgos:
+  - BAJO-1 queda abierto como riesgo residual aceptado, con la solución indicada.
+  - No hay prueba `e2e-real` del superadmin.
+  - No probé la app Flutter en un dispositivo real.
+  - La prueba del cableado de Flutter cubre `WorkerShell`, no `main.dart`/`ChambeayaApp` con una sesión real.
+- Siguiente paso: el usuario decide cuándo comitear el Alcance B. Opcional: `implementador-sonnet` aplica la solución `FOR UPDATE` de BAJO-1 en `login()` y en `--reset`, con una prueba de integración.
+
+### CN-20260926-009 — Corrección de `CN-20260926-007` (hallazgos de `CN-20260926-008`: concurrencia, "Salir" del superadmin, accesibilidad y cobertura)
+
+- Fecha: 2026-09-26 10:01 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-008` (auditoría, `REQUIERE_CAMBIOS`: 2 hallazgos medios, 5 bajos, ninguno crítico ni alto), que auditó `CN-20260926-007`.
+- Alcance: se corrigieron los 7 hallazgos de `CN-20260926-008`.
+  - **MEDIO-1 (carrera en `changePassword`).** `DatabaseAuthService.changePassword` (`apps/api/src/modules/auth/auth.service.ts`) ahora hace el `update` dentro de una transacción interactiva (`$transaction(async (tx) => {...})`) con `tx.user.updateMany({ where: { id, passwordHash: <hash leído fuera de la transacción> }, ... })`. Si `count === 0` (otra petición concurrente ya cambió la contraseña con la misma "actual"), lanza `PASSWORD_CHANGED_CONCURRENTLY` sin tocar ninguna sesión. El `deleteMany` de sesiones sigue dentro de la misma transacción, después del `update`. Elegí `409 PASSWORD_CHANGED_CONCURRENTLY` (código nuevo, distinto de `401 INVALID_CURRENT_PASSWORD`) porque la contraseña actual sí era correcta cuando se leyó; el cliente debe reintentar, no corregir un dato. Ventana de login concurrente con la contraseña vieja (la segunda parte del hallazgo): el `deleteMany` ya corre sin filtro de fecha dentro de la transacción, así que alcanza a cualquier sesión confirmada antes de ese punto; el residual que **no** se cierra (un login que ya haya leído la fila antes del `commit` y recién inserte su sesión después del `deleteMany`) queda documentado en el código y en Riesgos, porque cerrarlo exigiría serializar `login()` contra `changePassword()` a nivel de fila (un cambio en la ruta más caliente de la API, fuera de esta corrección).
+  - **MEDIO-2 (formulario del superadmin tras "Salir").** `apps/web/app/admin/page.tsx`: `setPassword("")` al iniciar sesión con éxito y al salir. El correo se conserva a propósito (conveniencia para volver a entrar); solo la contraseña es sensible. Se revisó el panel de empresa: `BusinessAuth` se desmonta al autenticar (confirmado en el código), así que no tiene este defecto; no se tocó.
+  - **BAJO-1 (modal sin accesibilidad de teclado).** `apps/web/components/change-password-modal.tsx`: foco al primer campo al abrir, `Escape` cierra (listener en `document`, referenciado vía `ref` para no reinstalarse en cada tecla), y se devuelve el foco a `document.activeElement` de antes de abrir (el botón que lo abrió) al desmontar. Al llegar a la pantalla de éxito, el foco pasa al botón "Listo".
+  - **BAJO-2 ("Salir" bloqueaba hasta 8 s).** `admin/page.tsx`: `onLogout` ahora limpia `localStorage`/estado primero y llama a `adminApi.logout(...)` sin `await` (`void adminApi.logout(...).catch(() => undefined)`), igual que el panel de empresa.
+  - **BAJO-3 (comentarios falsos sobre `GOOGLE_ONLY_ACCOUNT`).** Corregidos los comentarios en `apps/api/tests/integration/change-password.integration.test.ts` y `apps/api/tests/auth.service.test.ts` que afirmaban que ningún flujo real deja `localPasswordConfigured=false`; la migración `20260914190000_google_local_password` sí lo hace para cuentas Google anteriores a ese paso (la documentación ya la corrigió `auditor-opus` en `docs/reference/api.md`). En Flutter, verificado (sin cambios de código): la rama `googleOnlyAccount` de `ProfileHomePage` sí es inalcanzable en la práctica porque `main.dart:220` no muestra `WorkerShell` mientras `requiresPasswordSetup` sea verdadero — el propio auditor lo calificó de "aceptable como defensa", y ya existía una prueba de widget que verifica el mensaje explicativo.
+  - **BAJO-4 (error inesperado respondía 400).** `apps/api/src/modules/auth/auth.routes.ts`: la ruta `/password/change` ahora usa una tabla explícita `changePasswordStatusByCode` (los 6 códigos conocidos → su estado) y cualquier otro error (`instanceof AuthError` con código desconocido, o cualquier error que no sea `AuthError`) responde `500 INTERNAL_ERROR` con `console.error` del detalle, sin filtrarlo al cliente (mismo patrón que `business.routes.ts`/`marketplace.routes.ts`).
+  - **BAJO-5 (huecos de cobertura).** Se agregaron las 3 pruebas señaladas: (a) API, `429 AUTH_RATE_LIMITED` en `POST /api/auth/password/change` (`apps/api/tests/rate_limit.test.ts`); (b) Web, `"Salir"` del superadmin limpia el estado local aunque `DELETE /api/auth/session` falle (`apps/web/e2e/admin-change-password.spec.ts`, con un fixture nuevo `deleteSessionFails` en `apps/web/e2e/fixtures/admin-api.ts`); (c) Flutter, el cableado real (`authRepository`/`sessionToken`/`googleOnlyAccount` llegando desde `WorkerShell` hasta la tarjeta "Seguridad" de Perfil, y que `onLogout` sigue funcionando desde esa pestaña) en `apps/mobile_flutter/test/worker_shell_change_password_wiring_test.dart` — no se pudo probar a través de `main.dart`/`ChambeayaApp` de punta a punta con una sesión real porque `_usesLiveApi: true` construye repositorios HTTP reales que saldrían a la red; se cubrió la capa inmediatamente debajo (`WorkerShell`), documentado inline. De más, agregadas dos pruebas de las dos correcciones (concurrencia real en integración, foco/Escape en Playwright) aunque no estaban explícitamente en la lista de BAJO-5.
+- Archivos:
+  - API: `apps/api/src/modules/auth/auth.service.ts`, `apps/api/src/modules/auth/auth.routes.ts`, `apps/api/tests/auth.service.test.ts`, `apps/api/tests/auth.routes.test.ts`, `apps/api/tests/rate_limit.test.ts`, `apps/api/tests/integration/change-password.integration.test.ts`.
+  - Web: `apps/web/app/admin/page.tsx`, `apps/web/components/change-password-modal.tsx`, `apps/web/e2e/fixtures/admin-api.ts`, `apps/web/e2e/admin-change-password.spec.ts`, `apps/web/e2e/change-password.spec.ts`.
+  - Flutter: `apps/mobile_flutter/test/worker_shell_change_password_wiring_test.dart` (nuevo).
+- Decisiones:
+  - `PASSWORD_CHANGED_CONCURRENTLY` es un código nuevo (no reutiliza `INVALID_CURRENT_PASSWORD`) para no decirle al cliente que escribió mal su contraseña actual cuando en realidad perdió una carrera legítima; el cliente puede reintentar sin pedir la contraseña de nuevo.
+  - No se implementó ningún bloqueo consultivo (`pg_advisory_xact_lock`) ni se tocó `login()` para cerrar la ventana residual de "login concurrente con la contraseña vieja": el propio auditor la calificó de teórica (0/40 en su sonda de un solo proceso) y cerrarla exige serializar la ruta de login contra cualquier cambio de contraseña a nivel de fila, un cambio de alcance mucho mayor que esta corrección. Queda como riesgo documentado, no como pendiente oculto.
+  - En el modal web no se agregó una trampa de foco completa (ciclo de `Tab` dentro del diálogo): el hallazgo BAJO-1 solo pedía foco inicial, `Escape` y devolución de foco, y es el mismo nivel que `CrudModal` ya tenía (el propio auditor lo calificó de bajo por eso).
+- Validaciones:
+  - API: `npm run --workspace @chambeaya/api build` (`tsc --noEmit`) — 0 errores. `npm run --workspace @chambeaya/api test` — 371/371 en 22 archivos (+3 sobre `CN-20260926-007`: mapeo a 409 de `PASSWORD_CHANGED_CONCURRENTLY`, mapeo a 500 de un error no reconocido, y el `429` de `/password/change`).
+  - API integración: contenedor Postgres 16 desechable (`cn-cambio-pass-pg2`, BD `chambeaya_test`, puerto 5548, proyecto propio, sin tocar `chambeaya-stable-postgres-data`), `prisma migrate deploy` y `npm run test:integration` con `CHAMBEAYA_INTEGRATION_TESTS=true` — 13/13 archivos, 88/88 pruebas (+1 sobre `CN-20260926-007`: dos cambios simultáneos con `Promise.all`, exactamente uno gana con `200` y el otro recibe `409 PASSWORD_CHANGED_CONCURRENTLY`, verificado además con login real que la contraseña final es la del que ganó). La prueba de concurrencia se corrió 5 veces sueltas además de la corrida completa, sin fallos (determinística: la condición del `updateMany` se resuelve por bloqueo de fila en Postgres, no por temporización). Contenedor eliminado al terminar.
+  - Web: `npm run --workspace @chambeaya/web build` (incluye TypeScript de Next) — build correcto. `npm run test:web` (Playwright, `chromium-desktop` + `chromium-mobile`) — 119 pasaron, 1 omitida (preexistente, no relacionada); incluye las 4 pruebas nuevas de esta corrección (foco/Escape del modal compartido, y "Salir" del superadmin con la API caída) más las 2 que ya existían reescritas para el nuevo comportamiento de "Salir" (limpia antes, sin bloquear).
+  - Flutter, en `ghcr.io/cirruslabs/flutter:3.44.0` (Docker; no se usó el Flutter local 3.47.1): `flutter pub get --enforce-lockfile` — sin cambios en `pubspec.lock` (verificado con `git status` antes y después de ambas corridas). `flutter analyze` — "No issues found!" (código 0). `flutter test` — "All tests passed!", 155 pruebas (+2 sobre `CN-20260926-007`, el archivo nuevo de cableado).
+  - `git diff --check` — sin errores (solo avisos de fin de línea LF/CRLF preexistentes en `docs/PROGRESO.md` y `docs/reference/api.md`, no relacionados con el contenido).
+  - Efecto secundario revertido: `apps/web/next-env.d.ts` (regenerado por `next build`) — `git checkout -- apps/web/next-env.d.ts`, confirmado limpio con `git status`.
+- Riesgos:
+  - **Residual, documentado (no cerrado a propósito):** un login concurrente que lea la contraseña vieja antes de que el `update` de `changePassword` se comprometa, y que inserte su `AuthSession` después de que el `deleteMany` de esa misma transacción ya corrió, sobrevive al cambio. Requiere multi-réplica o latencia real entre ambas operaciones (el propio auditor no lo reprodujo en un solo proceso, 0/40); cerrarlo exigiría serializar `login()` contra `changePassword()` a nivel de fila, fuera del alcance de esta corrección.
+  - El modal web no tiene una trampa de foco completa (`Tab` puede salir del diálogo); aceptado explícitamente por el auditor como el mismo nivel que `CrudModal`.
+  - Sigue sin existir una prueba `e2e-real` del superadmin (API y Postgres reales); la cobertura de "Salir" y del modal de superadmin sigue en Playwright mockeado, como en `CN-20260926-007`.
+  - No se ejecutó la app Flutter en un dispositivo ni emulador real; la tarjeta "Seguridad" y el cableado de `WorkerShell` solo se verificaron con pruebas de widget.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260926-009` contra `CN-20260926-008`, en particular la prueba de concurrencia real (determinismo del `updateMany`), el código `PASSWORD_CHANGED_CONCURRENTLY` y su estado HTTP, y que "Salir" del superadmin ya no bloquee ni retenga la contraseña.
+
+### CN-20260926-008 — Auditoría de `CN-20260926-007` (cambio de contraseña, Alcance B)
+
+- Fecha: 2026-09-26 09:40 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-007` (implementación, sin comitear sobre HEAD `1065156`). El Alcance A (`CN-20260926-006`) no se tocó: el diff no incluye scripts, compose ni Nginx.
+- Alcance: revisión completa del diff (API, web, Flutter, docs) y de los 5 archivos nuevos. Recorrido real en navegador del build de producción del panel (`NEXT_BASE_PATH=/empresas`) contra la API real y un Postgres desechable. Sondas de concurrencia contra ese mismo Postgres.
+- Archivos:
+  - Revisados: todos los de `CN-20260926-007`.
+  - Modificado por la auditoría (solo documentación): `docs/reference/api.md`. Corregí la nota de `GOOGLE_ONLY_ACCOUNT` (ver BAJO-3).
+- Decisiones (hallazgos):
+  - **Críticos y altos: ninguno.**
+  - **MEDIO-1 — Falta control de concurrencia en `DatabaseAuthService.changePassword`** (`apps/api/src/modules/auth/auth.service.ts:455-497`).
+    - La contraseña actual se verifica fuera de la transacción, y el `user.update` no exige que `passwordHash` siga siendo el que se leyó.
+    - Evidencia (sonda con `DatabaseAuthService` real sobre Postgres 16): dos cambios simultáneos desde dos sesiones con la misma contraseña actual devolvieron ambos `200` en 20 de 20 intentos. En 20 de 20, una de las dos contraseñas "cambiadas con éxito" no quedó vigente, y cada transacción borró la sesión de la otra. El cliente muestra "esta sigue activa" sobre una sesión borrada y una contraseña que no rige.
+    - El mismo TOCTOU permite, en teoría, que un login con la contraseña vieja lea el hash antes del commit y cree su sesión después del `deleteMany`, con lo que esa sesión sobreviviría al cambio. En la sonda con un solo proceso ocurrió 0 de 40 veces, porque `scryptSync` serializa; con varias réplicas o más latencia la ventana existe.
+    - Corrección sugerida: `$transaction` interactiva con `tx.user.updateMany({ where: { id, passwordHash: <hash leído> }, ... })`. Con `count === 0`, responder `INVALID_CURRENT_PASSWORD` (o un código de conflicto) sin tocar sesiones. Falta una prueba de integración con dos cambios simultáneos.
+  - **MEDIO-2 — Después de "Salir", el superadmin puede volver a entrar con un clic** (`apps/web/app/admin/page.tsx:33-34` y `114-124`). El fallo ya existía, pero está en el `onLogout` que modificó este cambio.
+    - `email` y `password` son estado de `AdminPage`, que no se desmonta, y ni el login ni el logout los limpian.
+    - Comprobado en el navegador: tras "Salir", el formulario conserva el correo y la contraseña vigente. Un clic en "Ingresar" vuelve a abrir el panel de superadmin sin escribir nada, lo que es grave en un equipo compartido.
+    - El panel de empresa no lo sufre, porque `BusinessAuth` se desmonta.
+    - Corrección: `setPassword("")` al iniciar sesión con éxito y al salir, más una prueba.
+  - **BAJO-1 — El modal no es accesible con teclado** (`apps/web/components/change-password-modal.tsx:118-131`).
+    - Verificado en el navegador: al abrirlo, el foco se queda en el botón que lo abrió, y Escape no lo cierra.
+    - No hay trampa de foco ni se devuelve el foco al cerrar. Las etiquetas sí son correctas: `<label>` envuelve cada campo.
+    - Es el mismo patrón de `CrudModal`, por eso es bajo.
+  - **BAJO-2 — "Salir" del superadmin espera a la API antes de limpiar el estado** (`admin/page.tsx:117-123`).
+    - Puede tardar hasta 8 s (`AbortSignal.timeout`) sin ninguna señal ni botón deshabilitado.
+    - El panel de empresa limpia primero y llama a la API después. Con un `DELETE` fallido sí limpia el estado local (verificado).
+  - **BAJO-3 — `GOOGLE_ONLY_ACCOUNT` sí es alcanzable; no es ruido.** La migración `20260914190000_google_local_password` marcó con `false` las cuentas Google anteriores, y `startGoogleLogin` les entrega una sesión Bearer.
+    - Es falsa la afirmación "ningún flujo real deja `false`" que aparece en `CN-20260926-007` y en los comentarios de `tests/integration/change-password.integration.test.ts:103-107`, `tests/auth.routes.test.ts` y `tests/auth.service.test.ts`. Hay que corregir esos comentarios. El código de la API es correcto.
+    - La rama `googleOnlyAccount` de Flutter es inalcanzable, porque `main.dart:220` no muestra `WorkerShell` mientras `requiresPasswordSetup` sea verdadero. Es aceptable como defensa.
+  - **BAJO-4 — Un error inesperado responde `400 INVALID_REGISTRATION`** (`auth.routes.ts:125`). Si falla la base de datos, `/password/change` responde eso en vez de `500`. Hereda el patrón de `/password`.
+  - **BAJO-5 — Huecos de cobertura:**
+    - Ninguna prueba cubre que "Salir" del superadmin limpie el estado cuando falla el `DELETE`.
+    - Ninguna prueba cubre la condición `_usesLiveApi` de `main.dart`: la prueba "modo demo" pasa `null` a mano.
+    - Ninguna prueba cubre el `429` de `/password/change` ni que las sesiones de otros usuarios sobrevivan. Ambos los verifiqué a mano.
+  - Correctos, verificados:
+    - `timingSafeEqual` + scrypt como en el login.
+    - `INVALID_CURRENT_PASSWORD` solo lo recibe la propia sesión, así que no enumera cuentas.
+    - La sal es nueva (`randomBytes(16)`).
+    - Se conserva la sesión actual por `tokenHash`.
+    - `where.userId` impide tocar otra cuenta; el endpoint no acepta ningún id.
+    - No hay logs de cuerpos ni contraseñas.
+    - `/password` sigue igual.
+    - El mojibake está corregido.
+    - `localStorage` solo guarda la sesión, nunca la contraseña.
+- Validaciones:
+  - API:
+    - `npm run --workspace @chambeaya/api build` (`tsc --noEmit`): 0 errores.
+    - `npm run --workspace @chambeaya/api test`: 22 archivos, 368/368.
+  - Integración: contenedor `cn-audit007-pg` (Postgres 16, BD `chambeaya_audit_test`, puerto 5547), `prisma migrate deploy` y `npm run test:integration`: 13 archivos, 87/87.
+  - Sondas de concurrencia (script temporal fuera del repo):
+    - Doble cambio: 20/20 ambos con `200` y uno sin efecto (MEDIO-1).
+    - Login frente a cambio: 0/40 sesiones viejas sobrevivientes.
+  - Web:
+    - `tsc --noEmit`: 0 errores.
+    - `npm run test:web`: 115 pasaron y 1 omitida (preexistente).
+  - Navegador:
+    - Build de producción con `NEXT_BASE_PATH=/empresas` en `:3400`, contra la API real (`scripts/e2e-serve.ts`, cuentas sembradas del fixture del proyecto) en `:4400`.
+    - Empresa:
+      - La contraseña actual errónea muestra el error sin cerrar la sesión.
+      - Con la correcta, la respuesta es `200` y aparece el aviso.
+      - Una segunda sesión abierta por HTTP pasa a `401`.
+      - La sesión del admin (otro usuario) sigue en `200`.
+      - Al recargar se conserva la sesión actual.
+      - Salir y volver a entrar con la nueva contraseña funciona; la vieja da `401`.
+    - Superadmin:
+      - El cambio responde `200` y su otra sesión pasa a `401`.
+      - "Salir" revoca el token en el servidor (`401`).
+      - Con el `DELETE` forzado a fallar, el estado local se limpia igual.
+      - Se reprodujo MEDIO-2.
+    - `/password/change` responde `429 AUTH_RATE_LIMITED` al superar el límite.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`, sobre una copia dentro del contenedor:
+    - `flutter pub get --enforce-lockfile`: correcto.
+    - `flutter analyze`: "No issues found!" (código 0).
+    - `flutter test`: 153 pasaron.
+    - `pubspec.lock` quedó sin cambios.
+  - Limpieza:
+    - Borré el contenedor y su volumen anónimo.
+    - Detuve los procesos en `:3400` y `:4400`.
+    - Revertí `apps/web/next-env.d.ts`.
+    - No toqué `chambeaya-stable-postgres-data`.
+    - `apps/web/.next` quedó con el build de `/empresas` (ignorado por git).
+- Riesgos:
+  - No ejecuté la app Flutter en un dispositivo ni en un emulador: el layout de la tarjeta "Seguridad" en el ancho de un móvil solo lo cubren las pruebas de widget, con la superficie por defecto.
+  - No hay prueba `e2e-real` del superadmin.
+  - El limitador es en memoria por instancia (ya documentado).
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 y MEDIO-2 con pruebas, y de paso BAJO-1 a BAJO-5 si caben. Después, `auditor-opus` reaudita.
+
+### CN-20260926-007 — Cambio de contraseña (API, panel de empresa, superadmin y app del trabajador) — Alcance B del plan de pagos
+
+- Fecha: 2026-09-26 09:19 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: N/A (Alcance B de `C:\Users\JUAN CARLOS\.claude\plans\dynamic-prancing-bear.md`; el Alcance A cerró en `CN-20260926-006`)
+- Alcance: nuevo `POST /api/auth/password/change` (Bearer, cualquier rol) que exige la contraseña actual, valida la nueva con `isValidPassword`, la rechaza si es igual a la actual, regenera `salt`/`passwordHash` y borra todas las demás `AuthSession` del usuario conservando la sesión que hizo la petición (misma transacción, patrón de `resetSuperadminPassword`); rechaza con `409 GOOGLE_ONLY_ACCOUNT` una cuenta sin contraseña local configurada. Modal "Cambiar contraseña" compartido entre el panel de empresa (junto a "Cerrar sesión") y el superadmin (barra superior), con validación en cliente idéntica a la API y aviso de que se cerraron las demás sesiones. Arreglo relacionado: "Salir" del superadmin ahora llama a `DELETE /api/auth/session` antes de limpiar el estado local (antes solo borraba `localStorage`), y se corrigió el mojibake de "Validando sesión…". Opción "Cambiar contraseña" en Perfil de la app Flutter del trabajador (tarjeta "Seguridad", oculta en modo demo), con mensaje explicativo en vez del formulario para una cuenta sin contraseña local (`requiresPasswordSetup`); en la práctica ninguna cuenta real llega hoy a ese estado (documentado como nota, no como pendiente).
+- Archivos:
+  - API: `apps/api/src/modules/auth/auth.service.ts`, `apps/api/src/modules/auth/auth.routes.ts`, `apps/api/tests/auth.service.test.ts`, `apps/api/tests/auth.routes.test.ts`, `apps/api/tests/admin.routes.test.ts` (mock de `AuthService` actualizado), `apps/api/tests/integration/change-password.integration.test.ts` (nuevo).
+  - Web: `apps/web/components/change-password-modal.tsx` (nuevo, compartido), `apps/web/lib/business-api.ts`, `apps/web/lib/admin-api.ts` (nuevo `AdminApiError` con código, antes el `request()` de este archivo descartaba el cuerpo del error), `apps/web/app/page.tsx`, `apps/web/app/admin/page.tsx`, `apps/web/e2e/fixtures/business-api.ts`, `apps/web/e2e/fixtures/admin-api.ts` (nuevo), `apps/web/e2e/change-password.spec.ts` (nuevo), `apps/web/e2e/admin-change-password.spec.ts` (nuevo).
+  - Flutter: `apps/mobile_flutter/lib/features/auth/auth_repository.dart`, `apps/mobile_flutter/lib/features/profile/profile_home_page.dart`, `apps/mobile_flutter/lib/features/marketplace/worker_shell.dart`, `apps/mobile_flutter/lib/main.dart`, `apps/mobile_flutter/test/profile_home_page_test.dart`.
+  - Docs: `docs/reference/api.md` (sección nueva "Cambiar contraseña", errores y efecto sobre sesiones), `docs/guides/deployment.md` ("Primer acceso": recomienda cambiar la contraseña generada del superadmin y de cada empresa tras el primer ingreso).
+- Decisiones:
+  - Nuevos códigos de error estables en `AuthService`/`AuthError`: `INVALID_CURRENT_PASSWORD` (401), `WEAK_PASSWORD` (400), `PASSWORD_UNCHANGED` (400), `GOOGLE_ONLY_ACCOUNT` (409); `INVALID_SESSION` (401) reutiliza el código existente.
+  - `LocalAuthService.changePassword` es una implementación real (no un stub que lanza `GOOGLE_SIGN_IN_UNAVAILABLE` como los métodos específicos de Google), porque este servicio en memoria se usa como doble en pruebas de rutas no relacionadas con Google.
+  - El modal web es un solo componente (`ChangePasswordModal`, prop `variant: 'business' | 'admin'`) que solo cambia las clases del contenedor para calzar con `modal-*` (empresa) o `admin-modal*` (superadmin); el formulario y la validación son idénticos.
+  - En Flutter, "Cambiar contraseña" solo se muestra con `authRepository`/`sessionToken` reales (se ocultan en modo demo, donde `session.token` no corresponde a ninguna cuenta del backend); se hilaron como parámetros opcionales nuevos por `main.dart` → `WorkerShell` → `ProfileHomePage` sin romper la firma usada por las pruebas de widget existentes (parámetros opcionales, comportamiento previo intacto cuando se omiten).
+  - No se creó ninguna vía pública para producir una cuenta `localPasswordConfigured=false` real (el valor por defecto es `true` y todo flujo de Google actual completa la contraseña antes de crear el `User`); la rama `GOOGLE_ONLY_ACCOUNT` se cubrió forzando el campo directamente en pruebas unitarias/integración (documentado inline en cada prueba) y de forma defensiva en el cliente.
+- Validaciones:
+  - API unit: `npm run --workspace @chambeaya/api build` (`tsc --noEmit`) — sin errores. `npm run --workspace @chambeaya/api test` — 368/368 pruebas en 22 archivos, incluidas las nuevas (actual errónea, débil, igual a la actual, solo Google, sin sesión, éxito que conserva la sesión actual y borra las demás).
+  - API integración: contenedor Postgres 16 desechable (`docker run --name cn-cambio-pass-pg ... -p 5544:5432`, proyecto/volumen propio, sin tocar `chambeaya-stable-postgres-data`), `prisma migrate deploy` y `npm run test:integration --workspace=@chambeaya/api` con `CHAMBEAYA_INTEGRATION_TESTS=true` — 13/13 archivos, 87/87 pruebas (incluye `change-password.integration.test.ts`: login real antes y después del cambio, sesión vieja rechazada, sesión actual aceptada, y el caso `GOOGLE_ONLY_ACCOUNT` contra una fila real). Contenedor eliminado al terminar (`docker rm -f cn-cambio-pass-pg`).
+  - Web: `npm run --workspace @chambeaya/web build` (incluye TypeScript de Next) — build de producción correcto. `npm run test:web` (Playwright, ambos proyectos `chromium-desktop`/`chromium-mobile`) — 115 pasaron, 1 omitida (preexistente, no relacionada); incluye las 6 pruebas nuevas (`change-password.spec.ts` y `admin-change-password.spec.ts`: éxito, error de la API, validación en cliente, y el logout del superadmin llamando a `DELETE /api/auth/session`).
+  - Flutter, en `ghcr.io/cirruslabs/flutter:3.44.0` (Docker; no se usó el Flutter local 3.47.1 para `pub get`): `flutter pub get --enforce-lockfile` — sin cambios en `pubspec.lock` (verificado con `git status`/`git diff --stat` antes y después); `flutter analyze` — "No issues found!"; `flutter test` — "All tests passed!", 153 pruebas, incluidas 5 nuevas en `profile_home_page_test.dart` (sin sesión real no muestra la tarjeta, cuenta solo de Google muestra la explicación, éxito con aviso de sesiones cerradas, error de la API sin cerrar la hoja, validación en cliente de contraseña débil y de confirmación no coincidente).
+  - `git diff --check` — sin errores en ningún archivo modificado.
+  - Efecto secundario revertido: `apps/web/next-env.d.ts` (regenerado por `next build`) — `git checkout -- apps/web/next-env.d.ts`, confirmado limpio con `git status`.
+- Riesgos:
+  - El caso `GOOGLE_ONLY_ACCOUNT` no tiene hoy ningún camino real de producción que lo alcance (documentado en `docs/reference/api.md`); si se agrega un flujo de Google que deje `localPasswordConfigured=false`, revisar que el mensaje del cliente (web y Flutter) siga siendo el correcto.
+  - La cobertura del superadmin (modal y logout) quedó en la suite Playwright **mockeada** (`apps/web/e2e/admin-change-password.spec.ts`, fixture nueva `apps/web/e2e/fixtures/admin-api.ts`), no en `e2e-real`: el enunciado permitía cualquiera de las dos y `e2e-real` exige levantar el stack completo (API + Postgres reales con la cuenta admin sembrada por `apps/api/scripts/e2e-serve.ts`), que no se preparó en esta entrega.
+  - No se ejecutó ninguna simulación del instalador de producción ni se tocó `docker-compose.production.yml`/`.env.production.example`: el cambio no requería nuevas variables de entorno.
+- Siguiente paso: `auditor-opus` audita `CN-20260926-007` (correctitud de la transacción de cambio de contraseña y borrado de sesiones, códigos de error estables, cobertura de pruebas real vs. declarada, y la documentación actualizada en `docs/reference/api.md` y `docs/guides/deployment.md`).
+
 ### CN-20260926-006 — Reauditoría de `CN-20260926-005` y cierre del Alcance A (`CN-20260926-001`, `003`, `005`)
 
 - Fecha: 2026-09-26 07:55 (America/Lima)

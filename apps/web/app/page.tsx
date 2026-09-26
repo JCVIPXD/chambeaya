@@ -22,6 +22,7 @@ import {
   Download,
   FileText,
   Filter,
+  KeyRound,
   LayoutDashboard,
   Building2,
   LogOut,
@@ -77,6 +78,7 @@ import { keepIfEqual } from "../lib/stable-state";
 import { BusinessAuth } from "../components/business-auth";
 import { ApplicantCvButton } from "../components/applicant-cv";
 import { CrudModal } from "../components/crud-modal";
+import { ChangePasswordModal } from "../components/change-password-modal";
 
 type ViewName =
   | "Resumen"
@@ -411,6 +413,7 @@ export default function HomePage() {
   >("Todos");
   const [modalKind, setModalKind] = useState<ModalKind>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -1595,6 +1598,13 @@ export default function HomePage() {
             <span>{sidebarPlanLabel(subscription)}</span>
           </span>
           <Pencil size={15} color="#718096" />
+        </button>
+        <button
+          className="logout-button"
+          type="button"
+          onClick={() => setPasswordModalOpen(true)}
+        >
+          <KeyRound size={15} /> Cambiar contraseña
         </button>
         <button
           className="logout-button"
@@ -2857,6 +2867,15 @@ export default function HomePage() {
             setEditingId(null);
           }}
           onSubmit={saveCrud}
+        />
+      )}
+      {passwordModalOpen && session && (
+        <ChangePasswordModal
+          variant="business"
+          onClose={() => setPasswordModalOpen(false)}
+          onSubmit={async ({ currentPassword, newPassword }) => {
+            await authApi.changePassword(session.token, currentPassword, newPassword);
+          }}
         />
       )}
       {notificationsOpen && (

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/navigation/adaptive_worker_scaffold.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/theme_mode_controller.dart';
+import '../auth/auth_repository.dart';
 import '../discovery/worker_discovery_page.dart';
 import 'marketplace_repository.dart';
 import '../profile/profile_home_page.dart';
@@ -23,6 +24,9 @@ class WorkerShell extends StatefulWidget {
     TalentInvitationRepository? talentInvitationRepository,
     SearchAlertStore? alertStore,
     this.themeModeController,
+    this.authRepository,
+    this.sessionToken,
+    this.googleOnlyAccount = false,
   }) : talentProfileRepository =
            talentProfileRepository ??
            DemoTalentProfileRepository(name: workerName ?? 'Trabajador'),
@@ -36,6 +40,12 @@ class WorkerShell extends StatefulWidget {
   final String? workerName;
   final int initialIndex;
   final SearchAlertStore alertStore;
+
+  /// Threaded straight into the Perfil tab's `ProfileHomePage` so it can
+  /// offer "Cambiar contraseña" (see the fields with the same name there).
+  final AuthRepository? authRepository;
+  final String? sessionToken;
+  final bool googleOnlyAccount;
 
   /// Optional: lets the profile tab expose a "Modo oscuro" toggle. Widget
   /// tests that build `WorkerShell` directly (without the app's
@@ -100,6 +110,9 @@ class _WorkerShellState extends State<WorkerShell> {
         onLogout: widget.onLogout,
         talentProfileRepository: widget.talentProfileRepository,
         themeModeController: widget.themeModeController,
+        authRepository: widget.authRepository,
+        sessionToken: widget.sessionToken,
+        googleOnlyAccount: widget.googleOnlyAccount,
       ),
       WorkerInvitationsPage(repository: widget.talentInvitationRepository),
     ];

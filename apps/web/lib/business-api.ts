@@ -231,6 +231,15 @@ export const authApi = {
   login: (email: string, password: string) => request<BusinessSession>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   restore: (token: string) => request<BusinessSession>('/auth/session', { token }),
   logout: (token: string) => request<void>('/auth/session', { method: 'DELETE', token }),
+  // Exige la contraseña actual; borra todas las demás sesiones y conserva la
+  // que hizo la petición (`token`). Distinto del flujo de primera contraseña
+  // de una cuenta creada con Google. Ver `docs/reference/api.md`.
+  changePassword: (token: string, currentPassword: string, newPassword: string) =>
+    request<BusinessSession>('/auth/password/change', {
+      method: 'POST',
+      token,
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
 };
 
 function resource<T>(path: string) {

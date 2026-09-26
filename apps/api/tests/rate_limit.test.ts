@@ -53,6 +53,35 @@ describe('rate limiting on auth routes', () => {
     expect(second.body).toEqual({ error: 'AUTH_RATE_LIMITED' });
   });
 
+  it('rate limits POST /api/auth/password/change too (CN-20260926-008, BAJO-5)', async () => {
+    const authService = new LocalAuthService();
+    const app = createApp({
+      authService,
+      rateLimit: { windowMs: 60_000, max: 1 },
+    });
+
+    const registered = await request(app).post('/api/auth/register').send({
+      role: 'WORKER',
+      name: 'Ana Torres',
+      email: 'ana@example.com',
+      password: 'ClaveSegura1',
+      dniOrRuc: '12345678',
+    });
+    expect(registered.status).toBe(201);
+    const token = registered.body.token as string;
+
+    // El cupo (max: 1) ya lo consumió el `register` de arriba: esta
+    // petición, aunque válida, debe caer en el límite antes de tocar el
+    // servicio.
+    const response = await request(app)
+      .post('/api/auth/password/change')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: 'ClaveSegura1', newPassword: 'NuevaClaveSegura2' });
+
+    expect(response.status).toBe(429);
+    expect(response.body).toEqual({ error: 'AUTH_RATE_LIMITED' });
+  });
+
   it('does not rate limit unrelated routes such as GET /api/health', async () => {
     const app = createApp({
       authService: new LocalAuthService(),

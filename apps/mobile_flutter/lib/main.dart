@@ -240,6 +240,12 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
       repository: _workerRepository!,
       talentProfileRepository: _talentProfileRepository!,
       talentInvitationRepository: _talentInvitationRepository!,
+      // Solo con la API real hay una sesión de verdad cuya contraseña se
+      // pueda cambiar; en modo demo `_session!.token` no corresponde a
+      // ninguna cuenta del backend.
+      authRepository: _usesLiveApi ? _authRepository : null,
+      sessionToken: _usesLiveApi ? _session?.token : null,
+      googleOnlyAccount: _session?.requiresPasswordSetup == true,
     );
   }
 }

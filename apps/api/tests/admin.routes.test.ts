@@ -19,6 +19,7 @@ function fakeAuthService(sessions: Record<string, AuthSession>): AuthService {
     startGoogleLogin: vi.fn(),
     completeGoogleProfile: vi.fn(),
     setInitialGooglePassword: vi.fn(),
+    changePassword: vi.fn(),
   };
 }
 

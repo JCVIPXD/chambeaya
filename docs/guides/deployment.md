@@ -277,12 +277,17 @@ El orden real de una instancia nueva es:
 
 2. **El superadmin entra a `https://<tu dominio>/empresas/admin`** con ese
    correo y esa contraseña, y desde ahí crea cada empresa (nombre, RUC,
-   correo y contraseña de la empresa). El panel todavía no tiene una opción
-   para que el propio superadmin cambie su contraseña desde la sesión; si
-   necesitas una nueva, usa el modo `--reset` de abajo.
+   correo y contraseña de la empresa). **Recomendado: cambia esa contraseña
+   generada justo después de este primer ingreso**, con el botón "Cambiar
+   contraseña" de la barra superior del panel (`POST /api/auth/password/change`,
+   ver [la referencia de la API](../reference/api.md#cambiar-contraseña));
+   al guardar se cierran además todas las demás sesiones abiertas con ese
+   superadmin. Si en vez de cambiarla necesitas una nueva porque la
+   perdiste, usa el modo `--reset` de abajo.
 3. **Cada empresa entra a `https://<tu dominio>/empresas`** (sin `/admin`)
    con el correo y la contraseña que el superadmin eligió al crearla, y
-   publica sus turnos.
+   publica sus turnos. Puede cambiar esa contraseña de la misma forma, con
+   "Cambiar contraseña" junto a "Cerrar sesión" en la barra lateral.
 4. **Los trabajadores se registran solos** en `https://<tu dominio>/` (la app
    Flutter), con su nombre, correo, DNI y contraseña — o con Google, si está
    configurado. No necesitan que nadie los invite ni los cree.

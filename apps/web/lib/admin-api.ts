@@ -45,6 +45,12 @@ export type AdminIncident = {
   shiftId: string;
   updatedAt: string;
 };
+export class AdminApiError extends Error {
+  constructor(public readonly status: number, public readonly code: string) {
+    super(code);
+  }
+}
+
 async function request<T>(
   path: string,
   token: string,
@@ -58,7 +64,12 @@ async function request<T>(
       Authorization: `Bearer ${token}`,
     },
   });
-  if (!response.ok) throw new Error("REQUEST_FAILED");
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: string;
+    };
+    throw new AdminApiError(response.status, payload.error ?? "REQUEST_FAILED");
+  }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
@@ -86,6 +97,20 @@ export const adminApi = {
     request<void>(`/admin/companies/${id}`, token, { method: "DELETE" }),
   deleteWorker: (token: string, id: string) =>
     request<void>(`/admin/workers/${id}`, token, { method: "DELETE" }),
+  logout: (token: string) =>
+    request<void>("/auth/session", token, { method: "DELETE" }),
+  // Exige la contraseña actual; borra todas las demás sesiones y conserva la
+  // que hizo la petición (`token`). Ver `docs/reference/api.md`.
+  changePassword: (
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+  ) =>
+    request<AdminSession>("/auth/password/change", token, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
 };
 export async function adminLogin(email: string, password: string) {
   const response = await fetch(`${apiUrl}/auth/login`, {

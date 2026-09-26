@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   ClipboardList,
+  KeyRound,
   LogOut,
   Search,
   RefreshCw,
@@ -23,6 +24,7 @@ import {
   type AdminSession,
   type AdminWorker,
 } from "../../lib/admin-api";
+import { ChangePasswordModal } from "../../components/change-password-modal";
 
 const key = "chambeaya_admin_session";
 export default function AdminPage() {
@@ -54,7 +56,7 @@ export default function AdminPage() {
     }
   }, []);
   if (restoringSession)
-    return <main className="admin-auth"><div className="admin-auth-card">Validando sesiÃ³nâ€¦</div></main>;
+    return <main className="admin-auth"><div className="admin-auth-card">Validando sesión…</div></main>;
   if (!session)
     return (
       <main className="admin-auth">
@@ -75,6 +77,11 @@ export default function AdminPage() {
               try {
                 const next = await adminLogin(email, password);
                 localStorage.setItem(key, JSON.stringify(next));
+                // Corrección de CN-20260926-008 (MEDIO-2): sin esto, la
+                // contraseña quedaba en el estado de `AdminPage` (que nunca
+                // se desmonta) después de entrar, y volvía a aparecer en el
+                // campo si más tarde se pulsaba "Salir".
+                setPassword("");
                 setSession(next);
               } catch {
                 setError(
@@ -113,8 +120,20 @@ export default function AdminPage() {
     <AdminWorkspace
       session={session}
       onLogout={() => {
+        // El estado local se limpia de inmediato, sin esperar a la API
+        // (corrección de CN-20260926-008, BAJO-2: antes esta llamada
+        // bloqueaba la salida hasta 8 s por `AbortSignal.timeout`, sin
+        // ninguna señal para quien esperaba). La contraseña se limpia aquí
+        // también, por si el login no llegó a hacerlo (MEDIO-2); el correo
+        // se conserva a propósito, por conveniencia para volver a entrar.
         localStorage.removeItem(key);
         setSession(null);
+        setPassword("");
+        // Best effort: revoca el token en el servidor sin bloquear ni
+        // condicionar la salida a su resultado (mismo criterio que
+        // `logout()` del panel de empresa en `apps/web/app/page.tsx`, que
+        // también limpia primero y llama después).
+        void adminApi.logout(session.token).catch(() => undefined);
       }}
     />
   );
@@ -268,6 +287,7 @@ function AdminWorkspace({
     null,
   );
   const [savingCompany, setSavingCompany] = useState(false);
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const load = async () => {
     setLoading(true);
     const results = await Promise.allSettled([
@@ -405,6 +425,12 @@ function AdminWorkspace({
         <div className="admin-actions">
           <button className="secondary-button" onClick={() => void load()}>
             <RefreshCw size={16} /> Actualizar
+          </button>
+          <button
+            className="secondary-button"
+            onClick={() => setPasswordModalOpen(true)}
+          >
+            <KeyRound size={16} /> Cambiar contraseña
           </button>
           <button className="secondary-button" onClick={onLogout}>
             <LogOut size={16} /> Salir
@@ -879,6 +905,19 @@ function AdminWorkspace({
             />
           )}
         </div>
+      )}
+      {passwordModalOpen && (
+        <ChangePasswordModal
+          variant="admin"
+          onClose={() => setPasswordModalOpen(false)}
+          onSubmit={async ({ currentPassword, newPassword }) => {
+            await adminApi.changePassword(
+              session.token,
+              currentPassword,
+              newPassword,
+            );
+          }}
+        />
       )}
     </main>
   );
