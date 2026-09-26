@@ -1111,7 +1111,7 @@ export default function HomePage() {
       );
       setSelectedShiftId(target.id);
       setRescueActive(true);
-      showToast("CUMPLE Rescate activado.");
+      showToast("Rescate activado.");
     } catch {
       showToast("No se pudo activar el rescate.");
     }
@@ -1516,7 +1516,7 @@ export default function HomePage() {
   if (authChecking)
     return (
       <div className="app-loading">
-        <span className="brand-mark">CN</span>
+        <span className="brand-mark">CH</span>
         <p>Preparando tu panel…</p>
       </div>
     );
@@ -1536,11 +1536,9 @@ export default function HomePage() {
         aria-label="Navegación principal"
       >
         <div className="brand">
-          <div className="brand-mark">CN</div>
+          <div className="brand-mark">CH</div>
           <div>
-            <div className="brand-name">
-              CUMPLE <span>NOW</span>
-            </div>
+            <div className="brand-name">CHAMBEAYA</div>
             <div className="brand-caption">Panel para empresas</div>
           </div>
           <button

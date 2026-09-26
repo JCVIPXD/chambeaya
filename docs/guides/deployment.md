@@ -78,32 +78,106 @@ El instalador es idempotente y hace todo esto en un solo paso:
    `nginx -t` por sí solo solo avisa (`conflicting server name ... ignored`)
    y dejaría que Chambeaya le robe el tráfico a ese otro sitio.
 
-4. Si no existe `.env.production`, lo genera con una contraseña de
+4. Pide el Client ID de Google OAuth (`GOOGLE_OAUTH_WEB_CLIENT_ID`, termina en
+   `.apps.googleusercontent.com`) — de forma interactiva (solo si va a crear
+   un `.env.production` nuevo) o por flag:
+
+   ```bash
+   sudo ./scripts/instalar-produccion.sh --domain tudominio.com --google-client-id 123456789-abc.apps.googleusercontent.com
+   ```
+
+   Puede dejarse vacío: sin él, "Ingresar con Google" queda desactivado (sin
+   fallar) tanto en la app del trabajador como en el panel, y el resumen
+   final del instalador lo dice explícitamente ("Login con Google:
+   ACTIVO"/"DESACTIVADO"). Ver [DNS y Google
+   Sign-In](#dns-y-google-sign-in) más abajo para el detalle de por qué
+   cambiarlo exige reconstruir.
+
+5. Si no existe `.env.production`, lo genera con una contraseña de
    PostgreSQL aleatoria de 32 caracteres alfanuméricos, `DATABASE_URL`
    derivada de ella, las tres URLs públicas sobre el mismo dominio
    (`NEXT_PUBLIC_API_URL`, `API_BASE_URL`, `NEXT_BASE_PATH=/empresas`),
    `CORS_ALLOWED_ORIGINS` con ese mismo dominio, `API_TRUST_PROXY=1` (un
    salto: el Nginx del host — **nunca** `true`, que dejaría falsificar la IP
    de origen con `X-Forwarded-For` y saltarse el límite de intentos de
-   `/api/auth`), y elige automáticamente 3 puertos libres en `127.0.0.1`
-   (empieza a buscar en 4100/3100/8100). Deja el archivo a nombre del
-   usuario real (no de `root`, aunque se ejecute con `sudo`) con permisos
-   `600`, para que actualizar después no necesite sudo (ver más abajo).
+   `/api/auth`), `GOOGLE_OAUTH_WEB_CLIENT_ID` con lo que se haya resuelto en
+   el paso anterior, y elige automáticamente 3 puertos libres en
+   `127.0.0.1` (empieza a buscar en 4100/3100/8100). Deja el archivo a
+   nombre del usuario real (no de `root`, aunque se ejecute con `sudo`) con
+   permisos `600`, para que actualizar después no necesite sudo (ver más
+   abajo).
 
    **Si `.env.production` ya existe, el instalador nunca regenera la
    contraseña ni los puertos** (ver más abajo por qué), y tampoco cambia
    `API_TRUST_PROXY` si ya tiene un valor (solo avisa si sigue en `true`).
    Solo añade las variables nuevas que falten (por ejemplo, al actualizar una
    instalación anterior a que existiera `worker-app` o `NEXT_BASE_PATH`).
-   Tampoco reescribe nunca `NEXT_PUBLIC_API_URL`/`API_BASE_URL` si ya
-   existen: si el `--domain` de esta corrida no coincide con el que ya
-   tienen, avisa (la API, el panel y la app ya están compilados con el
-   dominio anterior; cambiarlo de verdad exige editar esas variables a mano
-   y reconstruir con `./scripts/deploy-hosting.sh`). **Ojo: el aviso no
-   detiene el script.** Si el sitio instalado no tiene bloques de Certbot,
-   el instalador lo reemplaza por uno con el dominio nuevo y recarga Nginx,
-   así que el dominio anterior deja de responder. Revisa el `--domain`
-   antes de volver a ejecutarlo en una instalación existente.
+   Tampoco reescribe nunca `NEXT_PUBLIC_API_URL`/`API_BASE_URL`/
+   `CORS_ALLOWED_ORIGINS` si el `--domain` de esta corrida no coincide con
+   el que ya tienen: **aborta sin tocar nada** (ni `.env.production` ni
+   Nginx), porque la API, el panel y la app ya están compilados con el
+   dominio anterior y regenerar Nginx con el nuevo dejaría el sitio
+   anterior sin responder. Para mover Chambeaya a un dominio nuevo de
+   verdad, repite con `--change-domain`: actualiza esas 3 variables de
+   forma coherente, regenera Nginx y reconstruye los servicios (falta
+   pedir un certificado TLS nuevo para el dominio nuevo). Si el sitio de
+   Nginx ya tiene bloques de Certbot (el caso normal en producción),
+   `--change-domain` **exige además `--force-nginx`**: sin él, el script
+   aborta antes de tocar nada (junto con el resto de las validaciones
+   previas, como el propio dominio o los choques de `server_name`), porque
+   sin `--force-nginx` el paso 6 de abajo no reemplazaría ese sitio (para no
+   perder el certificado) y Nginx seguiría sirviendo el dominio anterior
+   mientras `.env.production` y los servicios reconstruidos ya apuntarían al
+   nuevo. Para mover de verdad un dominio con Certbot ya instalado:
+   `--change-domain --force-nginx` (hace copia de seguridad del sitio
+   anterior) y después `sudo certbot --nginx -d <dominio nuevo>`.
+   Ningún camino de `--change-domain` termina con `.env.production` y
+   Nginx apuntando a dominios distintos: dos defensas independientes lo
+   garantizan (`CN-20260926-004`).
+   - **Transaccional:** antes de tocar `.env.production` (si ya existía),
+     el instalador guarda una copia de seguridad en un archivo temporal. Si
+     después falla la sección de Nginx —`nginx -t`, el `reload`, la propia
+     escritura del sitio (disco lleno) o una interrupción— se restaura esa
+     copia además del sitio de Nginx: la corrida entera queda exactamente
+     como estaba antes de ejecutarla, no solo Nginx. Un reintento después
+     de un fallo así ve otra vez el dominio anterior en ambos lados, como
+     si nada hubiera pasado.
+   - **Invariante final, justo antes de construir y levantar los
+     servicios:** si el instalador gestiona un sitio de Nginx del host
+     (existe `chambeaya.conf` instalado, por él o por una corrida
+     anterior), compara su `server_name` con el dominio que quedó en
+     `.env.production` — también cuando la sección de arriba decidió NO
+     tocar Nginx por los bloques de Certbot. Si no coinciden, aborta ahí
+     mismo, sin reconstruir ni levantar nada, con un mensaje que nombra
+     ambos dominios y cómo resolverlo: repetir con
+     `--change-domain --force-nginx` para mover Nginx al dominio del
+     `.env`, o editar `NEXT_PUBLIC_API_URL`/`API_BASE_URL`/
+     `CORS_ALLOWED_ORIGINS` de vuelta al dominio que Nginx todavía sirve.
+     Esta segunda defensa cubre cualquier desalineación entre
+     `.env.production` y Nginx que llegue al instalador, sea por la causa
+     que sea (incluida una edición manual), no solo la que arregla la copia
+     de seguridad transaccional.
+   - **Límites conocidos (`CN-20260926-006`, BAJO-1 y BAJO-2):**
+     - Hay casos en que `.env.production` queda con el dominio nuevo sin
+       restaurarse: si `--change-domain` se ejecuta **sin `sudo`** en un
+       servidor con Nginx, o si falla la copia de seguridad del sitio (por
+       ejemplo, disco lleno). El invariante aborta el instalador, pero
+       `./scripts/deploy-hosting.sh` **no** hace esa comprobación y
+       desplegaría igual. Ante ese mensaje de error, corrige primero el
+       `.env` o repite con `sudo ... --change-domain --force-nginx`; no
+       ejecutes `deploy-hosting.sh` mientras tanto.
+     - El invariante compara solo el **primer** nombre de `server_name`.
+       Si añades a mano otros nombres, deja el dominio de Chambeaya en
+       primer lugar (`server_name tudominio.com www.tudominio.com;`).
+     - Escribe siempre `--domain` en minúsculas: se compara tal cual con el
+       dominio del `.env`.
+
+   `GOOGLE_OAUTH_WEB_CLIENT_ID` sigue una regla distinta: es una credencial
+   externa reconfigurable (no un secreto generado aquí), así que si pasas
+   `--google-client-id` sobre un `.env.production` existente, **sí** se
+   actualiza esa única variable (mostrando el valor anterior y el nuevo), y
+   el paso 8 de abajo reconstruye `worker-app` con el valor nuevo. Sin el
+   flag, un valor vacío solo se avisa, nunca se toca a ciegas.
 
    Si detecta un `.env.production` del esquema anterior de 3 subdominios
    (sin `NEXT_BASE_PATH` y con más de un origen en `CORS_ALLOWED_ORIGINS`),
@@ -112,7 +186,7 @@ El instalador es idempotente y hace todo esto en un solo paso:
    llegó a desplegar así en producción real, pero el instalador lo detecta
    por si alguien lo probó.
 
-5. Genera la configuración de Nginx del host a partir de
+6. Genera la configuración de Nginx del host a partir de
    `deploy/nginx/chambeaya.conf.template` (un solo bloque `server` con
    `server_name <dominio>` y las 3 rutas de la tabla de arriba). El bloque
    raíz incluye `client_max_body_size 8m` (la app sube CV en PDF hasta 5 MB y
@@ -147,21 +221,25 @@ El instalador es idempotente y hace todo esto en un solo paso:
 
    Si no corre como root, deja el archivo generado en
    `deploy/nginx/chambeaya.conf.generado` y explica cómo instalarlo a mano.
-6. Si hay `certbot` instalado, pide el certificado TLS del dominio único
+7. Si hay `certbot` instalado, pide el certificado TLS del dominio único
    (con `--certbot` no pregunta; sin él, pregunta o, en modo no interactivo,
    deja el comando exacto para ejecutarlo después).
-7. Llama a `scripts/deploy-hosting.sh` para construir y levantar los 4
-   servicios, y muestra un resumen con las 3 URLs, los puertos elegidos y los
-   pasos pendientes (DNS, Google Sign-In).
-8. Con los 3 servicios ya sanos, comprueba si existe algún superadmin (rol
+8. Llama a `scripts/deploy-hosting.sh` para construir y levantar los 4
+   servicios (esto reconstruye `worker-app` si `GOOGLE_OAUTH_WEB_CLIENT_ID`
+   cambió en el paso 5), y muestra un resumen con las 3 URLs, los puertos
+   elegidos, el estado del login con Google y los pasos pendientes (DNS,
+   autorizar el origen en Google Cloud).
+9. Con los 3 servicios ya sanos, comprueba si existe algún superadmin (rol
    `ADMIN`). Si no existe ninguno, crea el primero: pide el correo (de forma
-   interactiva, o por `--admin-email` en modo no interactivo) y muestra su
+   interactiva, o por `--admin-email` en modo no interactivo; con `-y` nunca
+   pregunta, ni siquiera en una terminal interactiva) y muestra su
    contraseña generada **una sola vez** por stdout (ver
    [Primer acceso](#primer-acceso) más abajo). Si ya existe un superadmin, lo
    informa y no toca nada — ni en esta ejecución ni en ninguna posterior. Un
    fallo en este paso (por ejemplo, sin `--admin-email` en modo no
-   interactivo) **nunca** deshace el despliegue de los servicios ni toca
-   Nginx: solo explica cómo reintentar con `scripts/crear-superadmin.sh`.
+   interactivo, o con `-y` y sin `--admin-email`) **nunca** deshace el
+   despliegue de los servicios ni toca Nginx: solo explica cómo reintentar
+   con `scripts/crear-superadmin.sh`.
 
 ## Primer acceso
 
@@ -259,12 +337,39 @@ Google Cloud (un solo origen: panel, app y API comparten dominio); sin esa
 autorización, el botón de Google fallará aunque `GOOGLE_OAUTH_WEB_CLIENT_ID`
 esté configurado.
 
+`GOOGLE_OAUTH_WEB_CLIENT_ID` es a la vez un build-arg de `worker-app`
+(`docker-compose.production.yml`, `apps/mobile_flutter/Dockerfile.production`)
+y una variable de entorno que lee la API en runtime (`google_identity.ts`):
+**cambiarlo siempre exige reconstruir** `worker-app`. Antes de esta guardia,
+una reinstalación con `.env.production` regenerado sin ese valor apagaba el
+botón de Google en silencio; ahora:
+
+- `scripts/instalar-produccion.sh` lo pide de forma interactiva al crear un
+  `.env.production` nuevo, o lo toma de `--google-client-id`; puede quedar
+  vacío (login con Google desactivado, sin fallar) y el resumen final del
+  instalador siempre muestra "Login con Google: ACTIVO" o "DESACTIVADO
+  (falta GOOGLE_OAUTH_WEB_CLIENT_ID)". Sobre un `.env.production` ya
+  existente, solo se actualiza si repites con `--google-client-id`
+  explícito (nunca a partir de lo que hayas tecleado sin ese flag); sin él,
+  si sigue vacío, solo avisa.
+- `scripts/deploy-hosting.sh` (el camino habitual de actualización) también
+  avisa, en cada ejecución, si `GOOGLE_OAUTH_WEB_CLIENT_ID` sigue vacío en
+  `.env.production`.
+- Para activarlo o cambiarlo en una instalación ya hecha: edita
+  `GOOGLE_OAUTH_WEB_CLIENT_ID` en `.env.production` (o pásalo con
+  `--google-client-id` al reinstalador) y ejecuta
+  `./scripts/deploy-hosting.sh` para reconstruir `worker-app`; luego
+  autoriza el origen en Google Cloud como se explicó arriba.
+
 ### El panel Next.js bajo `/empresas` (`NEXT_BASE_PATH`)
 
 El panel se compila con `basePath` (`apps/web/next.config.ts`, controlado por
 la variable de entorno `NEXT_BASE_PATH`) para servirse bajo `/empresas` en
 vez de la raíz. Esto:
 
+- En producción debe ser exactamente `/empresas`: la plantilla de Nginx y el
+  instalador solo enrutan esa ruta, y `scripts/deploy-hosting.sh` rechaza
+  cualquier otro valor.
 - Se fija **en compilación**: cambiar `NEXT_BASE_PATH` exige reconstruir la
   imagen `web` (`./scripts/deploy-hosting.sh` ya lo hace en cada ejecución
   sin `--no-build`), y también debe llegar como variable de entorno al
@@ -502,14 +607,20 @@ certificado nuevo) en vez de migrarlo solo.
   instala si repites con `--force-nginx` (haciendo antes una copia de
   seguridad `chambeaya.conf.bak.<fecha-hora>` en la misma carpeta).
 - **Nunca recarga Nginx si la configuración no valida, y restaura el estado
-  exacto de antes si falla o si se interrumpe.** Si `nginx -t` falla (o
-  reporta un `conflicting server name`), si `systemctl reload nginx` falla
-  tras validar, o si la instalación se interrumpe (Ctrl+C/SIGINT/SIGTERM)
-  después de escribir el archivo, lo restaura desde la copia de seguridad (o
-  lo borra, si no existía antes) y aborta sin ejecutar `systemctl reload
-  nginx`. El symlink de `sites-enabled` nunca queda apuntando a un archivo
-  inexistente: solo se retira si el propio instalador lo creó en esa misma
-  ejecución.
+  exacto de antes si falla o si se interrumpe — Nginx Y `.env.production`.**
+  Si `nginx -t` falla (o reporta un `conflicting server name`), si
+  `systemctl reload nginx` falla tras validar, si falla la propia escritura
+  del archivo (por ejemplo, disco lleno) o si la instalación se interrumpe
+  (Ctrl+C/SIGINT/SIGTERM) después de escribir el archivo, restaura el sitio
+  desde la copia de seguridad (o lo borra, si no existía antes) y aborta sin
+  ejecutar `systemctl reload nginx`. El symlink de `sites-enabled` nunca
+  queda apuntando a un archivo inexistente: solo se retira si el propio
+  instalador lo creó en esa misma ejecución. Si además `.env.production` ya
+  existía y esta corrida lo había modificado (`--change-domain`,
+  `--google-client-id`, o solo las variables nuevas de compatibilidad), ese
+  mismo fallo también lo restaura a como estaba antes de ejecutar: un fallo
+  de Nginx nunca deja `.env.production` en un dominio distinto al que
+  Nginx sigue sirviendo (`CN-20260926-004`, ver más arriba).
 - **Sin Nginx en el host**, deja el archivo generado en
   `deploy/nginx/chambeaya.conf.generado` para instalarlo a mano en el proxy
   inverso que uses. En un Ubuntu sin ningún proxy, lo más simple es instalar

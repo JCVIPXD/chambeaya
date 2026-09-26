@@ -174,4 +174,21 @@ describe('comando de superadmin contra PostgreSQL real', () => {
     expect(result.code).toBe(SUPERADMIN_EXIT_CODES.VALIDATION_ERROR);
     expect(result.message).toMatch(/No existe ningún usuario/);
   });
+
+  it('varias ejecuciones concurrentes de --if-none crean un único ADMIN (BAJO-1 de CN-20260925-009)', async () => {
+    expect(await anyAdminExists(prisma)).toBe(false);
+
+    const emails = ['carrera-1@empresa.com', 'carrera-2@empresa.com', 'carrera-3@empresa.com', 'carrera-4@empresa.com'];
+    const results = await Promise.all(
+      emails.map((email) => createSuperadmin(prisma, email, { ifNone: true })),
+    );
+
+    const created = results.filter((result) => result.code === SUPERADMIN_EXIT_CODES.OK);
+    const alreadyExists = results.filter((result) => result.code === SUPERADMIN_EXIT_CODES.ALREADY_EXISTS);
+    expect(created).toHaveLength(1);
+    expect(alreadyExists).toHaveLength(emails.length - 1);
+
+    const admins = await prisma.user.findMany({ where: { role: 'ADMIN' } });
+    expect(admins).toHaveLength(1);
+  });
 });

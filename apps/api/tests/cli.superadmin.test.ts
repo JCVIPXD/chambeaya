@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createSuperadmin,
@@ -8,6 +8,7 @@ import {
   normalizeEmail,
   parseArgs,
   resetSuperadminPassword,
+  runSuperadminCli,
   SUPERADMIN_EXIT_CODES,
 } from '../src/cli/superadmin.js';
 
@@ -118,6 +119,24 @@ describe('un correo inválido se rechaza como VALIDATION_ERROR, no como error de
     const result = await resetSuperadminPassword(untouchablePrisma, 'no-es-un-correo');
     expect(result.code).toBe(SUPERADMIN_EXIT_CODES.VALIDATION_ERROR);
     expect(result.password).toBeUndefined();
+  });
+});
+
+describe('runSuperadminCli imprime cada mensaje una sola vez (BAJO-3 de CN-20260925-009)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('un correo inválido en "create" sale una sola vez, por stderr', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const code = await runSuperadminCli(['create', '--email', 'no-es-un-correo'], untouchablePrisma);
+
+    expect(code).toBe(SUPERADMIN_EXIT_CODES.VALIDATION_ERROR);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/Correo inválido/));
+    expect(log).not.toHaveBeenCalled();
   });
 });
 

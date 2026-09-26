@@ -41,7 +41,7 @@ export function BusinessAuth({ onAuthenticated }: { onAuthenticated: (session: B
   return (
     <main className="business-auth-page">
       <section className="auth-brand-panel">
-        <div className="auth-brand"><span>CN</span><strong>CUMPLE <i>NOW</i></strong></div>
+        <div className="auth-brand"><span>CH</span><strong>CHAMBEAYA</strong></div>
         <div className="auth-promise">
           <p>Operación empresarial</p>
           <h1>Tu equipo temporal, bajo control.</h1>

@@ -1,0 +1,11 @@
+# BAJO-4 de CN-20260926-002: sin este archivo, un checkout en Windows con
+# core.autocrlf=true convierte estos archivos a CRLF en el árbol de trabajo
+# aunque el índice y HEAD sigan en LF (visto en scripts/crear-superadmin.sh).
+# No afecta a producción (los contenedores clonan en Linux, que recibe LF),
+# pero un CRLF local rompe shellcheck y puede romper la ejecución directa del
+# script fuera de Docker. Se fija LF sin importar la configuración local de
+# autocrlf del usuario.
+*.sh text eol=lf
+deploy/** text eol=lf
+apps/mobile_flutter/deploy/** text eol=lf
+Dockerfile* text eol=lf

@@ -54,6 +54,276 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260926-006 — Reauditoría de `CN-20260926-005` y cierre del Alcance A (`CN-20260926-001`, `003`, `005`)
+
+- Fecha: 2026-09-26 07:55 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-001` (implementación), `CN-20260926-003` y `CN-20260926-005` (correcciones). Con esta entrada se **cierra el Alcance A**. HEAD `d4a65d0`.
+  - Índice: solo los 2 scripts, en `100755` y LF, iguales al árbol.
+- Alcance: reauditoría del MEDIO-1 de `CN-20260926-004` y búsqueda de otros caminos donde `.env` y Nginx puedan quedar desalineados.
+  - Por las fechas de modificación, desde `004` solo cambiaron `scripts/instalar-produccion.sh`, `docs/guides/deployment.md` y `docs/PROGRESO.md`. El código de Flutter, web y API es el que ya validé en `002`/`004`, así que no volví a correr esas pruebas.
+- Archivos:
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`. Añadí los límites conocidos de las dos defensas (BAJO-1 y BAJO-2).
+- Decisiones (hallazgos):
+  - **Críticos, altos y medios: ninguno. El MEDIO-1 de `004` está cerrado.**
+    - `--change-domain --force-nginx` con `nginx -t` roto, y por separado con el `reload` fallido: el md5 de `.env.production` y de `/etc/nginx` queda igual al del inicio, sin despliegue.
+    - Un reintento con solo `--domain <nuevo>` sale con código 1 ("no coincide") y no despliega.
+    - La divergencia fabricada (`.env` en B, sitio con certbot en A) aborta antes de `deploy-hosting.sh`, y el caso sano sí despliega.
+  - **BAJO-1.** El `.env` modificado queda sin restaurar en dos caminos, porque ocurren fuera de los 3 puntos de restauración de Nginx:
+    - `--change-domain` ejecutado **sin root** con Nginx presente;
+    - un fallo de la copia de seguridad del sitio (`cp -p`, por disco lleno), que ocurre antes de armar el trap.
+    - En los dos, el invariante 5.5 (`scripts/instalar-produccion.sh`, sección 5.5) aborta el instalador y cualquier reintento. Pero **`deploy-hosting.sh` no tiene esa comprobación y despliega igual** (probado: código 0 con el `.env` divergente).
+    - Mitigado por el mensaje de error y la guía.
+    - Recomendación: llamar a `restore_env_backup` antes de salir en el invariante y en cualquier error posterior a escribir el `.env`, o repetir el invariante en `deploy-hosting.sh`.
+  - **BAJO-2.** Falsos positivos del invariante, que fallan hacia el lado seguro (abortan sin daño):
+    - `server_name www.D D;` aborta porque solo se compara el primer nombre (`D www.D` sí pasa);
+    - un `--domain` en mayúsculas aborta en la comprobación de dominio distinto, que ya existía y compara sin normalizar.
+    - Quedó documentado.
+  - **Verificado sin hallazgo:**
+    - El modo `conf.d` funciona: instalación, reejecución, `--change-domain` sin `--force-nginx` (md5 igual) y con él (coherente). Nginx no incluye los `.bak`.
+    - Sin binario `nginx`, el invariante no aplica y sí despliega.
+    - El `trap EXIT` convive con `INT/TERM/ERR`: la copia del `.env` sigue disponible cuando se restaura, y al terminar quedan 0 temporales en `/tmp`, tanto en el éxito como en el fallo.
+    - Tras un éxito, un `deploy-hosting.sh` que falla (código 7) no restaura nada.
+- Validaciones:
+  - Simulación con el `nginx` real en `ubuntu:24.04`, `sudo` real y `docker`/`systemctl`/`certbot`/`cp` simulados, 8 bloques:
+    - los escenarios de arriba;
+    - con puerto cambiado más `--force-nginx --google-client-id`: un Ctrl+C durante el `reload` restaura el sitio y el `.env` (el Client ID vuelve atrás); el disco lleno al escribir el sitio restaura los dos; el éxito aplica los dos.
+    - La batería de `002`/`004` (Client ID, `-y`, conflicto de `server_name`, idempotencia, mensajes específicos) sigue OK.
+  - `shellcheck` sobre los 3 scripts → 0; `bash -n` → OK.
+  - Limpieza: eliminé la imagen `chambeaya-audit-ubnginx:tmp` y no quedan contenedores. No toqué los volúmenes del usuario.
+- Riesgos:
+  - `NO_EJECUTADAS`: Ubuntu real (systemd, certbot real, DNS de `chambeaya.grupoamayo.com`) y la captura visual de la marca.
+  - BAJO-1 y BAJO-2 quedan documentados en la guía.
+- Siguiente paso: el Alcance A queda cerrado. BAJO-1 es opcional para `implementador-sonnet` en una tarea aparte.
+
+### CN-20260926-005 — Corrección de `CN-20260926-003` (MEDIO-1 de `CN-20260926-004`: doble defensa .env/Nginx)
+
+- Fecha: 2026-09-26 06:44 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-004` (reauditoría, REQUIERE_CAMBIOS), corrige `CN-20260926-003`.
+- Alcance: dos defensas independientes en `scripts/instalar-produccion.sh`, tal como pidió la reauditoría, para que ningún camino termine con `.env.production` y Nginx en dominios distintos:
+  1. **Transaccional:** al entrar a la sección de `.env.production` (solo si el archivo ya existía), se toma `ENV_BACKUP=$(mktemp)` con una copia exacta. Si más abajo falla la sección de Nginx —`nginx -t`, `systemctl reload`, la propia escritura del sitio (disco lleno) o una interrupción, los 3 puntos ya cubiertos por `on_nginx_failure`/las ramas específicas— se llama `restore_env_backup()` junto con `restore_previous_nginx_state()`: la corrida completa (incluye `--change-domain`, `--google-client-id` y los `set_env_var_if_missing` de compatibilidad) queda revertida, no solo Nginx. `TEMP_FILES[]` + un único `trap cleanup_temp_files EXIT` reemplazan el `trap ... EXIT` puntual de antes para no perder la limpieza del backup.
+  2. **Invariante final (nueva sección "5.5"), justo antes de "Construir y levantar":** si `nginx_present=1` y existe `target_file` (el sitio realmente instalado, gestionado por esta corrida o por una anterior), compara su `server_name` con el dominio horneado en `.env.production` (`domain_from_next_public_api_url`, extraída como función a partir de la lógica que ya existía para el chequeo de `--domain`). Corre también cuando la sección de Nginx decidió NO tocar el sitio por los bloques de Certbot. Si no coinciden, aborta con código 1 antes de llamar a `deploy-hosting.sh`, con un mensaje que nombra ambos dominios y las dos formas de resolverlo (`--change-domain --force-nginx` o revertir las 3 variables del `.env` a mano).
+- Archivos: `scripts/instalar-produccion.sh` (LF, `100755`; re-sincronizado al índice con `git add`), `docs/guides/deployment.md`.
+- Decisiones: el snapshot de `.env.production` es de la corrida completa (no solo de las 3 variables de dominio), porque un fallo posterior en Nginx no tiene por qué distinguir qué cambió el `.env` en este `run` — más simple de razonar como "todo o nada" que rastrear cambios variable por variable. La función `domain_from_next_public_api_url` quedó compartida entre el chequeo temprano de `--domain` distinto y el invariante final, para no duplicar la lógica de extraer el dominio de una URL.
+- Validaciones (todas ejecutadas de verdad; Docker Desktop respondía):
+  - `bash -n` → sin errores. `shellcheck` (`koalaman/shellcheck:stable`, Docker) sobre los 3 scripts → **código 0**.
+  - Simulación con `nginx` real en `ubuntu:24.04` (paquete real, `systemctl`/`certbot`/`docker`/`deploy-hosting.sh` como stubs), **14 escenarios nuevos + 9 de regresión, todos OK**:
+    - el escenario exacto de la reauditoría: `--change-domain --force-nginx` con `nginx -t` roto y, por separado, con el `reload` fallido — en ambos, `.env.production` **y** `/etc/nginx/sites-available/chambeaya.conf` quedan con el mismo MD5 que antes de ejecutar (nada cambió, no solo Nginx);
+    - reintento inmediato tras ese fallo con solo `--domain <nuevo>` (sin `--change-domain`) → sigue viendo el dominio anterior y pide `--change-domain --force-nginx` de nuevo, sin llamar a `deploy-hosting.sh`;
+    - divergencia fabricada a mano (`.env` en el dominio B, sitio con Certbot en el dominio A) con `--domain B` (sin `--change-domain`) → aborta con el mensaje citando A y B, **sin llamar a `deploy-hosting.sh`** y sin tocar el sitio;
+    - caso sano (`.env` y Nginx ya coinciden) → el invariante no bloquea y sí llama a `deploy-hosting.sh`;
+    - regresión completa de la batería de `002`/`003`: Certbot con/sin `--force-nginx`, sin Certbot, dominio distinto sin flag, `nginx -t`/`reload` rotos con sus mensajes específicos, Client ID inválido/válido, `update_env_var` con `\`, `/`, `&`, `=`. Limpié el contenedor y la imagen (`chambeaya-audit-a4:tmp`); no toqué volúmenes del usuario.
+  - No se re-ejecutaron Flutter, `apps/web` (typecheck/Playwright) ni `apps/api`: esta corrección solo tocó `scripts/instalar-produccion.sh` y documentación; `CN-20260926-003`/`004` ya los validaron sobre este mismo código Dart/TS sin cambios desde entonces.
+- Riesgos: ninguno conocido.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260926-005`.
+
+### CN-20260926-004 — Reauditoría de `CN-20260926-003` (corrección de `CN-20260926-001` tras `CN-20260926-002`)
+
+- Fecha: 2026-09-26 08:40 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-001` (implementación) y `CN-20260926-003` (corrección). HEAD `d4a65d0`.
+  - Índice: solo `scripts/instalar-produccion.sh` y `scripts/deploy-hosting.sh`, iguales al árbol.
+- Alcance: reauditoría de MEDIO-1 y BAJO-1 a BAJO-4 de `002`, con búsqueda de otros caminos donde `.env` y Nginx puedan quedar desalineados, y regresión.
+- Archivos:
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`. Decía que "ningún camino" de `--change-domain` termina desalineado; lo sustituí por la excepción real (MEDIO-1 de abajo).
+- Decisiones (hallazgos):
+  - **MEDIO-1 (nuevo, mismo tipo de falla que el MEDIO-1 de `002`, por otro camino).**
+    - Qué pasa: en `--change-domain --force-nginx`, si falla `nginx -t` o el `reload`, el trap restaura el sitio al dominio anterior. Pero `.env.production` ya se había actualizado antes (`scripts/instalar-produccion.sh:476`) y no se revierte: el script sale con código 1, con `.env` en el dominio nuevo y Nginx en el anterior.
+    - Un reintento con solo `--domain <nuevo>` ya no ve un "dominio distinto" y, como el sitio tiene certbot, **omite Nginx** (`:669`).
+    - Termina con **código 0**, reconstruye los servicios con el dominio nuevo y Nginx sigue sirviendo el anterior: la instalación queda caída en silencio.
+    - Evidencia: escenario 3 de la simulación. Da `DESALINEADO: env=chambeaya… nginx=nuevo…` después del fallo, lo mismo tras el reintento (con `compose-up=1`), y queda coherente solo si se repite con `--force-nginx`.
+    - Corrección sugerida, cualquiera de las dos:
+      - (a) en `:669`, antes de omitir por certbot, comparar el `server_name` instalado con `$DOMAIN` y abortar si difieren;
+      - (b) guardar una copia de `.env.production` antes de `update_env_var` y restaurarla en el trap y en los caminos de fallo de Nginx.
+    - Mientras tanto, la guía advierte que se repita el comando completo.
+  - **Cerrados, con evidencia:**
+    - **MEDIO-1 de `002`:** `--change-domain` sobre un sitio con certbot, sin `--force-nginx`, sale con código 1, con el md5 del `.env` y de `/etc/nginx` idénticos y 0 llamadas a `systemctl` o `compose up`. Con `--force-nginx`, `.env` y Nginx quedan en `nuevo.grupoamayo.com`, con `chambeaya.conf.bak.<timestamp>` igual al sitio con certbot anterior.
+    - **BAJO-1:** `update_env_var` conserva byte a byte `a\nb\tc\\d`, `https://…?x=1&y=2`, `k=v==w`, `$HOME $(id) \`id\``, `&amp;\1` y `c\d/e&f=g$h`, y el archivo sigue con 4 líneas.
+    - **BAJO-2:**
+      - un `nginx -t` roto muestra "nginx -t falló…" y un `reload` fallido muestra "systemctl reload nginx falló…", los dos con restauración exacta (`cmp`);
+      - el trap vuelve a quedar armado después de `nginx -t`: un Ctrl+C durante el `reload` restaura;
+      - el trap queda desarmado tras el éxito: un `deploy-hosting.sh` que sale con 7 no restaura y no imprime mensajes;
+      - una escritura parcial por disco lleno restaura exacto.
+    - **BAJO-3:** `page.tsx:1519` muestra "CH".
+    - **BAJO-4:**
+      - `.gitattributes` solo afecta a 10 archivos: los 3 scripts, los 5 `Dockerfile*` y las 2 plantillas de Nginx, todos `i/lf w/lf`. Ningún archivo `eol=lf` queda con `w/crlf`. `git status` no muestra archivos espurios.
+      - `git add --renormalize .` sobre una **copia** del índice da el mismo resultado que `git add -A` (solo difiere `.gitattributes`, sin rastrear), es decir, sin conversiones de fin de línea. El índice real no se tocó.
+      - Los 3 scripts siguen en `100755`.
+      - `docker build --check` de los 3 `Dockerfile.production` no da avisos, y `nginx -t` pasa sobre las 2 plantillas del árbol.
+- Validaciones:
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`:
+    - `pub get --enforce-lockfile` → 0, con el lockfile sin cambios;
+    - `flutter analyze` → `No issues found!`, código 0;
+    - `flutter test` → `+148`, incluida `field errors stay under their own field when switching to register`.
+    - El diff de `apps/mobile_flutter` sigue siendo de 3 archivos, igual que en `002`.
+  - `shellcheck` sobre los 3 scripts → 0; `bash -n` → OK. `apps/web`: `tsc` → 0.
+  - Simulación con el `nginx` real en `ubuntu:24.04`, con `sudo`, y `docker`/`systemctl`/`certbot`/`cp` simulados:
+    - batería nueva de 9 escenarios, descrita arriba;
+    - la batería de `002` repetida con este script: Client ID válido e inválido, aviso sin reescribir, flag sobre un `.env` existente, `-y` en TTY (0 preguntas), dominio distinto sin flag, disco lleno, conflicto de `server_name` e idempotencia. Todo OK, y ahora con mensajes específicos.
+  - No volví a correr la API ni la concurrencia del CLI: `apps/api` no cambió desde `002`, donde pasaron 356 unitarias, 85 de integración y la carrera multiproceso.
+  - Limpieza: eliminé la imagen `chambeaya-audit-ubnginx:tmp` y no quedan contenedores. No toqué los volúmenes de desarrollo.
+- Riesgos:
+  - `NO_EJECUTADAS`: Ubuntu real (systemd, certbot real, DNS de `chambeaya.grupoamayo.com`) y la captura visual de la marca.
+  - Hasta cerrar MEDIO-1, tras un fallo de Nginx en `--change-domain` hay que repetir el comando completo.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (opción a o b) y registra la corrección; después `auditor-opus` vuelve a auditar.
+
+### CN-20260926-003 — Corrección de `CN-20260926-001` (MEDIO-1 y 4 hallazgos bajos de `CN-20260926-002`)
+
+- Fecha: 2026-09-26 06:25 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-002` (auditoría, REQUIERE_CAMBIOS), corrige `CN-20260926-001`.
+- Alcance:
+  - **MEDIO-1** (`scripts/instalar-produccion.sh`, sección de dominio, antes de escribir nada): `--change-domain` sobre un sitio de Nginx con bloques de Certbot y sin `--force-nginx` ahora **aborta con código 1 y cero cambios** (ni `.env.production` ni Nginx), con un mensaje que indica repetir con `--change-domain --force-nginx` y pedir el certificado nuevo. Antes seguía, actualizaba el `.env` y terminaba con código 0 dejando Nginx en el dominio viejo.
+  - **BAJO-1**: `update_env_var` pasa el valor por `ENVIRON` en vez de `awk -v val=...`, que interpretaba escapes de estilo C (`\n` se convertía en salto de línea real, `\\` se comía una barra). Cubierto con una prueba directa de la función con `a\nb\tc\\d` y con `/`, `&`, `=` juntos.
+  - **BAJO-2**: alrededor de `nginx -t` y `systemctl reload nginx` se hace `trap - ERR` antes de cada uno y se rearma `trap on_nginx_failure ERR` justo después: el trap ERR no se desactiva con `set +e` (son independientes en bash), así que sin este cambio esos dos fallos esperados disparaban el trap genérico antes de llegar a sus mensajes específicos.
+  - **BAJO-3**: la pantalla de carga del panel (`apps/web/app/page.tsx:1519`, "Preparando tu panel…") usaba `brand-mark` con "CN"; ahora dice "CH", igual que el resto de la marca.
+  - **BAJO-4**: nuevo `.gitattributes` en la raíz con `*.sh`, `deploy/**`, `apps/mobile_flutter/deploy/**` y `Dockerfile*` en `eol=lf`. Se normalizó el árbol de trabajo de `scripts/crear-superadmin.sh`, los 4 `Dockerfile*` con CR y las 2 plantillas de Nginx (`deploy/nginx/chambeaya.conf.template`, `apps/mobile_flutter/deploy/nginx.conf`) con `sed -i 's/\r$//'`; el contenido quedó bit a bit igual al índice/HEAD (`git diff` vacío, MD5 idéntico), así que `git add --renormalize` no generó ningún cambio de índice, solo limpió el estado "modificado" que quedaba por el CRLF del árbol.
+- Archivos:
+  - `scripts/instalar-produccion.sh` (LF, `100755`; re-sincronizado al índice con `git add`).
+  - `apps/web/app/page.tsx`.
+  - `.gitattributes` (nuevo).
+  - `docs/guides/deployment.md` (reemplacé la advertencia provisional del auditor por el comportamiento final: `--change-domain` con Certbot exige `--force-nginx` o aborta).
+  - Sin cambio de contenido (solo normalización de EOL en el árbol de trabajo): `scripts/crear-superadmin.sh`, `apps/api/Dockerfile.dev`, `apps/api/Dockerfile.production`, `apps/mobile_flutter/Dockerfile.production`, `apps/web/Dockerfile.production`, `deploy/nginx/chambeaya.conf.template`, `apps/mobile_flutter/deploy/nginx.conf`.
+- Decisiones: el guard de MEDIO-1 se ubicó en la sección de dominio (antes de cualquier `update_env_var`), reutilizando `nginx_present`/`target_file` ya calculados por la sección de detección de Nginx que corre justo antes; así queda antes de escribir nada, junto con las demás validaciones previas, tal como pidió la auditoría. No se tocó `initials()` (`apps/web/app/page.tsx:213`, fallback `"CN"` de un generador de iniciales genérico): no es la marca visible, no fue parte de los hallazgos, y cambiarlo habría sido ampliar el alcance sin pedido.
+- Validaciones (todas ejecutadas de verdad; Docker Desktop ya respondía):
+  - `bash -n` sobre `instalar-produccion.sh` y `deploy-hosting.sh` → sin errores.
+  - `shellcheck` (`koalaman/shellcheck:stable`, Docker) sobre `instalar-produccion.sh`, `deploy-hosting.sh` y `crear-superadmin.sh` → **código 0, sin avisos** en los tres (antes `crear-superadmin.sh` fallaba solo por el CRLF del árbol; normalizado, pasa limpio).
+  - Simulación con `nginx` real en un contenedor `ubuntu:24.04` (paquete `nginx` real, `systemctl`/`certbot`/`docker` como stubs, la sección de Nginx del script real sin modificar hasta antes de "Construir y levantar"): **9 escenarios, todos OK** — `--change-domain`+Certbot sin `--force-nginx` (aborta, `.env` y sitio con el mismo MD5 antes/después); con `--force-nginx` (sitio reemplazado, `nginx -t` y `reload` reales OK); `--change-domain` sin Certbot (regresión, sigue sin exigir el flag); dominio distinto sin `--change-domain` (aborta, sin cambios); `nginx -t` roto a propósito → aparece el mensaje específico "nginx -t falló…" (no el genérico) y el sitio se restaura exacto; `systemctl reload` fallando → mensaje específico "systemctl reload nginx falló…" y restauración exacta; Client ID inválido (aborta) y válido (actualiza solo esa variable); `update_env_var` con `\`, `/`, `&`, `=` → valor preservado byte a byte, sin líneas inyectadas. Limpié el contenedor y la imagen (`chambeaya-audit-a2:tmp`) al terminar; no se tocó ningún volumen del usuario.
+  - `apps/web`: `npx tsc --noEmit` → código 0. `npm run test:web` (Playwright) → **103 pasaron, 1 skipped**, igual que antes.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0` (Docker): `flutter pub get --enforce-lockfile` → código 0, lockfile sin cambios; `flutter analyze` → `No issues found!`; `flutter test` → **148/148 passed** (incluye la prueba de `auth_page_test.dart` de la entrega anterior). Nota: la primera corrida de `flutter test` falló por un caché local (`.dart_tool/`) que quedó contaminado por un `flutter pub get` accidental con el Flutter local 3.47.1 durante `CN-20260926-001`; borré ese caché (gitignorado, sin relación con el índice) y repetí la corrida limpia, que pasó completa. No toqué código Dart en esta entrega.
+  - No se re-ejecutó la suite de `apps/api` ni la prueba de concurrencia del CLI contra Postgres real: no se modificó ningún archivo de `apps/api` en esta corrección, y `CN-20260926-002` ya las corrió sobre Postgres real con resultado `APROBADO` en ese punto.
+- Riesgos: ninguno conocido. Los 4 `NO_EJECUTADA` de `CN-20260926-001` quedan resueltos.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260926-003`.
+
+### CN-20260926-002 — Auditoría de `CN-20260926-001` (Alcance A: marca, errores del formulario, Client ID de Google y hallazgos bajos de `007`/`009`)
+
+- Fecha: 2026-09-26 07:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-001`. HEAD `d4a65d0` (`main`).
+  - Índice: solo `scripts/instalar-produccion.sh` y `scripts/deploy-hosting.sh`, ambos `100755` y en LF, iguales al árbol.
+- Alcance: revisión independiente del diff completo. Ejecuté en Docker las 4 validaciones que el implementador dejó `NO_EJECUTADA`.
+- Archivos:
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`.
+    - Añadí la restauración ante un fallo de escritura del sitio (disco lleno).
+    - Añadí que `NEXT_BASE_PATH` debe ser exactamente `/empresas` en producción.
+    - Añadí una advertencia sobre `--change-domain` con un sitio que ya tiene bloques de certbot (ver MEDIO-1).
+- Decisiones (hallazgos):
+  - **Críticos y altos: ninguno.**
+  - **MEDIO-1. `--change-domain` no regenera Nginx si el sitio ya tiene bloques de certbot, que es el caso real de producción.**
+    - Dónde: `scripts/instalar-produccion.sh:438-440` junto con `:631`.
+    - Qué pasa: sin `--force-nginx`, el script actualiza las 3 URLs de `.env.production`, **omite el sitio** (que sigue con `server_name` del dominio anterior), termina con código 0 y reconstruye los servicios con el dominio nuevo.
+    - Resultado: la app y el panel quedan compilados contra un dominio que Nginx no sirve, y la instalación queda caída. Además contradice `--help` y la guía ("regenera Nginx").
+    - Evidencia: escenario F de la simulación, con `nginx:` todavía en `server_name chambeaya.grupoamayo.com` tras pasar a `nuevo.grupoamayo.com`.
+    - Corrección: con `--change-domain`, si el sitio tiene `managed by Certbot` y falta `--force-nginx`, abortar **antes** de escribir `.env.production` (o tratar `--change-domain` como `--force-nginx`) y recordar el certbot del dominio nuevo.
+    - Mientras tanto dejé la advertencia en la guía.
+  - **BAJO-1.** `update_env_var` (`:367`) usa `awk -v val=...`, que interpreta escapes con `\`.
+    - Probado: `a\nb` produce `a` y **una línea nueva `b` en el archivo**; `c\d` produce `cd`. Los valores con `/`, `&` y `=` sí quedan intactos.
+    - Hoy no es explotable: los 2 llamadores solo pasan valores ya validados por `HOSTNAME_RE` o `GOOGLE_CLIENT_ID_RE`, sin `\`.
+    - Corrección: leer el valor desde `ENVIRON` en vez de `-v`.
+  - **BAJO-2.** Con `set -E`, el trap `ERR` (`:667`) también salta en `nginx_test_output="$(nginx -t 2>&1)"` (`:698`, dentro de la subshell y en la asignación) y en el `reload`, aunque haya `set +e`.
+    - La restauración es correcta, aunque se ejecuta dos veces y es idempotente.
+    - Pero los mensajes específicos ("nginx -t falló…", "reload falló…") quedan sustituidos por el genérico "Falló la instalación… (código 1)".
+    - Es cosmético.
+  - **BAJO-3.** `apps/web/app/page.tsx:1519` (pantalla "Preparando tu panel…") conserva `brand-mark` con "CN"; el resto de la marca ya dice "CH".
+  - **BAJO-4 (observación, fuera del diff).** `scripts/crear-superadmin.sh` está en LF en el índice y en HEAD, pero en CRLF en este árbol de trabajo (`core.autocrlf=true`, sin `.gitattributes`).
+    - Un clon de Linux recibe LF, así que producción no se ve afectada.
+    - Recomendación: añadir `*.sh text eol=lf` en `.gitattributes`.
+- Verificado sin hallazgo:
+  - `--change-domain` nunca cambia `POSTGRES_*`, `DATABASE_URL`, puertos, `API_TRUST_PROXY` ni `NEXT_BASE_PATH` (comparado con `diff`).
+  - La marca queda en `CHAMBEAYA` en `_BrandMark`, en el logo de onboarding, "Índice Chambeaya", la barra lateral y el login del panel.
+  - Siguen intactos el verbo `'Cumple'` (`worker_secondary_pages.dart:574`) y los prefijos `CUMPLE-`/`DEMO-CUMPLE-` (API y Flutter).
+  - `pubspec.lock` y `next-env.d.ts` están sin cambios.
+  - `deploy-hosting.sh` exige `/empresas` y avisa si falta el Client ID.
+- Validaciones (resultados reales):
+  1. Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`:
+     - `flutter pub get --enforce-lockfile` → 0, con el lockfile sin cambios;
+     - `flutter analyze` → `No issues found!`, código 0;
+     - `flutter test` → `+148: All tests passed!`, incluida `field errors stay under their own field when switching to register`.
+  2. `shellcheck` (`koalaman/shellcheck:stable`) sobre `instalar-produccion.sh` y `deploy-hosting.sh` → 0. Sobre `crear-superadmin.sh`, 0 con la versión del índice; el archivo del árbol falla solo por CRLF (BAJO-4).
+  3. Concurrencia del CLI sobre un `postgres:16-alpine` desechable (`chambeaya-audit261-itest`):
+     - la prueba nueva pasa;
+     - **mutación** quitando `pg_advisory_xact_lock`: `expected … length of 1 but got 3` (la prueba detecta la carrera); con el archivo restaurado (`cmp`), `8 passed`;
+     - 3 rondas de 6 **procesos separados** de `create --if-none` (`tsx`) → `ADMIN=1` en cada ronda;
+     - `npm run test:integration` → `12 archivos, 85 pruebas` pasaron;
+     - API: `tsc` → 0, `npm test` → `356 passed`; web: `tsc` → 0.
+  4. Simulación del instalador con el `nginx` real en `ubuntu:24.04`, `sudo` real, `script` para la TTY, y `docker`/`systemctl`/`certbot`/`cp` (para el disco lleno) simulados:
+     - Client ID inválido → código 2, disco idéntico.
+     - Client ID válido → queda escrito y el resumen dice "Login con Google: ACTIVO".
+     - `.env` sin Client ID → aviso en el instalador y en `deploy-hosting.sh`, `.env` idéntico.
+     - Flag sobre un `.env` existente → cambia solo esa línea, que queda en `600 ops`.
+     - `-y` en una TTY → 0 preguntas (el control sin `-y` → 1).
+     - Dominio distinto sin flag → código 1, disco idéntico.
+     - `--change-domain` → URLs coherentes y secretos intactos (ver MEDIO-1).
+     - `--change-domain --force-nginx` → sitio regenerado y `nginx -t` OK.
+     - Escritura parcial del sitio (disco lleno) con archivo previo → restaurado byte a byte, sin `systemctl` ni despliegue.
+     - Disco lleno sin archivo previo → archivo retirado y sin enlace.
+     - Fallo de `nginx -t` o de `reload` → restauración exacta.
+     - Ctrl+C durante el `reload` → restaurado; tras un éxito → no restaura.
+     - Un conflicto de `server_name` → disco idéntico.
+     - Idempotencia → sin `systemctl`.
+  - Limpieza: eliminé el contenedor `chambeaya-audit261-itest` y su volumen anónimo, y la imagen `chambeaya-audit-ubnginx:tmp`. No toqué `chambeaya-stable-postgres-data` ni `chambeaya-private-documents`.
+- Riesgos:
+  - `NO_EJECUTADAS`: captura visual de la marca en un dispositivo o navegador real (solo revisé el código); un Ubuntu real con systemd, certbot real y el DNS real de `chambeaya.grupoamayo.com`.
+  - Mientras MEDIO-1 siga abierto, no se debe usar `--change-domain` en producción sin `--force-nginx`.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (y, si quiere, BAJO-1 a BAJO-4) y registra la corrección; después `auditor-opus` vuelve a auditar.
+
+### CN-20260926-001 — Alcance A: marca "Chambeaya", errores corridos del formulario, aviso del Client ID de Google y hallazgos bajos de CN-20260925-007/009
+
+- Fecha: 2026-09-26 05:50 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: Alcance A del plan aprobado por el usuario (`dynamic-prancing-bear.md`, no versionado); hallazgos `CN-20260925-007` (BAJO-1/2/3) y `CN-20260925-009` (BAJO-1/2/3). HEAD `d4a65d0`; árbol limpio al empezar.
+- Alcance:
+  1. **Marca "Chambeaya"**: reemplazado el texto visible "CUMPLE"/"CUMPLE NOW" por "Chambeaya"/"CHAMBEAYA" en Flutter (`_BrandMark` del login, logo apilado y "Índice CUMPLE" del onboarding) y en Web (sidebar de empresa y login de empresa), adaptando el estilo ya usado por la barra lateral del trabajador (`adaptive_worker_scaffold.dart`) sin rediseñar. El toast de Rescate perdió el prefijo "CUMPLE ". No se tocó el verbo `'Cumple'` del recorrido ni los prefijos `CUMPLE-`/`DEMO-CUMPLE-` (decisión 3 de `CN-20260916-096`). Búsqueda adicional en `apps/web` y `apps/mobile_flutter/lib` (incluidos `layout.tsx`, `index.html`, `manifest.json`): sin otras apariciones visibles de la marca antigua.
+  2. **Errores de validación corridos**: `ValueKey` estables en los 6 `TextFormField` de `auth_page.dart` (`auth-google-dni`, `auth-google-password`, `auth-name`, `auth-email`, `auth-password`, `auth-dni`). Decisión: no limpiar los errores del formulario al alternar login↔registro — con las keys, cada campo mantiene su propio error por identidad (ya no por posición), así que un error de un campo que sigue presente (correo, contraseña) sigue siendo válido tras alternar, y un campo recién montado (nombre, DNI) nace sin error porque nunca se validó; limpiarlo a mano solo ocultaría retroalimentación real vigente. Prueba de widget nueva en `auth_page_test.dart` que provoca ambos errores en login, alterna a registro y verifica por key que cada error sigue bajo su propio campo y no se corrió.
+  3. **Client ID de Google**: nuevo flag `--google-client-id` en `instalar-produccion.sh` (validado con un patrón `NNN-xxx.apps.googleusercontent.com`); se pregunta de forma interactiva solo al crear un `.env.production` nuevo (puede quedar vacío, con aviso). Sobre un `.env` existente sin ese flag, nunca se toca: solo avisa si sigue vacío (patrón del aviso de `API_TRUST_PROXY`). Con el flag sobre un `.env` existente, sí se actualiza esa única variable mostrando antes/después — decisión: a diferencia de `POSTGRES_PASSWORD` o los puertos (secretos generados, ligados a datos ya escritos), el Client ID es una credencial externa reconfigurable en la consola de Google, así que honrar el flag explícito es seguro y lo que el operador pide. El resumen final muestra "Login con Google: ACTIVO/DESACTIVADO". `deploy-hosting.sh` avisa en cada ejecución si sigue vacío. `docs/guides/deployment.md` actualizado (pasos renumerados, sección "DNS y Google Sign-In" ampliada).
+  4. **Hallazgos bajos**:
+     - `CN-20260925-009/BAJO-1`: `createSuperadmin(..., {ifNone: true})` ahora corre dentro de `prisma.$transaction` con `pg_advisory_xact_lock(hashtext(...))`: el chequeo y la creación quedan atómicos: serializa ejecuciones concurrentes de `--if-none`. Refactor: `insertSuperadmin(db: Db, email)` acepta tanto `PrismaClient` como `Prisma.TransactionClient`.
+     - `CN-20260925-009/BAJO-2`: con `-y`, `instalar-produccion.sh` ya no pregunta el correo del superadmin en una TTY interactiva (antes ignoraba `-y` para esa pregunta puntual).
+     - `CN-20260925-009/BAJO-3`: `printResult` decide una sola vez el flujo (stdout para éxito/"ya existe", stderr para cualquier error) y `runSuperadminCli` ya no duplica el mensaje de `VALIDATION_ERROR` en stderr.
+     - `CN-20260925-007/BAJO-1`: un `--domain` distinto al ya horneado en `NEXT_PUBLIC_API_URL` ahora **aborta sin tocar nada**, salvo `--change-domain` explícito, que actualiza `NEXT_PUBLIC_API_URL`/`API_BASE_URL`/`CORS_ALLOWED_ORIGINS` de forma coherente (mostrando antes/después) y recuerda pedir un certificado TLS nuevo.
+     - `CN-20260925-007/BAJO-2`: `deploy-hosting.sh` exige `NEXT_BASE_PATH=/empresas` exacto (antes aceptaba cualquier valor con "/" al inicio).
+     - `CN-20260925-007/BAJO-3`: la sección de instalación de Nginx ahora arma `trap on_nginx_failure INT TERM ERR` (antes solo `INT TERM`); un fallo de comando (p. ej. `cp` con disco lleno) también restaura el estado anterior exacto. No queda el trap activo tras el camino de éxito ni tras ningún `exit` de esa sección.
+  5. Hallazgo propio durante la validación (no pedido, corregido igual): `update_env_var` usaba `sed 's/^VAR=.*/VAR=valor/'`, que rompía con valores reales que llevan "/" (URLs `https://dominio/api`); reescrito con `awk` para sustituir el campo como texto literal.
+- Archivos:
+  - `apps/mobile_flutter/lib/features/auth/auth_page.dart`, `apps/mobile_flutter/lib/features/onboarding/onboarding_page.dart`, `apps/mobile_flutter/test/auth_page_test.dart`.
+  - `apps/web/app/page.tsx`, `apps/web/components/business-auth.tsx`, `apps/web/app/globals.css` (dos reglas CSS huérfanas tras quitar los `<span>`/`<i>` de "NOW").
+  - `apps/api/src/cli/superadmin.ts`, `apps/api/tests/cli.superadmin.test.ts`, `apps/api/tests/integration/superadmin-cli.integration.test.ts`.
+  - `scripts/instalar-produccion.sh`, `scripts/deploy-hosting.sh` (LF, `100755`; sincronizados al índice con `git add scripts/instalar-produccion.sh scripts/deploy-hosting.sh`; sin commit).
+  - `docs/guides/deployment.md`.
+- Validaciones:
+  - `apps/api`: `npx vitest run --exclude 'tests/integration/**'` → **356/356 pruebas, 22 archivos, OK** (incluye la prueba nueva de `printResult`/stdout-stderr único). `npx tsc --noEmit` → **código 0**.
+  - `apps/web`: `npx tsc --noEmit` → **código 0**. `npm run test:web` (Playwright, suite rápida con API simulada) → **103 pasaron, 1 skipped, código 0** (desktop + móvil).
+  - Scripts: `bash -n` sobre ambos → **sin errores**. `shellcheck`: **NO_EJECUTADA** (no está instalado en este entorno). Simulación funcional dirigida (sin Docker ni root, ejecutando una copia truncada del script real hasta el final de la sección 4, con `nginx_present=0` para no tocar Nginx real): verificado con `.env.production` real y descartado después (archivo ignorado por git) —
+    - creación nueva con `--domain`+`--google-client-id` válido → ambos quedan escritos correctamente;
+    - reinstalación sin `--google-client-id` sobre un `.env` con valor ya puesto → **no** avisa en falso y conserva el valor (bug que encontré y corregí en el propio diseño del aviso antes de cerrar esta entrada);
+    - `--domain` distinto sin `--change-domain` → **aborta con código 1, cero cambios** en el archivo;
+    - mismo caso con `--change-domain` → actualiza las 3 URLs de forma coherente;
+    - `--google-client-id` sobre `.env` existente → actualiza solo esa variable mostrando antes/después;
+    - `--google-client-id` con formato inválido → aborta con código 2 sin escribir nada (verificado con `diff` contra el archivo previo);
+    - lógica de `-y` sin correo aislada y probada con una función `is_interactive` simulada: no pregunta con `-y`, sí pregunta sin él.
+    - Simulación completa del instalador contra Nginx real en un contenedor Ubuntu (con `systemctl`/`certbot` simulados) y la prueba de concurrencia del CLI contra PostgreSQL real: **NO_EJECUTADA**. Docker Desktop no llegó a levantar un motor que respondiera (`docker info` sin respuesta) durante toda la sesión; sus propios logs (`%LOCALAPPDATA%\Docker\log\host\Docker Desktop.exe.log`) muestran que el proceso backend viene cayendo de forma recurrente desde el 2026-09-17, con el mismo código de salida, en cada arranque anterior a este — es una inestabilidad preexistente del Docker Desktop de esta máquina, no introducida por este cambio. No hay una base `_test` de Postgres accesible por otra vía en este entorno.
+  - Flutter: no se pudo ejecutar `flutter pub get --enforce-lockfile`/`analyze`/`test` en `ghcr.io/cirruslabs/flutter:3.44.0` por la misma caída de Docker: **NO_EJECUTADA**. Como sustituto parcial, sin modificar archivos: `dart format --output=none --set-exit-if-changed` sobre los 3 archivos Dart tocados confirma sintaxis válida; el único archivo con diferencias de formato (`auth_page.dart`, `auth_page_test.dart`) las tiene en líneas **preexistentes que no toqué** (verificado línea por línea con `diff`); `onboarding_page.dart` ya está formateado de forma canónica. También intenté `flutter pub get` (sin `--enforce-lockfile`) con el Flutter local 3.47.1 por error: regeneró `pubspec.lock`; lo revertí de inmediato con `git checkout -- apps/mobile_flutter/pubspec.lock` antes de seguir (no se modificó ningún commit ni quedó en el árbol).
+  - Efecto secundario detectado y revertido antes de cerrar: `apps/web/next-env.d.ts` quedó modificado por `tsc`/build de Next.js; revertido con `git checkout --` (no forma parte de este cambio).
+- Riesgos:
+  - `shellcheck` no ejecutado (no instalado): riesgo bajo, `bash -n` y la simulación funcional dirigida cubrieron los caminos nuevos.
+  - Simulación con Nginx real en Ubuntu y prueba de concurrencia del CLI contra Postgres real: NO_EJECUTADAS por la caída de Docker Desktop en esta máquina (preexistente, ver logs citados arriba); quedan pendientes de ejecutar apenas Docker esté disponible. El código de `pg_advisory_xact_lock` fue revisado a mano (tipos, `tsc --noEmit` en verde) pero no probado contra Postgres real.
+  - `flutter analyze`/`test` contra la imagen pinneada 3.44.0: NO_EJECUTADOS por la misma causa; la verificación de sintaxis con `dart format` es un sustituto parcial, no equivalente a `analyze`/`test` reales.
+  - La revisión visual manual de los logos de marca (Flutter, capturas reales en dispositivo/emulador) no se hizo; solo revisión de código y las suites automatizadas existentes (Playwright cubre el sidebar y el login de empresa en escritorio y móvil, sin fallos).
+- Siguiente paso: `auditor-opus` audita `CN-20260926-001`; en particular, revisar si el diseño de "Chambeaya" en `_BrandMark`/onboarding es aceptable sin captura visual, y decidir si las validaciones `NO_EJECUTADAS` (Docker/Flutter pinneado/Postgres real) bloquean la aprobación o quedan como riesgo aceptado hasta que Docker Desktop esté operativo.
+
 ### CN-20260925-009 — Auditoría de `CN-20260925-008` (comando para crear el primer superadmin)
 
 - Fecha: 2026-09-25 23:30 (America/Lima)

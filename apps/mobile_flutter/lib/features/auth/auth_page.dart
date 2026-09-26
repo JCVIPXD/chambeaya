@@ -519,6 +519,7 @@ class _AuthPageState extends State<AuthPage> {
                 children: [
                   if (_isCompletingGoogleProfile)
                     TextFormField(
+                      key: const ValueKey('auth-google-dni'),
                       controller: _identifier,
                       keyboardType: TextInputType.number,
                       maxLength: 8,
@@ -538,6 +539,7 @@ class _AuthPageState extends State<AuthPage> {
                   if (_isInGoogleOnboarding) ...[
                     SizedBox(height: fieldGap),
                     TextFormField(
+                      key: const ValueKey('auth-google-password'),
                       controller: _password,
                       obscureText: true,
                       autofillHints: const [AutofillHints.newPassword],
@@ -564,6 +566,7 @@ class _AuthPageState extends State<AuthPage> {
                   else ...[
                     if (_isRegistering && _canRegister)
                       TextFormField(
+                        key: const ValueKey('auth-name'),
                         controller: _name,
                         decoration: InputDecoration(
                           labelText: 'Nombre completo',
@@ -577,6 +580,7 @@ class _AuthPageState extends State<AuthPage> {
                     if (_isRegistering && _canRegister)
                       SizedBox(height: fieldGap),
                     TextFormField(
+                      key: const ValueKey('auth-email'),
                       controller: _email,
                       keyboardType: TextInputType.emailAddress,
                       autofillHints: const [AutofillHints.email],
@@ -592,6 +596,7 @@ class _AuthPageState extends State<AuthPage> {
                     ),
                     SizedBox(height: fieldGap),
                     TextFormField(
+                      key: const ValueKey('auth-password'),
                       controller: _password,
                       obscureText: true,
                       autofillHints: [
@@ -619,6 +624,7 @@ class _AuthPageState extends State<AuthPage> {
                     if (_isRegistering && _canRegister) ...[
                       SizedBox(height: fieldGap),
                       TextFormField(
+                        key: const ValueKey('auth-dni'),
                         controller: _identifier,
                         keyboardType: TextInputType.number,
                         decoration: InputDecoration(
@@ -801,21 +807,13 @@ class _BrandMark extends StatelessWidget {
         ),
       ),
       const SizedBox(width: 12),
-      Text.rich(
-        TextSpan(
-          text: 'CUMPLE ',
-          style: TextStyle(
-            color: AppColors.navy,
-            fontSize: compact ? 16 : 20,
-            fontWeight: FontWeight.w900,
-            letterSpacing: -.4,
-          ),
-          children: const [
-            TextSpan(
-              text: 'NOW',
-              style: TextStyle(color: AppColors.tealDark),
-            ),
-          ],
+      Text(
+        'CHAMBEAYA',
+        style: TextStyle(
+          color: AppColors.navy,
+          fontSize: compact ? 16 : 20,
+          fontWeight: FontWeight.w900,
+          letterSpacing: -.4,
         ),
       ),
     ],

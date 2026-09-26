@@ -24,10 +24,22 @@ NEXT_BASE_PATH_VALUE="/empresas"
 PROJECT_NAME="chambeaya-production"
 
 DOMAIN=""
+CHANGE_DOMAIN_FLAG=0
 CERTBOT_FLAG=0
 YES_FLAG=0
 FORCE_NGINX=0
 ADMIN_EMAIL=""
+GOOGLE_CLIENT_ID_ARG=""
+GOOGLE_CLIENT_ID_ARG_SET=0
+ENV_BACKUP=""
+
+# Archivos temporales propios (copia de seguridad de .env.production,
+# configuración de Nginx renderizada) que deben desaparecer siempre al
+# terminar el script, se haya usado o no cada uno; un solo trap EXIT
+# acumulado evita que una sección posterior pise el trap de una anterior.
+TEMP_FILES=()
+cleanup_temp_files() { rm -f "${TEMP_FILES[@]}" 2>/dev/null || true; }
+trap cleanup_temp_files EXIT
 
 usage() {
   cat <<'EOF'
@@ -36,14 +48,29 @@ Uso: sudo ./scripts/instalar-produccion.sh [opciones]
   --domain DOMINIO   dominio público único (ej. tudominio.com); sirve la app
                       del trabajador en "/", el panel en "/empresas" y la API
                       en "/api"
+  --change-domain    permite instalar sobre un .env.production existente con
+                      un dominio DISTINTO al ya horneado en NEXT_PUBLIC_API_URL:
+                      actualiza NEXT_PUBLIC_API_URL, API_BASE_URL y
+                      CORS_ALLOWED_ORIGINS al nuevo dominio de forma coherente
+                      y regenera Nginx. Sin este flag, un dominio distinto
+                      aborta sin tocar nada (ver más abajo)
   --certbot          pide el certificado TLS con certbot sin preguntar
-  -y, --yes          responde "sí" a las confirmaciones (certbot)
+  -y, --yes          responde "sí" a las confirmaciones (certbot) y nunca
+                      pregunta el correo del primer superadmin (falla en
+                      silencio con un aviso si falta --admin-email)
   --force-nginx      reemplaza un chambeaya.conf ya instalado aunque tenga
                       bloques de Certbot (hace copia de seguridad antes; sin
                       este flag, si detecta Certbot y algo cambió, no lo toca)
   --admin-email CORREO  correo del primer superadmin (rol ADMIN); si no existe
                       ningún superadmin todavía, se crea con este correo al
                       final de la instalación, en modo no interactivo
+  --google-client-id ID  Client ID de Google OAuth para "Ingresar con Google"
+                      (termina en .apps.googleusercontent.com); en un
+                      .env.production existente, actualiza esa única variable
+                      (se reconstruye worker-app al terminar). Sin este flag
+                      se pregunta en modo interactivo solo al crear un
+                      .env.production nuevo; puede dejarse vacío para
+                      desactivar el login con Google por ahora
   -h, --help         muestra esta ayuda
 
 Sin el dominio por flag, el script lo pide de forma interactiva. Se acepta
@@ -67,10 +94,12 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --domain) [[ $# -ge 2 ]] || { echo "Falta el valor de --domain" >&2; exit 2; }; DOMAIN="$2"; shift 2 ;;
+    --change-domain) CHANGE_DOMAIN_FLAG=1; shift ;;
     --certbot) CERTBOT_FLAG=1; shift ;;
     -y|--yes) YES_FLAG=1; shift ;;
     --force-nginx) FORCE_NGINX=1; shift ;;
     --admin-email) [[ $# -ge 2 ]] || { echo "Falta el valor de --admin-email" >&2; exit 2; }; ADMIN_EMAIL="$2"; shift 2 ;;
+    --google-client-id) [[ $# -ge 2 ]] || { echo "Falta el valor de --google-client-id" >&2; exit 2; }; GOOGLE_CLIENT_ID_ARG="$2"; GOOGLE_CLIENT_ID_ARG_SET=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Opción desconocida: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -143,6 +172,48 @@ else
   exit 2
 fi
 log "Dominio: $DOMAIN (rutas: / -> app del trabajador, /empresas -> panel, /api -> API)"
+
+# --- 2.5 Client ID de Google OAuth (opcional) -------------------------------
+# Motivo (CN-20260925-alcance-A): sin este paso, una reinstalación regenera
+# .env.production con GOOGLE_OAUTH_WEB_CLIENT_ID vacío y la app oculta el
+# botón de Google sin ningún aviso (worker-app lo lee como ARG de build,
+# apps/mobile_flutter/Dockerfile.production:30,36; la API lo lee en runtime,
+# google_identity.ts). Cambiarlo exige reconstruir worker-app, lo que ya hace
+# el paso 6 (deploy-hosting.sh, "up -d --build") con el valor que se escriba
+# aquí en .env.production.
+GOOGLE_CLIENT_ID_RE='^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$'
+
+validate_google_client_id_or_die() {
+  local value="$1"
+  [[ -z "$value" ]] && return 0
+  if [[ ! "$value" =~ $GOOGLE_CLIENT_ID_RE ]]; then
+    err "El Client ID de Google ('$value') no tiene el formato esperado (algo como 123456789-abc123.apps.googleusercontent.com). No se escribió nada."
+    exit 2
+  fi
+}
+
+# Valor a escribir SOLO si se crea un .env.production nuevo en este mismo
+# proceso (ver sección 4): con uno ya existente, actualizarlo silenciosamente
+# aquí sería sorprendente si el operador solo quería reconfigurar Nginx; ese
+# caso se resuelve más abajo, y únicamente cuando el flag es explícito.
+GOOGLE_CLIENT_ID=""
+if [[ "$GOOGLE_CLIENT_ID_ARG_SET" -eq 1 ]]; then
+  validate_google_client_id_or_die "$GOOGLE_CLIENT_ID_ARG"
+  GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID_ARG"
+elif [[ ! -f "$ENV_FILE" ]] && is_interactive; then
+  read -r -p "Client ID de Google OAuth para 'Ingresar con Google' (vacío para desactivarlo por ahora, ej. 123456789-abc.apps.googleusercontent.com): " GOOGLE_CLIENT_ID
+  while [[ -n "$GOOGLE_CLIENT_ID" && ! "$GOOGLE_CLIENT_ID" =~ $GOOGLE_CLIENT_ID_RE ]]; do
+    echo "  '$GOOGLE_CLIENT_ID' no tiene el formato esperado (...apps.googleusercontent.com); déjalo vacío o corrígelo." >&2
+    read -r -p "Client ID de Google OAuth (vacío para desactivarlo): " GOOGLE_CLIENT_ID
+  done
+fi
+# Este aviso solo aplica al crear un .env.production NUEVO: si ya existe uno,
+# lo que importa es su valor YA guardado (que aquí todavía no se leyó), no
+# esta variable de la corrida actual; ese caso se avisa más abajo, en la
+# rama que sí lee el archivo existente.
+if [[ ! -f "$ENV_FILE" && -z "$GOOGLE_CLIENT_ID" ]]; then
+  log "AVISO: sin Client ID de Google (GOOGLE_OAUTH_WEB_CLIENT_ID), 'Ingresar con Google' quedará desactivado."
+fi
 
 # --- 3. Nginx: presencia y choques de dominio (ANTES de escribir nada) ------
 # MEDIO-N1 de CN-20260925-004: esta detección y el chequeo de conflictos de
@@ -291,7 +362,75 @@ set_env_var_if_missing() {
   fi
 }
 
+update_env_var() {
+  # A diferencia de set_env_var_if_missing, SOBRESCRIBE un valor existente
+  # (o lo añade si falta). Solo se usa cuando el operador pide el cambio de
+  # forma explícita por flag (--change-domain, --google-client-id): nunca a
+  # partir de una inferencia del script. Se usa awk en vez de "sed
+  # s/.../.../ ": los valores reales (https://dominio/api) llevan "/", que
+  # rompería un sed con "/" como delimitador; awk sustituye el campo entero
+  # como texto literal, sin interpretarlo como patrón.
+  #
+  # BAJO-1 de CN-20260926-002: pasar el valor con "awk -v val=..." hace que
+  # awk le aplique SUS PROPIOS escapes de estilo C (documentado en gawk):
+  # "a\nb" queda como una salto de línea real dentro de .env.production
+  # (dos líneas en vez de una) y "c\d" queda "cd" (la barra desaparece). Se
+  # pasa el valor por el entorno del proceso (ENVIRON) en vez de "-v": los
+  # valores de entorno no pasan por ese procesamiento de escapes, así que
+  # llegan a awk byte a byte. Hoy ningún llamador pasa "\" (dominios y el
+  # Client ID de Google están validados contra un patrón que no lo permite),
+  # pero la función debe ser segura para cualquier valor futuro.
+  local var_name="$1" value="$2" file="$3" tmp
+  if grep -Eq "^${var_name}=" "$file"; then
+    tmp="$(mktemp)"
+    UPDATE_ENV_VAR_VALUE="$value" awk -v var="$var_name" -F'=' '
+      { if ($1 == var) { print var "=" ENVIRON["UPDATE_ENV_VAR_VALUE"] } else { print } }
+    ' "$file" >"$tmp"
+    mv "$tmp" "$file"
+  else
+    printf '%s=%s\n' "$var_name" "$value" >>"$file"
+  fi
+}
+
+# Dominio horneado en NEXT_PUBLIC_API_URL de un .env.production dado (o
+# cadena vacía si la variable no existe o está vacía). Se usa tanto para
+# detectar un --domain distinto al ya guardado como, más abajo, para el
+# chequeo final de coherencia contra el sitio de Nginx realmente instalado.
+domain_from_next_public_api_url() {
+  local file="$1" url
+  url="$(get_env_var NEXT_PUBLIC_API_URL "$file")"
+  url="${url#https://}"
+  url="${url#http://}"
+  url="${url%%/*}"
+  printf '%s' "$url"
+}
+
+# MEDIO-1 de CN-20260926-004: restaura .env.production desde la copia de
+# seguridad tomada al entrar a la sección 4 (solo existe si el archivo ya
+# existía al empezar esta corrida). Se llama junto con
+# restore_previous_nginx_state en los 3 puntos donde la sección de Nginx
+# falla (el trap y los dos mensajes específicos de nginx -t/reload): así
+# una corrida que cambió .env.production pero no pudo aplicar ese cambio en
+# Nginx termina con AMBOS exactamente como estaban antes de ejecutar, no
+# solo Nginx. Sin esto, un reintento posterior con el mismo --domain ya no
+# vería ningún dominio distinto que revisar (el .env ya tendría el nuevo) y
+# omitiría Nginx en silencio si el sitio sigue con certbot.
+restore_env_backup() {
+  if [[ -n "$ENV_BACKUP" && -f "$ENV_BACKUP" ]]; then
+    cp -p "$ENV_BACKUP" "$ENV_FILE"
+  fi
+}
+
 if [[ -f "$ENV_FILE" ]]; then
+  # Copia de seguridad transaccional: TODA modificación de .env.production
+  # en esta corrida (compatibilidad de variables nuevas, --change-domain,
+  # --google-client-id) parte de este snapshot. Si más abajo falla la
+  # sección de Nginx, restore_env_backup la restaura completa, no solo el
+  # cambio de dominio.
+  ENV_BACKUP="$(mktemp)"
+  TEMP_FILES+=("$ENV_BACKUP")
+  cp -p "$ENV_FILE" "$ENV_BACKUP"
+
   # .env corrupto por una ejecución antigua que no normalizaba los dominios
   # (p. ej. "https://https://..."). No lo intentamos reparar a ciegas: el
   # operador debe revisarlo, porque no hay forma segura de saber cuál era la
@@ -330,25 +469,58 @@ if [[ -f "$ENV_FILE" ]]; then
     fi
   fi
 
-  # MEDIO-N1 de CN-20260925-004: si ya existe .env.production, avisa (sin
-  # abortar: no se toca nada de lo ya desplegado) cuando el --domain de esta
-  # corrida no coincide con el dominio ya horneado en NEXT_PUBLIC_API_URL.
-  # Ese valor NO se actualiza automáticamente (las imágenes de api/web ya
-  # están construidas con el anterior); si de verdad cambiaste de dominio,
-  # edita NEXT_PUBLIC_API_URL/API_BASE_URL/CORS_ALLOWED_ORIGINS a mano y
-  # reconstruye con `./scripts/deploy-hosting.sh`.
-  existing_public_api_url="$(get_env_var NEXT_PUBLIC_API_URL "$ENV_FILE")"
-  existing_domain="${existing_public_api_url#https://}"
-  existing_domain="${existing_domain#http://}"
-  existing_domain="${existing_domain%%/*}"
+  # BAJO-1 de CN-20260925-007: antes, un --domain distinto al ya horneado en
+  # NEXT_PUBLIC_API_URL solo avisaba y el script seguía, dejando URLs
+  # incoherentes (API_BASE_URL/CORS_ALLOWED_ORIGINS nuevos vs.
+  # NEXT_PUBLIC_API_URL viejo) y el sitio anterior sin responder tras
+  # regenerar Nginx con el dominio nuevo. Ahora aborta salvo --change-domain
+  # explícito, que sí actualiza las 3 URLs derivadas del dominio de forma
+  # coherente (se reconstruyen api/web/worker-app al llegar al paso 6).
+  existing_domain="$(domain_from_next_public_api_url "$ENV_FILE")"
   if [[ -n "$existing_domain" && "$existing_domain" != "$DOMAIN" ]]; then
-    log "AVISO: el dominio que pasaste ($DOMAIN) no coincide con el que ya tiene"
-    echo "  $ENV_FILE ($existing_domain, en NEXT_PUBLIC_API_URL). Este instalador NUNCA" >&2
-    echo "  reescribe esas URLs en una instalación existente. La configuración de Nginx" >&2
-    echo "  que se va a generar usará $DOMAIN, pero la API, el panel y la app ya están" >&2
-    echo "  compilados apuntando a $existing_domain. Si de verdad cambiaste de dominio," >&2
-    echo "  edita NEXT_PUBLIC_API_URL, API_BASE_URL y CORS_ALLOWED_ORIGINS en $ENV_FILE a" >&2
-    echo "  mano y ejecuta ./scripts/deploy-hosting.sh para reconstruir antes de continuar." >&2
+    if [[ "$CHANGE_DOMAIN_FLAG" -ne 1 ]]; then
+      err "El dominio que pasaste ($DOMAIN) no coincide con el que ya tiene $ENV_FILE ($existing_domain, en NEXT_PUBLIC_API_URL)."
+      echo "  No se cambió nada (ni .env.production ni Nginx). Si de verdad quieres mover" >&2
+      echo "  Chambeaya a este dominio nuevo, repite con --change-domain: actualizará" >&2
+      echo "  NEXT_PUBLIC_API_URL, API_BASE_URL y CORS_ALLOWED_ORIGINS de forma coherente," >&2
+      echo "  regenerará la config de Nginx y reconstruirá los servicios." >&2
+      echo "  Después tendrás que pedir un certificado TLS nuevo: sudo certbot --nginx -d $DOMAIN" >&2
+      exit 1
+    fi
+
+    # MEDIO-1 de CN-20260926-002: en el caso real de producción, el sitio ya
+    # instalado tiene bloques de Certbot (HTTPS). Sin --force-nginx, la
+    # sección 5 (más abajo) detecta esos bloques y por diseño NO reemplaza
+    # el archivo (para no perder el certificado): server_name se queda con
+    # $existing_domain. Si dejáramos seguir a --change-domain de todos
+    # modos, terminaría con código 0 habiendo actualizado .env.production y
+    # reconstruido los servicios con $DOMAIN, pero Nginx seguiría sirviendo
+    # (y certbot renovando) $existing_domain: la instalación quedaría caída
+    # en silencio. Se detecta y aborta AQUÍ, antes de escribir nada, junto
+    # con el resto de las validaciones previas (dominio, choques de
+    # server_name).
+    if [[ "$nginx_present" -eq 1 && -f "$target_file" ]] \
+      && grep -q "managed by Certbot" "$target_file" 2>/dev/null \
+      && [[ "$FORCE_NGINX" -ne 1 ]]; then
+      err "--change-domain con un sitio de Nginx que ya tiene bloques de Certbot ($target_file) requiere --force-nginx."
+      echo "  Sin --force-nginx, ese archivo no se reemplaza (para no perder el certificado" >&2
+      echo "  ya emitido) y seguiría con server_name '$existing_domain', mientras que" >&2
+      echo "  .env.production y los servicios reconstruidos apuntarían a '$DOMAIN': la" >&2
+      echo "  instalación quedaría caída. No se cambió nada (ni .env.production ni Nginx)." >&2
+      echo "  Repite con --change-domain --force-nginx (hace copia de seguridad del sitio" >&2
+      echo "  actual antes de reemplazarlo) y luego pide un certificado nuevo:" >&2
+      echo "    sudo certbot --nginx -d $DOMAIN" >&2
+      exit 1
+    fi
+
+    log "AVISO: --change-domain actualiza $ENV_FILE de '$existing_domain' a '$DOMAIN' (antes -> ahora):"
+    echo "  NEXT_PUBLIC_API_URL:   https://${existing_domain}/api -> https://${DOMAIN}/api" >&2
+    echo "  API_BASE_URL:          $(get_env_var API_BASE_URL "$ENV_FILE") -> https://${DOMAIN}/api" >&2
+    echo "  CORS_ALLOWED_ORIGINS:  $(get_env_var CORS_ALLOWED_ORIGINS "$ENV_FILE") -> https://${DOMAIN}" >&2
+    update_env_var NEXT_PUBLIC_API_URL "https://${DOMAIN}/api" "$ENV_FILE"
+    update_env_var API_BASE_URL "https://${DOMAIN}/api" "$ENV_FILE"
+    update_env_var CORS_ALLOWED_ORIGINS "https://${DOMAIN}" "$ENV_FILE"
+    log "Recuerda pedir un certificado TLS para el dominio nuevo: sudo certbot --nginx -d $DOMAIN"
   fi
 fi
 
@@ -404,7 +576,7 @@ API_TRUST_PROXY=1
 AUTH_RATE_LIMIT_WINDOW_MS=900000
 AUTH_RATE_LIMIT_MAX=20
 
-GOOGLE_OAUTH_WEB_CLIENT_ID=
+GOOGLE_OAUTH_WEB_CLIENT_ID=${GOOGLE_CLIENT_ID}
 GOOGLE_OAUTH_WEB_CLIENT_SECRET=
 GOOGLE_OAUTH_REDIRECT_URI=
 GOOGLE_OAUTH_ANDROID_CLIENT_ID=
@@ -437,6 +609,29 @@ else
     echo "  ejecutar ./scripts/deploy-hosting.sh. No se cambia automáticamente para no" >&2
     echo "  alterar en silencio una variable que ya configuraste." >&2
   fi
+
+  # Client ID de Google: solo se actualiza un .env.production existente
+  # cuando el operador lo pide de forma explícita con --google-client-id (a
+  # diferencia de POSTGRES_PASSWORD o los puertos, es una credencial externa
+  # reconfigurable en la consola de Google Cloud, no un secreto generado aquí
+  # ligado a datos ya escritos). Sin el flag, nunca se toca a ciegas; solo se
+  # avisa si sigue vacío, igual que el aviso de API_TRUST_PROXY de arriba.
+  existing_google_client_id="$(get_env_var GOOGLE_OAUTH_WEB_CLIENT_ID "$ENV_FILE")"
+  if [[ "$GOOGLE_CLIENT_ID_ARG_SET" -eq 1 ]]; then
+    if [[ "$existing_google_client_id" == "$GOOGLE_CLIENT_ID_ARG" ]]; then
+      log "GOOGLE_OAUTH_WEB_CLIENT_ID ya tenía ese valor en $ENV_FILE; sin cambios."
+    else
+      log "Actualizando GOOGLE_OAUTH_WEB_CLIENT_ID en $ENV_FILE (antes -> ahora):"
+      echo "  antes: ${existing_google_client_id:-<vacío>}" >&2
+      echo "  ahora: ${GOOGLE_CLIENT_ID_ARG:-<vacío>}" >&2
+      update_env_var GOOGLE_OAUTH_WEB_CLIENT_ID "$GOOGLE_CLIENT_ID_ARG" "$ENV_FILE"
+      log "Se reconstruirá worker-app con este valor al terminar (paso 6, deploy-hosting.sh)."
+    fi
+  elif [[ -z "$existing_google_client_id" ]]; then
+    log "AVISO: GOOGLE_OAUTH_WEB_CLIENT_ID está vacío en $ENV_FILE; 'Ingresar con Google' seguirá desactivado."
+    echo "  Pásalo con --google-client-id <id> o edítalo a mano en $ENV_FILE y ejecuta" >&2
+    echo "  ./scripts/deploy-hosting.sh para reconstruir worker-app con el valor nuevo." >&2
+  fi
 fi
 
 # MEDIO-1 de CN-20260925-002: corriendo con sudo, root crea/posee
@@ -460,10 +655,13 @@ chmod 600 "$ENV_FILE"
 api_port="$(get_env_var API_HOST_PORT "$ENV_FILE")"
 web_port="$(get_env_var WEB_HOST_PORT "$ENV_FILE")"
 app_port="$(get_env_var APP_HOST_PORT "$ENV_FILE")"
+final_google_client_id="$(get_env_var GOOGLE_OAUTH_WEB_CLIENT_ID "$ENV_FILE")"
+google_login_summary="DESACTIVADO (falta GOOGLE_OAUTH_WEB_CLIENT_ID)"
+[[ -n "$final_google_client_id" ]] && google_login_summary="ACTIVO"
 
 # --- 5. Instalar la configuración de Nginx del host -------------------------
 rendered_conf="$(mktemp)"
-trap 'rm -f "$rendered_conf"' EXIT
+TEMP_FILES+=("$rendered_conf")
 
 sed \
   -e "s/__DOMAIN__/${DOMAIN}/g" \
@@ -548,13 +746,23 @@ else
         rm -f "$target_file" 2>/dev/null || true
       fi
     }
-    on_interrupt() {
+    on_nginx_failure() {
+      local exit_code=$?
+      trap - INT TERM ERR
       restore_previous_nginx_state
-      trap - INT TERM
-      err "Instalación de Nginx interrumpida; se restauró el estado anterior exacto (sin recargar)."
-      exit 130
+      restore_env_backup
+      if [[ "$exit_code" -eq 130 || "$exit_code" -eq 143 ]]; then
+        err "Instalación de Nginx interrumpida; se restauró el estado anterior exacto (sin recargar)."
+      else
+        # BAJO-3 de CN-20260925-007: antes solo INT/TERM restauraban; un fallo
+        # de comando (p. ej. "cp" con el disco lleno) escapaba sin restaurar
+        # nada, dejando el sitio a medio escribir. El trap ERR (con "set -E"
+        # ya activo desde el encabezado del script) cubre también ese caso.
+        err "Falló la instalación de la configuración de Nginx (código $exit_code); se restauró el estado anterior exacto (sin recargar)."
+      fi
+      exit "$exit_code"
     }
-    trap on_interrupt INT TERM
+    trap on_nginx_failure INT TERM ERR
 
     cp "$rendered_conf" "$target_file"
 
@@ -569,24 +777,39 @@ else
     # script EN ESE PUNTO en cuanto "cmd" falla, sin llegar nunca a la lógica
     # de restauración de abajo. Se desactiva "errexit" solo para esta línea
     # (y de igual manera para "systemctl reload" más abajo).
+    #
+    # BAJO-2 de CN-20260926-002: "set +e" desactiva errexit, pero NO desarma
+    # el trap ERR (son independientes en bash): sin este "trap - ERR", el
+    # fallo esperado de "nginx -t" disparaba igual on_nginx_failure, que
+    # restauraba y salía con el mensaje GENÉRICO ("Falló la instalación...")
+    # antes de llegar siquiera al "if" de abajo, tapando el mensaje
+    # específico ("nginx -t falló..."). Se desarma ERR justo para este único
+    # comando (INT/TERM siguen activos: un Ctrl+C aquí sigue restaurando) y
+    # se vuelve a armar de inmediato para cualquier fallo inesperado
+    # posterior.
+    trap - ERR
     set +e
     nginx_test_output="$(nginx -t 2>&1)"
     nginx_test_status=$?
     set -e
+    trap on_nginx_failure ERR
     echo "$nginx_test_output" >&2
 
     if [[ "$nginx_test_status" -eq 0 ]] && ! grep -qi "conflicting server name" <<<"$nginx_test_output"; then
+      trap - ERR
       set +e
       systemctl reload nginx
       reload_status=$?
       set -e
+      trap on_nginx_failure ERR
       if [[ "$reload_status" -ne 0 ]]; then
         err "systemctl reload nginx falló tras validar la config. Se restaura el estado anterior EXACTO."
         restore_previous_nginx_state
-        trap - INT TERM
+        restore_env_backup
+        trap - INT TERM ERR
         exit 1
       fi
-      trap - INT TERM
+      trap - INT TERM ERR
       log "Nginx recargado con la configuración de Chambeaya en $target_file."
     else
       err "nginx -t falló (o reportó 'conflicting server name'). Se restaura el estado anterior EXACTO; no se recarga Nginx."
@@ -595,7 +818,8 @@ else
       # válido en cuanto restauremos o borremos target_file más abajo, según
       # corresponda al estado previo).
       restore_previous_nginx_state
-      trap - INT TERM
+      restore_env_backup
+      trap - INT TERM ERR
       if [[ "$had_file" -eq 1 ]]; then
         log "Restaurado $target_file desde $backup_file."
       fi
@@ -619,6 +843,33 @@ else
     fi
   else
     log "certbot no está instalado; instálalo para HTTPS: sudo apt-get install -y certbot python3-certbot-nginx"
+  fi
+fi
+
+# --- 5.5 Invariante final: .env y Nginx deben coincidir antes de desplegar --
+# MEDIO-1 de CN-20260926-004 (segunda defensa, independiente de la copia de
+# seguridad transaccional de arriba): si por CUALQUIER motivo
+# .env.production y el sitio de Nginx REALMENTE instalado terminan en
+# dominios distintos -- incluido cuando la sección de arriba decidió no
+# tocar Nginx por los bloques de Certbot -- se aborta AQUÍ, antes de
+# reconstruir y levantar los servicios con el dominio del .env. Sin este
+# control, un reintento con --domain (sin --change-domain) no vería ningún
+# dominio "distinto" que revisar en cuanto .env.production ya tuviera el
+# dominio nuevo (por una corrida anterior, o por una edición manual), y
+# --domain por sí solo nunca toca Nginx.
+if [[ "$nginx_present" -eq 1 && -f "$target_file" ]]; then
+  installed_domain="$(sed -n 's/^[[:space:]]*server_name[[:space:]]\+\([^;[:space:]]*\).*/\1/p' "$target_file" | head -n1)"
+  final_env_domain="$(domain_from_next_public_api_url "$ENV_FILE")"
+  if [[ -n "$installed_domain" && -n "$final_env_domain" && "$installed_domain" != "$final_env_domain" ]]; then
+    err "$ENV_FILE apunta a '$final_env_domain', pero el sitio de Nginx instalado ($target_file) sigue con server_name '$installed_domain'."
+    echo "  No se reconstruyen ni se levantan los servicios: quedarían compilados para" >&2
+    echo "  '$final_env_domain' mientras Nginx sigue sirviendo '$installed_domain'. Para resolverlo:" >&2
+    echo "    - si de verdad quieres mover Chambeaya a '$final_env_domain':" >&2
+    echo "        sudo ./scripts/instalar-produccion.sh --domain $final_env_domain --change-domain --force-nginx" >&2
+    echo "    - si '$final_env_domain' fue un error y quieres seguir en '$installed_domain':" >&2
+    echo "        edita NEXT_PUBLIC_API_URL, API_BASE_URL y CORS_ALLOWED_ORIGINS en $ENV_FILE" >&2
+    echo "        de vuelta a '$installed_domain' y vuelve a ejecutar este instalador." >&2
+    exit 1
   fi
 fi
 
@@ -646,7 +897,11 @@ if [[ "$admin_status_code" -eq 0 ]]; then
   log "Ya existe al menos un superadmin (rol ADMIN); no se crea ninguno nuevo."
 elif [[ "$admin_status_code" -eq 1 ]]; then
   admin_email="$ADMIN_EMAIL"
-  if [[ -z "$admin_email" ]] && is_interactive; then
+  # BAJO-2 de CN-20260925-009: -y significa "no preguntes nada" (certbot ya
+  # lo respeta); antes, en una terminal interactiva, -y seguía preguntando
+  # este correo aunque no se pasara --admin-email. Con -y y sin
+  # --admin-email se pasa directo al aviso de "no se pudo crear" de abajo.
+  if [[ -z "$admin_email" ]] && is_interactive && [[ "$YES_FLAG" -ne 1 ]]; then
     read -r -p "Correo del primer superadmin (rol ADMIN, entra en https://${DOMAIN}/empresas/admin): " admin_email
   fi
   if [[ -z "$admin_email" ]]; then
@@ -694,6 +949,7 @@ cat <<EOF
  API:              https://${DOMAIN}/api/health
 
  Puertos locales (127.0.0.1): API=${api_port}, panel=${web_port}, app=${app_port}
+ Login con Google: ${google_login_summary}
 
  Pendiente:
  - Crea 1 registro DNS tipo A hacia la IP pública de este servidor:

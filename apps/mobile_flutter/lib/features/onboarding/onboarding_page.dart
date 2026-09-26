@@ -22,7 +22,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
     ),
     (
       Icons.insights_outlined,
-      'Índice CUMPLE',
+      'Índice Chambeaya',
       'La puntualidad, asistencia y desempeño construyen tu reputación.',
     ),
     (
@@ -57,18 +57,9 @@ class _OnboardingPageState extends State<OnboardingPage> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     const Text(
-                      'CUMPLE',
+                      'CHAMBEAYA',
                       style: TextStyle(
                         color: AppColors.navy,
-                        fontSize: 30,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: -1,
-                      ),
-                    ),
-                    const Text(
-                      'NOW',
-                      style: TextStyle(
-                        color: AppColors.teal,
                         fontSize: 30,
                         fontWeight: FontWeight.w900,
                         letterSpacing: -1,
