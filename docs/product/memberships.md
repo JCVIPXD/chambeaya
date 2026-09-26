@@ -48,9 +48,14 @@ no por intentar cubrir un turno. El trabajador no paga membresía ni comisión.
    permitiendo publicar, seleccionar, confirmar asistencia y reportar pagos.
    Ningún plan compra visibilidad artificial ni prioridad que perjudique al
    trabajador.
-4. **La cuota reemplaza la comisión por dinero.** Chambeaya no custodia fondos
-   ni descuenta del pago del trabajador. La empresa paga por la herramienta y
-   conserva el pago directo acordado con su equipo.
+4. **La comisión es aparte de la cuota y la paga la empresa.** Decisión del
+   usuario vigente desde `CN-20260926-011`: además de la membresía, Chambeaya
+   cobra una comisión por cada pago al trabajador (10% inicial, editable por el
+   superadmin, más 18% de IGV sobre la comisión), **encima** del pago y a cargo
+   de la empresa. Nunca se descuenta del trabajador, que recibe el 100% de lo
+   publicado. La comisión queda fijada en el turno al publicarlo (ver "Pagos y
+   movimientos" en `docs/reference/api.md`). Chambeaya no custodia fondos: en
+   el modo manual actual la empresa sigue pagando directo a su equipo.
 
 ### Ejemplos de impacto mensual
 

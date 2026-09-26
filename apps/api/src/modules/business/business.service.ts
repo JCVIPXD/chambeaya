@@ -12,6 +12,7 @@ import type { AuthSession } from '../auth/auth.service.js';
 import { companyCanViewApplicantCv } from '../talent/cv_access.js';
 import { deriveShiftStatus, isTerminalShift, nextOperationalAction, resolveAssignmentLifecycle } from '../operations/shift-state.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
+import { buildPaymentAmounts, getPlatformSettings } from '../payments/payment-amounts.js';
 
 // Se reexporta para no romper a quien ya lo importaba desde este módulo.
 export { withSerializableRetry };
@@ -51,6 +52,17 @@ export type ShiftInput = {
   modality?: 'PRESENCIAL' | 'REMOTO' | 'HIBRIDO';
   notes?: string | null;
   rescueActive?: boolean;
+  /**
+   * Los bps que el panel mostró en la vista previa al momento de enviar el
+   * formulario (`GET /business/payment-settings`). Si no coinciden con el
+   * ajuste global vigente al crear el turno, `createShift` lanza
+   * `CommissionChangedError` (409 `COMMISSION_CHANGED`) en vez de publicar
+   * con un % que la empresa nunca vio. Ignorados por `updateShift`: editar
+   * un turno ya publicado nunca toca su comisión (queda congelada desde que
+   * se creó).
+   */
+  expectedCommissionBps?: number;
+  expectedTaxBps?: number;
 };
 
 export type WorkerInput = {
@@ -88,9 +100,26 @@ export class BusinessRecordNotFoundError extends Error {}
 export class BusinessValidationError extends Error {}
 export class BusinessForbiddenError extends Error {}
 
+/**
+ * BAJO-4 de CN-20260926-012: la vista previa que la empresa vio antes de
+ * enviar el formulario (`GET /business/payment-settings`) puede haber
+ * quedado obsoleta si el admin cambió el ajuste global mientras la empresa
+ * completaba los demás campos. `createShift` la lanza cuando el
+ * `expectedCommissionBps`/`expectedTaxBps` que el formulario envía no
+ * coincide con el ajuste vigente AHORA MISMO, en vez de fijar en el turno
+ * un % que la empresa nunca llegó a ver. Lleva los valores vigentes para
+ * que el panel pueda refrescar su vista previa sin una segunda petición.
+ */
+export class CommissionChangedError extends Error {
+  constructor(public readonly commissionBps: number, public readonly taxBps: number) {
+    super('COMMISSION_CHANGED');
+  }
+}
+
 export interface BusinessOperations {
   getCompany(session: AuthSession): Promise<unknown>;
   updateCompany(session: AuthSession, input: CompanyUpdate): Promise<unknown>;
+  paymentSettings(session: AuthSession): Promise<unknown>;
   listShifts(session: AuthSession): Promise<unknown>;
   getShift(session: AuthSession, id: string): Promise<unknown>;
   createShift(session: AuthSession, input: ShiftInput): Promise<unknown>;
@@ -135,6 +164,17 @@ export class DatabaseBusinessService implements BusinessOperations {
     return this.prisma.company.update({ where: { id: company.id }, data: input });
   }
 
+  /**
+   * Ajuste global vigente que se congelaría en un turno nuevo, para la
+   * vista previa del formulario de publicación. `mode: 'manual'` queda fijo
+   * en este alcance; el Alcance E lo leerá de `PAYMENT_PROVIDER`.
+   */
+  async paymentSettings(session: AuthSession) {
+    void session; // No depende de la empresa: el ajuste es global.
+    const { commissionBps, taxBps } = await getPlatformSettings(this.prisma);
+    return { commissionBps, taxBps, currency: 'PEN', mode: 'manual' as const };
+  }
+
   async listShifts(session: AuthSession) {
     const company = await this.companyFor(session);
     return this.prisma.shift.findMany({ where: { companyId: company.id }, orderBy: { startsAt: 'asc' } });
@@ -148,7 +188,29 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async createShift(session: AuthSession, input: ShiftInput) {
     const company = await this.companyFor(session);
-    const shift = await this.prisma.shift.create({ data: { ...input, companyId: company.id, confirmedWorkers: 0 } });
+    const { expectedCommissionBps, expectedTaxBps, ...shiftData } = input;
+    // La comisión y el IGV vigentes quedan fijados en el turno al publicarlo
+    // (decisión del plan de pagos): un cambio posterior del ajuste global
+    // (`PlatformSettings`, `PATCH /api/admin/settings`) nunca altera turnos
+    // ya publicados, editados o no. No hay ciclo de "borrador" para un turno
+    // (`createShift` siempre lo deja en `PUBLISHED`, ver `ShiftInput`), así
+    // que no existe un estado previo a la publicación donde fijar esto antes
+    // valdría la pena.
+    const { commissionBps, taxBps } = await getPlatformSettings(this.prisma);
+    // BAJO-4 de CN-20260926-012: si el formulario indica qué % mostró y ya
+    // no coincide con el vigente, se rechaza en vez de publicar con un %
+    // que la empresa no vio. Sin `expectedCommissionBps`/`expectedTaxBps`
+    // (llamadas que no los envían) no se exige nada, para no romper otros
+    // clientes de esta API.
+    if (
+      (expectedCommissionBps !== undefined && expectedCommissionBps !== commissionBps) ||
+      (expectedTaxBps !== undefined && expectedTaxBps !== taxBps)
+    ) {
+      throw new CommissionChangedError(commissionBps, taxBps);
+    }
+    const shift = await this.prisma.shift.create({
+      data: { ...shiftData, companyId: company.id, confirmedWorkers: 0, commissionBps, taxBps },
+    });
     await this.prisma.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'PUBLISHED', detail: 'Turno publicado' } });
     return shift;
   }
@@ -446,6 +508,12 @@ export class DatabaseBusinessService implements BusinessOperations {
         },
       });
       if (outcome === 'COMPLETED') {
+        // `Shift.commissionBps`/`taxBps` siempre tienen un valor (`NOT NULL`
+        // desde la migración que los introdujo: los turnos anteriores a ella
+        // quedaron en 0/0, decisión del usuario en MEDIO-2 de
+        // CN-20260926-012). Nunca se lee el ajuste global aquí: cada turno
+        // ya trae el suyo, fijado para siempre al publicarse.
+        const amounts = buildPaymentAmounts(assignment.shift.payCents, assignment.shift.commissionBps, assignment.shift.taxBps);
         // Misma forma de `Payment` que crea `checkOut` en
         // `marketplace.service.ts`: un reporte manual, nunca una pasarela ni
         // custodia de fondos. `upsert` es defensivo (idempotente si esta
@@ -459,7 +527,13 @@ export class DatabaseBusinessService implements BusinessOperations {
             assignmentId: assignment.id,
             reference: `CN-${owned.id.slice(-8).toUpperCase()}-${assignment.id.slice(-8).toUpperCase()}`,
             description: `${assignment.shift.title} · ${assignment.shift.company.name}`,
-            amountCents: assignment.shift.payCents,
+            amountCents: amounts.amountCents,
+            commissionBps: amounts.commissionBps,
+            commissionCents: amounts.commissionCents,
+            taxBps: amounts.taxBps,
+            taxCents: amounts.taxCents,
+            totalCents: amounts.totalCents,
+            provider: 'manual',
             workerCount: 1,
             status: 'PENDING',
             dueAt: completedAt,
@@ -652,16 +726,44 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async createPayment(session: AuthSession, input: PaymentInput) {
     const company = await this.companyFor(session);
-    return this.prisma.payment.create({ data: { ...input, companyId: company.id, processedAt: input.status === PaymentStatus.PROCESSED ? input.processedAt ?? new Date() : input.processedAt } });
+    // Un pago creado a mano con este CRUD (retirado en el Alcance D) nunca
+    // nace de una asignación ni de una pasarela: siempre `provider: 'legacy'`,
+    // con comisión e IGV en 0 (la empresa no le debe ninguna comisión a
+    // Chambeaya por este registro) y `totalCents === amountCents`.
+    return this.prisma.payment.create({
+      data: {
+        ...input,
+        companyId: company.id,
+        provider: 'legacy',
+        commissionBps: 0,
+        commissionCents: 0,
+        taxBps: 0,
+        taxCents: 0,
+        totalCents: input.amountCents,
+        processedAt: input.status === PaymentStatus.PROCESSED ? input.processedAt ?? new Date() : input.processedAt,
+      },
+    });
   }
 
   async updatePayment(session: AuthSession, id: string, input: Partial<PaymentInput>) {
-    const payment = await this.getPayment(session, id) as { id: string; status: PaymentStatus; assignmentId: string | null; shiftId: string | null };
+    const payment = await this.getPayment(session, id) as {
+      id: string; status: PaymentStatus; assignmentId: string | null; shiftId: string | null;
+      amountCents: number; commissionBps: number; taxBps: number;
+    };
     const nextStatus = input.status ?? payment.status;
+    // Si cambia `amountCents`, `totalCents` se recalcula con la comisión/IGV
+    // YA FIJADOS de este pago (nunca se reinterpretan como "nuevo turno"):
+    // para un pago `legacy` (comisión 0) esto mantiene `totalCents ===
+    // amountCents`; para uno `manual` con comisión ya fijada, mantiene el
+    // total coherente con el monto nuevo.
+    const amounts = input.amountCents !== undefined
+      ? buildPaymentAmounts(input.amountCents, payment.commissionBps, payment.taxBps)
+      : null;
     const updated = await this.prisma.payment.update({
       where: { id: payment.id },
       data: {
         ...input,
+        ...(amounts ? { commissionCents: amounts.commissionCents, taxCents: amounts.taxCents, totalCents: amounts.totalCents } : {}),
         processedAt: nextStatus === PaymentStatus.PROCESSED
           ? input.processedAt ?? new Date()
           : input.processedAt ?? null,

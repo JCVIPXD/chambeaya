@@ -150,12 +150,14 @@ export async function seedDemoDatabase(
       payCents: 12000, requiredWorkers: 1, confirmedWorkers: 0, description: 'Recibe a asistentes y orienta el ingreso durante un evento corporativo.',
       responsibilities: 'Dar la bienvenida\nValidar el ingreso\nOrientar a asistentes', requirements: 'Buena comunicación y disponibilidad completa.',
       screeningQuestions: [], modality: 'PRESENCIAL', notes: 'DEMO_PRESENTACION: flujo pendiente', rescueActive: false, status: 'PUBLISHED',
+      commissionBps: 1000, taxBps: 1800,
     },
     create: {
       id: ids.flowShift, companyId: company.id, title: 'Anfitrión/a de eventos', location: 'Miraflores, Lima', startsAt, endsAt,
       payCents: 12000, requiredWorkers: 1, description: 'Recibe a asistentes y orienta el ingreso durante un evento corporativo.',
       responsibilities: 'Dar la bienvenida\nValidar el ingreso\nOrientar a asistentes', requirements: 'Buena comunicación y disponibilidad completa.',
       screeningQuestions: [], modality: 'PRESENCIAL', notes: 'DEMO_PRESENTACION: flujo pendiente', rescueActive: false, status: 'PUBLISHED',
+      commissionBps: 1000, taxBps: 1800,
     },
   });
 
@@ -194,12 +196,14 @@ export async function seedDemoDatabase(
       payCents: 10000, requiredWorkers: 1, confirmedWorkers: 1, description: 'Turno completado para mostrar historial y pago confirmado.',
       responsibilities: 'Atender mesas', requirements: 'Experiencia en atención al cliente.', screeningQuestions: [], modality: 'PRESENCIAL',
       notes: 'DEMO_PRESENTACION: historial', rescueActive: false, status: 'COMPLETED',
+      commissionBps: 1000, taxBps: 1800,
     },
     create: {
       id: ids.historyShift, companyId: company.id, title: 'Apoyo de salón', location: 'San Isidro, Lima', startsAt: completedStartsAt, endsAt: completedEndsAt,
       payCents: 10000, requiredWorkers: 1, confirmedWorkers: 1, description: 'Turno completado para mostrar historial y pago confirmado.',
       responsibilities: 'Atender mesas', requirements: 'Experiencia en atención al cliente.', screeningQuestions: [], modality: 'PRESENCIAL',
       notes: 'DEMO_PRESENTACION: historial', rescueActive: false, status: 'COMPLETED',
+      commissionBps: 1000, taxBps: 1800,
     },
   });
   const historyApplication = await prisma.shiftApplication.upsert({
@@ -219,10 +223,14 @@ export async function seedDemoDatabase(
       checkedInAt: completedStartsAt, checkedOutAt: completedEndsAt, completedAt: completedEndsAt,
     },
   });
+  // S/100 al trabajador + 10% de comisión + 18% de IGV sobre la comisión =
+  // S/111.80 que pagó la empresa (ejemplo del plan de pagos), consistente con
+  // el 10%/18% con que `historyShift` queda "publicado" más abajo.
+  const historyPaymentAmounts = { commissionBps: 1000, commissionCents: 1000, taxBps: 1800, taxCents: 180, totalCents: 11180 };
   await prisma.payment.upsert({
     where: { assignmentId: historyAssignment.id },
-    update: { companyId: company.id, shiftId: historyShift.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa Chambeaya Nueva', amountCents: 10000, workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
-    create: { companyId: company.id, shiftId: historyShift.id, assignmentId: historyAssignment.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa Chambeaya Nueva', amountCents: 10000, workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
+    update: { companyId: company.id, shiftId: historyShift.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa Chambeaya Nueva', amountCents: 10000, ...historyPaymentAmounts, provider: 'manual', workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
+    create: { companyId: company.id, shiftId: historyShift.id, assignmentId: historyAssignment.id, reference: 'DEMO-PAGO-HISTORIAL-001', description: 'Apoyo de salón · Empresa Chambeaya Nueva', amountCents: 10000, ...historyPaymentAmounts, provider: 'manual', workerCount: 1, status: 'PROCESSED', dueAt: completedEndsAt, processedAt: completedEndsAt, workerConfirmedAt: completedEndsAt },
   });
 
   return { companyId: company.id, businessId: business.id, workerId: worker.id, adminId: admin.id, flowShiftId: flowShift.id, historyShiftId: historyShift.id };

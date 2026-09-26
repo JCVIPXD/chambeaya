@@ -33,6 +33,17 @@ Ninguna ruta HTTP crea una cuenta `ADMIN`: `POST /api/auth/register` responde `4
 
 Su `identifier` (obligatorio y único en `User`, igual que el DNI del trabajador o el RUC de la empresa) tiene el formato `ADMIN-<12 caracteres hexadecimales>` — nunca coincide con un DNI (8 dígitos) ni un RUC (11 dígitos) real, porque ambos son exclusivamente numéricos. La contraseña se genera dentro del comando (nunca se acepta por argumento ni por variable de entorno) y se imprime una sola vez por stdout; no queda registrada en ningún archivo ni log. Ver la sección "Primer acceso" de [la guía de despliegue](../guides/deployment.md#primer-acceso).
 
+### Ajuste global de comisión e IGV (`PlatformSettings`)
+
+Chambeaya cobra una comisión por cada pago al trabajador, además de las suscripciones (que no cambian). La paga la empresa, **encima** del monto del trabajador; el trabajador siempre recibe el 100% de lo publicado.
+
+- `GET /api/admin/settings` → `{ commissionBps, taxBps, updatedAt, updatedBy: {id, name} | null }`.
+- `PATCH /api/admin/settings` con `{ "commissionBps": <entero> }`: entero entre 0 y 5000 (0,00% a 50,00%), validado con Zod (`400 INVALID_INPUT` fuera de rango). `taxBps` es de **solo lectura** en este alcance: ningún endpoint lo modifica.
+
+Ambos requieren sesión `ADMIN` (`403 ADMIN_ACCOUNT_REQUIRED` en cualquier otro rol). Cada `PATCH` exitoso escribe una fila de auditoría inmutable en `PlatformSettingChange` (`field`, `oldValue`, `newValue`, `changedById`, `createdAt`), incluso si el valor nuevo es igual al anterior: el admin confirmó la acción explícitamente. La transacción bloquea la fila `global` (`SELECT … FOR UPDATE`) antes de leer `oldValue`, así que varios `PATCH` simultáneos dejan una cadena `oldValue → newValue` coherente. Si se borra el usuario que hizo el cambio, la fila de auditoría se conserva con `changedById` en `null` (`onDelete: SetNull`).
+
+`PlatformSettings` es una fila única (`id: 'global'`), con valores iniciales `commissionBps: 1000` (10,00%) y `taxBps: 1800` (18,00%, el IGV sobre la comisión). **Cambiar este ajuste nunca altera un turno ya publicado**: la comisión y el IGV vigentes se copian a `Shift.commissionBps`/`taxBps` al publicarlo (`POST /api/business/shifts`) y quedan fijos ahí para siempre, incluida cualquier edición posterior del turno (`PATCH /api/business/shifts/:id` nunca los recalcula). Los dos puntos donde nace un `Payment` automático (el check-out del trabajador y el cierre manual de una asignación `NO_SHOW`/`ABANDONED`, ver "Pagos y movimientos" más abajo) copian esos valores del turno, no el ajuste global vigente en ese momento.
+
 ## Empresa
 
 - `GET /api/business/company`: obtiene el perfil. Si la cuenta es anterior a esta implementación, crea el perfil empresarial automáticamente con el nombre y RUC registrados.
@@ -41,6 +52,7 @@ Su `identifier` (obligatorio y único en `User`, igual que el DNI del trabajador
   - `INACTIVE` **no es un valor del enum `SubscriptionStatus` de Prisma** (que solo admite `TRIAL`/`ACTIVE`/`PAUSED`/`EXPIRED`/`CANCELLED`): existe únicamente en la respuesta sintética y nunca puede persistirse. Un cliente que mapee `status` debe tratarlo como un sexto caso; el panel de empresa (`apps/web`) lo muestra como "Sin plan activo" en la insignia de Membresías, "Sin plan activado" en el titular de esa sección y en la barra lateral, y no marca ninguna tarjeta como "Actual"; mientras no haya respuesta de la API la barra lateral dice "Plan sin confirmar" en vez de afirmar un plan. Los botones "Quiero conocerlo" avisan que los planes todavía no se activan desde el panel.
   - Como todos los endpoints de empresa, este `GET` sigue resolviendo la `Company` de la sesión con un `upsert` (`business.service.ts#companyFor`), así que puede crear la fila `Company` si la cuenta es anterior a esa implementación. Lo que dejó de crear es la suscripción.
   - **Filas fantasma previas al cambio (limitación conocida, sin limpieza).** Cualquier base donde corrió la versión anterior conserva las filas `PILOT/TRIAL` que ese `upsert` creó sin activación explícita. No se borran solas, y **tampoco existe un criterio seguro para borrarlas con un script**: el `upsert` antiguo escribía exactamente lo mismo que `demo.seed.ts` (`plan: PILOT`, `status: TRIAL`, `trialEndsAt` = ahora + 30 días, `endsAt` nulo) y que una fila creada a mano con los valores por defecto del esquema; en las tres, `startsAt` y `createdAt` coinciden y `updatedAt` es igual a `createdAt`, y no hay ninguna columna que registre quién ni por qué se creó la fila (verificado en una transacción con rollback sobre `chambeaya_test`, ver `CN-20260918-009`). Como la activación de un plan es manual (`docs/product/memberships.md`), una fila real hecha a mano es indistinguible de una fantasma, y borrarla por suposición quitaría un plan que alguien sí activó. Por eso esas empresas seguirán viendo "Piloto activo" y una fecha de fin de prueba hasta que un operador las revise. Punto de partida para esa revisión manual, de solo lectura (una fila que cumple esto es *candidata*, no fantasma confirmada): `SELECT c."name", s."companyId", s."createdAt", s."trialEndsAt" FROM "CompanySubscription" s JOIN "Company" c ON c."id" = s."companyId" WHERE s."plan" = 'PILOT' AND s."status" = 'TRIAL' AND s."endsAt" IS NULL AND s."updatedAt" = s."createdAt" ORDER BY s."createdAt";`. Decidir empresa por empresa; ninguna migración ni script del repositorio borra estas filas.
+- `GET /api/business/payment-settings` → `{ commissionBps, taxBps, currency: 'PEN', mode: 'manual' }`: el ajuste global vigente que se congelaría en un turno nuevo (`GET /api/admin/settings` sin el detalle de auditoría). El panel lo usa para la vista previa en vivo del formulario de publicación. `mode` queda fijo en `'manual'` en este alcance; a partir del Alcance E se lee de `PAYMENT_PROVIDER` (ver [Despliegue con Docker](../guides/deployment.md)).
 
 ## Turnos
 
@@ -60,6 +72,8 @@ Ejemplo de creación:
   "endsAt": "2026-08-25T00:00:00.000Z",
   "payCents": 10000,
   "requiredWorkers": 4,
+  "expectedCommissionBps": 1000,
+  "expectedTaxBps": 1800,
   "screeningQuestions": [
     "¿Tienes disponibilidad durante todo el horario indicado?"
   ],
@@ -67,9 +81,15 @@ Ejemplo de creación:
 }
 ```
 
+`expectedCommissionBps` y `expectedTaxBps` son obligatorios y deben copiarse de `GET /api/business/payment-settings` justo antes de publicar. Los valores del ejemplo son los iniciales (10% y 18%).
+
 Estados: `PUBLISHED`, `ASSIGNED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`. No existe ninguna transición automática por tiempo: un turno cuyo `endsAt` ya pasó conserva su último estado persistido (típicamente `PUBLISHED` o `ASSIGNED`) hasta que la empresa lo cancele; la fecha, no el estado, es lo que determina si sigue operativo.
 
 El estado y `confirmedWorkers` son derivados por el servidor. No se aceptan en los formularios de creación o edición. Un turno con actividad no se puede borrar y, una vez iniciado el check-in, tampoco se puede editar ni cancelar destruyendo su historial.
+
+Cada turno expone `commissionBps`/`taxBps`: la comisión de Chambeaya y el IGV sobre esa comisión, en puntos básicos enteros (1000 = 10,00%), copiados del ajuste global vigente (`PlatformSettings`) al publicarlo. Tampoco se aceptan en el formulario ni cambian con `PATCH`: quedan fijos para siempre, incluso si el admin cambia el ajuste global después o si la empresa edita el turno (incluido su `payCents`). Ambos son obligatorios (`NOT NULL`): la migración `20260926180000_payment_commission` dejó en `0`/`0` (sin comisión) los turnos publicados antes de que existiera la comisión, por decisión del usuario.
+
+`POST /api/business/shifts` exige además `expectedCommissionBps` y `expectedTaxBps` (obligatorios desde `CN-20260926-015`, enteros 0-5000; si falta alguno responde `400 INVALID_INPUT`; `PATCH` no los admite): los bps que el formulario mostró en la vista previa. Si no coinciden con el ajuste vigente, responde `409 { "error": "COMMISSION_CHANGED", "commissionBps": <vigente>, "taxBps": <vigente> }` sin crear el turno. El valor comparado es el mismo que se fija en el turno, así que un turno creado nunca queda con bps distintos de los que se validaron. El panel los toma de `GET /api/business/payment-settings` y, ante el `409`, refresca la vista previa y pide confirmar de nuevo. Si esa lectura falla, el formulario de publicación no muestra ningún porcentaje y deshabilita la publicación hasta que "Reintentar" la recupere; el resto del panel sigue funcionando. `payCents` admite como máximo `10000000` (S/ 100 000); por encima responde `400 INVALID_INPUT`.
 
 `POST` y `PATCH` rechazan con `400` un `endsAt` que ya pasó (además del rechazo existente cuando `endsAt` no es posterior a `startsAt`): un turno no puede publicarse ni guardarse ya vencido. Ambas reglas viajan directo en el campo `error` de la respuesta -no anidadas en `issues[]` como una violación de esquema genérica-, igual que `SHIFT_NOT_EDITABLE`:
 
@@ -302,7 +322,7 @@ data: [{"id":"...","role":"Mozo de salón",...}]
   - `balanceCents` es la suma de los movimientos en estado `RELEASED`: **monto que la empresa ya confirmó como pagado/procesado**, no saldo que Chambeaya custodie o pueda transferir. Chambeaya no administra ni retiene ese dinero; el pago ocurre directamente entre empresa y trabajador, y este número es un registro de ese reporte.
   - `pendingBalanceCents` es la suma de los movimientos en estado `PENDING`: **monto reportado y aún pendiente de que la empresa lo confirme como procesado**, no dinero en tránsito dentro de Chambeaya.
   - `REVERSED` cubre pagos con incidencia (por ejemplo, un `Payment` cancelado) y no suma a ninguno de los dos totales.
-- `POST /api/workers/payments/:id/confirm`: el trabajador confirma que recibió un pago ya `PROCESSED` por la empresa (`workerConfirmedAt`); sobre un pago en cualquier otro estado responde `409 PAYMENT_NOT_REPORTABLE`. Es una confirmación de recepción entre las partes, no una liberación de fondos retenidos por Chambeaya.
+- `POST /api/workers/payments/:id/confirm`: el trabajador confirma que recibió un pago ya `PROCESSED` por la empresa (`workerConfirmedAt`); sobre un pago en cualquier otro estado responde `409 PAYMENT_NOT_REPORTABLE`. Responde `{ id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId }`, sin comisión, IGV ni total. Es una confirmación de recepción entre las partes, no una liberación de fondos retenidos por Chambeaya.
 - En la práctica todos los movimientos provienen hoy de `Payment` (`PROCESSED → RELEASED`, `CANCELLED → REVERSED`, el resto `PENDING`): `recordWalletMovement` escribe `WalletMovement` directamente pero no está expuesto por ninguna ruta.
 - **No hay consumidor de este endpoint en la app enrutada.** La única pantalla de billetera que tuvo Flutter (`lib/features/marketplace/worker_pages.dart`) no estaba enrutada y se eliminó como código muerto en `CN-20260918-007`; el repositorio de Flutter conserva `walletMovements()`/`confirmPayment()` y el mapeo de estados (`'Liberado'`/`'Pendiente'`/`'Revertido'`) para cuando exista una pantalla de pagos enrutada. Los nombres internos que todavía suenan a custodia -el modelo `WalletMovement`, la ruta `/api/workers/wallet`, los estados `RELEASED`/`REVERSED`- se conservaron a propósito: renombrarlos o fusionar las tablas quedó explícitamente fuera de alcance, y esta sección es la mitigación acordada.
 
@@ -423,9 +443,25 @@ Una conversación pertenece a un trabajador del directorio y puede asociarse a u
 - `PATCH /api/business/payments/:id`
 - `DELETE /api/business/payments/:id`
 
-Los montos se reciben en céntimos mediante `amountCents` para evitar errores de punto flotante.
+Los montos se reciben en céntimos mediante `amountCents` para evitar errores de punto flotante. El máximo es `10000000` (S/ 100 000), igual que `payCents` de un turno; por encima responde `400 INVALID_INPUT`. Con la comisión máxima permitida el total sigue cabiendo en el `Int` de PostgreSQL.
 
 Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`.
+
+### Comisión, IGV y total (Alcance C del plan de pagos)
+
+`amountCents` sigue siendo exactamente el monto que recibe el trabajador (el 100% de lo publicado; nunca se le descuenta nada). Cada `Payment` expone además:
+
+- `commissionBps` / `commissionCents`: la comisión de Chambeaya, en puntos básicos y en céntimos.
+- `taxBps` / `taxCents`: el IGV **sobre la comisión** (no sobre `amountCents`), en puntos básicos y en céntimos.
+- `totalCents`: `amountCents + commissionCents + taxCents` — lo que paga la empresa. La comisión y el IGV van **encima** del pago al trabajador, nunca descontados de él.
+- `provider`: `'manual'` para un pago nacido de una asignación (reporte manual, sin pasarela) o `'legacy'` para uno creado con el CRUD manual de esta sección (retirado en el Alcance D) o para un pago sin `assignmentId` anterior a esta migración; en ambos casos con comisión e IGV en 0.
+- `needsReview`: reservado para el Alcance E (proveedor de pagos); no se usa todavía.
+
+Redondeo: enteros, "la mitad hacia arriba" — `commissionCents = floor((amountCents * commissionBps + 5000) / 10000)`, y el mismo cálculo para `taxCents` sobre `commissionCents`. Ejemplo con la comisión inicial (10% + 18% de IGV): un turno de **S/100** por persona da `amountCents: 10000`, `commissionCents: 1000` (S/10), `taxCents: 180` (S/1.80) y `totalCents: 11180` (**S/111.80** que paga la empresa por persona). La implementación de referencia es `apps/api/src/modules/payments/payment-amounts.ts#buildPaymentAmounts`.
+
+Los dos únicos puntos donde nace un `Payment` automático — el check-out del trabajador (`POST /api/shifts/:id/check-out`) y el cierre manual de una asignación `NO_SHOW`/`ABANDONED` (`POST /api/business/shifts/:id/assignments/:assignmentId/resolve` con `outcome: 'COMPLETED'`) — usan `Shift.commissionBps`/`taxBps` (fijados al publicar el turno, ver "Turnos"). Nunca leen el ajuste global: un turno anterior a la migración tiene `0`/`0` y genera pagos sin comisión. Ninguna respuesta de las rutas del trabajador (`/api/workers/*`, `/api/shifts*`, incluido el SSE `/api/shifts/events`) expone `commissionBps`, `commissionCents`, `taxBps`, `taxCents`, `totalCents`, `provider` ni `needsReview`: el trabajador solo ve su propio `amountCents`. La prueba de integración `payment-commission.integration.test.ts` recorre esas respuestas buscando esas claves.
+
+El CRUD manual de esta sección (`POST`/`PATCH`/`DELETE`, retirado en el Alcance D) sigue existiendo por compatibilidad: un pago creado así siempre queda `provider: 'legacy'`, con comisión e IGV en 0 y `totalCents === amountCents`. Un `PATCH` que cambie `amountCents` recalcula `commissionCents`/`taxCents`/`totalCents` con la comisión y el IGV **ya fijados** de ese pago (nunca los reinterpreta como los de un turno nuevo).
 
 ## Respuestas de error
 

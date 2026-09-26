@@ -35,6 +35,16 @@ export type AdminWorker = {
     company: { id: string; name: string };
   }[];
 };
+// `GET`/`PATCH /admin/settings`: ajuste global de comisión e IGV. `taxBps`
+// es de solo lectura en este alcance (ningún endpoint lo modifica). Cambiar
+// `commissionBps` no afecta ningún turno ya publicado (queda congelado en
+// `Shift.commissionBps` al publicarse).
+export type AdminPlatformSettings = {
+  commissionBps: number;
+  taxBps: number;
+  updatedAt: string | null;
+  updatedBy: { id: string; name: string } | null;
+};
 export type AdminIncident = {
   id: string;
   type: string;
@@ -81,6 +91,14 @@ export const adminApi = {
   workers: (token: string) => request<AdminWorker[]>("/admin/workers", token),
   incidents: (token: string) =>
     request<AdminIncident[]>("/admin/incidents", token),
+  settings: (token: string) =>
+    request<AdminPlatformSettings>("/admin/settings", token),
+  updateSettings: (token: string, commissionBps: number) =>
+    request<AdminPlatformSettings>("/admin/settings", token, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commissionBps }),
+    }),
   createCompany: (token: string, input: unknown) =>
     request<AdminCompany>("/admin/companies", token, {
       method: "POST",

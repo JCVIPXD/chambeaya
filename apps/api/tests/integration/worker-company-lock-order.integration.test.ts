@@ -277,6 +277,8 @@ describe('worker and company operations that lock the same rows in opposite orde
         requiredWorkers: 1,
         description: 'Turno de prueba de integración del orden de bloqueo.',
         requirements: 'Disponibilidad completa para el horario indicado.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(created.status).toBe(201);
     const shiftId = created.body.id as string;
@@ -525,6 +527,8 @@ describe('worker and company operations that lock the same rows in opposite orde
         requiredWorkers: 3,
         description: 'Turno de prueba de integración de la matriz de bloqueo.',
         requirements: 'Disponibilidad completa para el horario indicado.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(created.status).toBe(201);
     const shiftId = created.body.id as string;

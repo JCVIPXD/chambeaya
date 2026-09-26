@@ -35,6 +35,7 @@ import {
   Pencil,
   Plus,
   ReceiptText,
+  RefreshCw,
   Search,
   Send,
   ShieldCheck,
@@ -59,6 +60,7 @@ import {
   type ConversationRecord,
   type PendingApplicationsSummary,
   type PaymentRecord,
+  type PaymentSettingsRecord,
   type ShiftApplicationRecord,
   type SubscriptionRecord,
   type ShiftRecord,
@@ -108,6 +110,12 @@ type Shift = {
   screeningQuestions: string[];
   modality: ShiftRecord["modality"];
   notes?: string | null;
+  // Comisión de Chambeaya e IGV fijados al publicar. Siempre tienen un
+  // valor entero (turnos anteriores a la comisión quedaron fijados en 0).
+  // Al editar un turno ya publicado, la vista previa del formulario usa
+  // estos valores congelados, no el ajuste global vigente.
+  commissionBps: number;
+  taxBps: number;
 };
 type Worker = {
   id: string;
@@ -146,7 +154,12 @@ type Transaction = {
   workerName: string | null;
   date: string;
   workers: number;
+  // Monto que recibe el trabajador (100% de lo publicado).
   amount: number;
+  commission: number;
+  tax: number;
+  // `amount + commission + tax`: lo que paga la empresa.
+  total: number;
   status: "Procesado" | "Pendiente" | "Programado" | "Cancelado";
   rawStatus: PaymentRecord["status"];
   reference: string;
@@ -242,6 +255,8 @@ function mapShift(record: ShiftRecord): Shift {
     screeningQuestions: record.screeningQuestions ?? [],
     modality: record.modality,
     notes: record.notes,
+    commissionBps: record.commissionBps,
+    taxBps: record.taxBps,
   };
 }
 function mapWorker(record: WorkerRecord): Worker {
@@ -305,6 +320,9 @@ function mapPayment(record: PaymentRecord): Transaction {
     date: dateFormat.format(new Date(record.dueAt ?? record.createdAt)),
     workers: record.workerCount,
     amount: record.amountCents / 100,
+    commission: record.commissionCents / 100,
+    tax: record.taxCents / 100,
+    total: record.totalCents / 100,
     status: labels[record.status],
     rawStatus: record.status,
     dueAt: record.dueAt?.slice(0, 10) ?? null,
@@ -340,6 +358,15 @@ export default function HomePage() {
   const [subscription, setSubscription] = useState<SubscriptionRecord | null>(
     null,
   );
+  // Ajuste global vigente (comisión + IGV), usado por la vista previa del
+  // formulario de turno al CREAR uno nuevo. Al editar un turno ya publicado,
+  // la vista previa usa los valores congelados del propio turno.
+  const [paymentSettings, setPaymentSettings] =
+    useState<PaymentSettingsRecord | null>(null);
+  // BAJO-1 de CN-20260926-014: si esta lectura falla, `PublishModal` no debe
+  // inventar un 10%/18% ni dejar publicar un turno nuevo sin haber podido
+  // mostrar la vista previa real; muestra el error y ofrece reintentar.
+  const [paymentSettingsError, setPaymentSettingsError] = useState(false);
   const [activeNav, setActiveNav] = useState<ViewName>("Resumen");
   const [mobileMenu, setMobileMenu] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -768,8 +795,23 @@ export default function HomePage() {
     }
   }
 
+  // Independiente de `loadData`: un fallo aquí no debe impedir cargar el
+  // resto del panel (turnos, trabajadores, pagos...), y el modal de
+  // publicación necesita poder reintentarla sola sin recargar todo lo demás
+  // (BAJO-1 de CN-20260926-014).
+  async function loadPaymentSettings(token: string) {
+    try {
+      const data = await businessApi.paymentSettings.get(token);
+      setPaymentSettings(data);
+      setPaymentSettingsError(false);
+    } catch {
+      setPaymentSettings(null);
+      setPaymentSettingsError(true);
+    }
+  }
   async function loadData(token: string) {
     setDataLoading(true);
+    void loadPaymentSettings(token);
     try {
       const [
         companyData,
@@ -951,6 +993,8 @@ export default function HomePage() {
     setSession(null);
     setCompany(null);
     setSubscription(null);
+    setPaymentSettings(null);
+    setPaymentSettingsError(false);
     setShifts([]);
     setWorkerRecords([]);
     setConversationRecords([]);
@@ -972,6 +1016,16 @@ export default function HomePage() {
   async function publishShift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session) return;
+    // Defensa adicional al botón deshabilitado de `PublishModal` (BAJO-1 de
+    // CN-20260926-014): nunca se publica un turno nuevo sin el ajuste de
+    // comisión vigente. Editar un turno ya publicado no depende de esto
+    // (usa los valores ya congelados del propio turno).
+    if (!editingShift && !paymentSettings) {
+      showToast(
+        "No pudimos cargar el ajuste de comisión vigente. Reintenta antes de publicar.",
+      );
+      return;
+    }
     const data = new FormData(event.currentTarget);
     const screeningQuestions = String(data.get("screeningQuestions") || "")
       .split(/\r?\n/)
@@ -992,6 +1046,16 @@ export default function HomePage() {
         data.get("modality") || "PRESENCIAL",
       ) as ShiftRecord["modality"],
       notes: String(data.get("notes") || "") || null,
+      // Solo al crear: los bps que esta misma sesión mostró en la vista
+      // previa (BAJO-4 de CN-20260926-012). Si ya no coinciden con el
+      // ajuste vigente, la API responde 409 `COMMISSION_CHANGED` en vez de
+      // publicar con un % que la empresa no llegó a ver.
+      ...(!editingShift && paymentSettings
+        ? {
+          expectedCommissionBps: paymentSettings.commissionBps,
+          expectedTaxBps: paymentSettings.taxBps,
+        }
+        : {}),
     };
     setSaving(true);
     try {
@@ -1015,6 +1079,26 @@ export default function HomePage() {
           : "Turno publicado. Ya puedes asignar talento.",
       );
     } catch (error) {
+      const code = error instanceof ApiError ? error.code : null;
+      // BAJO-4 de CN-20260926-012: la comisión que el panel mostró cambió
+      // mientras la empresa completaba el formulario. Se refresca la vista
+      // previa con el valor vigente (`PublishModal` la recalcula sola al
+      // recibir el `paymentSettings` nuevo) y se deja el formulario abierto
+      // para que la empresa confirme de nuevo; nunca se publica con un %
+      // que no vio.
+      if (!editingShift && code === "COMMISSION_CHANGED") {
+        try {
+          const refreshed = await businessApi.paymentSettings.get(session.token);
+          setPaymentSettings(refreshed);
+        } catch {
+          // La vista previa no se pudo refrescar; el aviso ya explica que
+          // debe revisarla e intentar de nuevo.
+        }
+        showToast(
+          "La comisión de Chambeaya cambió mientras completabas el formulario. Revisa la nueva vista previa y publica de nuevo.",
+        );
+        return;
+      }
       // `SHIFT_ALREADY_ENDED` (el `endsAt` enviado ya pasó) y
       // `SHIFT_NOT_EDITABLE` (el turno persistido ya venció, sin importar qué
       // se edite) son ambos previsibles con `isShiftExpired`/el `min` del
@@ -1022,7 +1106,6 @@ export default function HomePage() {
       // carrera de UI (el reloj avanzó entre que se abrió el formulario y se
       // envió). El mensaje debe explicar el motivo real, no uno genérico. Ver
       // CN-20260916-099 MEDIO-2.
-      const code = error instanceof ApiError ? error.code : null;
       showToast(
         code === "SHIFT_ALREADY_ENDED" || code === "SHIFT_NOT_EDITABLE"
           ? "Este turno ya venció: no se puede guardar con una fecha de fin en el pasado."
@@ -2635,8 +2718,8 @@ export default function HomePage() {
                     .toLocaleString("es-PE", { minimumFractionDigits: 2 })}
                 </strong>
                 <p>
-                  Registro de tus pagos directos a los trabajadores. Chambeaya
-                  no cobra, guarda ni transfiere dinero.
+                  El pago al trabajador se hace fuera de la app; la comisión
+                  de Chambeaya se factura aparte.
                 </p>
                 <div>
                   <span>
@@ -2730,7 +2813,10 @@ export default function HomePage() {
                     <span>Movimiento</span>
                     <span>Trabajadores</span>
                     <span>Estado</span>
-                    <span>Monto</span>
+                    <span>Trabajador</span>
+                    <span>Comisión</span>
+                    <span>IGV</span>
+                    <span>Total</span>
                     <span />
                   </div>
                   {filteredTransactions.map((transaction) => (
@@ -2840,6 +2926,11 @@ export default function HomePage() {
       {publishOpen && (
         <PublishModal
           shift={editingShift}
+          paymentSettings={paymentSettings}
+          paymentSettingsError={paymentSettingsError}
+          onRetryPaymentSettings={() =>
+            session && void loadPaymentSettings(session.token)
+          }
           saving={saving}
           onClose={() => {
             setPublishOpen(false);
@@ -3709,9 +3800,9 @@ function AssignmentResolutionPanel({
                 <strong>
                   ¿Confirmas que {workerName} sí trabajó este turno?
                 </strong>{" "}
-                Quedará registrado un pago pendiente de {amount} en Pagos.
-                Solo es un registro de lo que debes: tú pagas directamente al
-                trabajador y Chambeaya no cobra, guarda ni transfiere dinero.
+                Quedará registrado un pago pendiente de {amount} en Pagos. El
+                pago al trabajador se hace fuera de la app; la comisión de
+                Chambeaya se factura aparte.
                 {shiftCancelled &&
                   // La API reabre el turno (a completado) solo si lo cerró
                   // ella misma por vencimiento sin asistencia y, tras esta
@@ -4107,7 +4198,16 @@ function TransactionRow({
         )}
       </span>
       <span className="transaction-amount">
-        S/ {transaction.amount.toLocaleString("es-PE")}
+        S/ {transaction.amount.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+      </span>
+      <span className="transaction-amount">
+        S/ {transaction.commission.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+      </span>
+      <span className="transaction-amount">
+        S/ {transaction.tax.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+      </span>
+      <span className="transaction-amount">
+        S/ {transaction.total.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
       </span>
       <span className="inline-actions">
         <button
@@ -4131,13 +4231,37 @@ function TransactionRow({
   );
 }
 
+// Réplica del redondeo de `apps/api/src/modules/payments/payment-amounts.ts`
+// (`buildPaymentAmounts`), "la mitad hacia arriba" con enteros:
+// `floor((numerator*bps + 5000) / 10000)`. `packages/shared` no está cableado
+// todavía a `apps/api` ni a `apps/web` (ningún `package.json` lo referencia),
+// así que compartir la función real habría significado además resolver ese
+// cableado de build en este mismo cierre; se replica aquí con pruebas de
+// Playwright sobre el texto que renderiza, en vez de ampliar el alcance.
+function previewCommission(payCents: number, commissionBps: number, taxBps: number) {
+  const safePay = Number.isFinite(payCents) && payCents > 0 ? Math.round(payCents) : 0;
+  const commissionCents = Math.floor((safePay * commissionBps + 5000) / 10000);
+  const taxCents = Math.floor((commissionCents * taxBps + 5000) / 10000);
+  return { amountCents: safePay, commissionCents, taxCents, totalCents: safePay + commissionCents + taxCents };
+}
+
+function formatSoles(cents: number) {
+  return `S/ ${(cents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function PublishModal({
   shift,
+  paymentSettings,
+  paymentSettingsError,
+  onRetryPaymentSettings,
   saving,
   onClose,
   onSubmit,
 }: {
   shift: Shift | null;
+  paymentSettings: PaymentSettingsRecord | null;
+  paymentSettingsError: boolean;
+  onRetryPaymentSettings: () => void;
   saving: boolean;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -4157,6 +4281,18 @@ function PublishModal({
   // formulario ofrezca sin aviso una fecha que el servidor va a rechazar.
   const minEndsAt = localDateTime(new Date().toISOString());
   const formRef = useRef<HTMLFormElement>(null);
+  // Al crear, la vista previa usa el ajuste global vigente
+  // (`payment-settings`); al editar un turno ya publicado, usa los valores
+  // YA CONGELADOS de ese turno (nunca el ajuste global, aunque haya
+  // cambiado desde que se publicó). Si se está creando y ese ajuste no
+  // cargó, no hay ningún valor válido que mostrar: nunca se inventa un
+  // 10%/18% (BAJO-1 de CN-20260926-014), y no se permite publicar.
+  const settingsUnavailable = !shift && !paymentSettings;
+  const commissionBps = shift?.commissionBps ?? paymentSettings?.commissionBps ?? 0;
+  const taxBps = shift?.taxBps ?? paymentSettings?.taxBps ?? 0;
+  const [previewPay, setPreviewPay] = useState(shift?.pay ?? 100);
+  const [previewRequired, setPreviewRequired] = useState(shift?.required ?? 1);
+  const preview = previewCommission(Math.round(previewPay * 100), commissionBps, taxBps);
   const fillExample = () => {
     if (
       shift &&
@@ -4203,6 +4339,17 @@ function PublishModal({
       control.dispatchEvent(new Event("input", { bubbles: true }));
       control.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    // MEDIO-1 de CN-20260926-014: los eventos disparados arriba con
+    // `dispatchEvent` sobre un valor asignado directamente NO siempre
+    // llegan al `onChange` de React (reproducido en producción: el
+    // formulario quedaba con S/120 y 2 cupos, pero la vista previa seguía
+    // en S/100 y 1 cupo — un error de dinero visible para la empresa). La
+    // vista previa nunca debe depender de que ese evento llegue: se
+    // actualiza aquí explícitamente con los mismos valores que se acaban
+    // de escribir en el formulario, la única fuente que importa al
+    // enviarlo.
+    setPreviewPay(Number(values.pay));
+    setPreviewRequired(Number(values.required));
   };
   return (
     <div className="modal-layer" role="presentation" onMouseDown={onClose}>
@@ -4391,6 +4538,9 @@ function PublishModal({
                 max="200"
                 type="number"
                 defaultValue={shift?.required ?? 1}
+                onChange={(event) =>
+                  setPreviewRequired(Number(event.target.value) || 0)
+                }
               />
             </label>
             <label className="field">
@@ -4401,12 +4551,60 @@ function PublishModal({
                   name="pay"
                   required
                   min="1"
+                  max="100000"
                   step="0.01"
                   type="number"
                   defaultValue={shift?.pay ?? 100}
+                  onChange={(event) =>
+                    setPreviewPay(Number(event.target.value) || 0)
+                  }
                 />
               </div>
             </label>
+            <div className="field full commission-preview" aria-live="polite">
+              <span>Vista previa de la comisión de Chambeaya</span>
+              {settingsUnavailable ? (
+                <>
+                  <p className="commission-preview-error">
+                    No pudimos cargar el ajuste de comisión vigente. No se
+                    puede mostrar la vista previa ni publicar el turno hasta
+                    que se cargue.
+                  </p>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={onRetryPaymentSettings}
+                  >
+                    <RefreshCw size={14} /> Reintentar
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p>
+                    Pago al trabajador {formatSoles(preview.amountCents)} + Comisión
+                    Chambeaya {(commissionBps / 100).toLocaleString("es-PE")}%{" "}
+                    {formatSoles(preview.commissionCents)} + IGV{" "}
+                    {(taxBps / 100).toLocaleString("es-PE")}%{" "}
+                    {formatSoles(preview.taxCents)} = {formatSoles(preview.totalCents)}{" "}
+                    por persona.
+                  </p>
+                  <p>
+                    Total por {previewRequired || 0}{" "}
+                    {previewRequired === 1 ? "cupo" : "cupos"}:{" "}
+                    <strong>
+                      {formatSoles(preview.totalCents * Math.max(0, previewRequired || 0))}
+                    </strong>
+                  </p>
+                  {shift && (
+                    <small>
+                      Este turno ya está publicado: la comisión y el IGV quedaron
+                      fijados al publicarlo y no cambian aunque el ajuste global
+                      cambie después.
+                    </small>
+                  )}
+                </>
+              )}
+            </div>
             <label className="field full">
               <span>Indicaciones después de seleccionar</span>
               <input
@@ -4435,7 +4633,11 @@ function PublishModal({
             >
               Cancelar
             </button>
-            <button className="primary-button" disabled={saving} type="submit">
+            <button
+              className="primary-button"
+              disabled={saving || settingsUnavailable}
+              type="submit"
+            >
               <Plus size={17} />{" "}
               {saving
                 ? "Guardando…"

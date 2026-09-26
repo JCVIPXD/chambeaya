@@ -119,6 +119,8 @@ describe('CV de un postulante con PostgreSQL', () => {
         requiredWorkers: 2,
         description: 'Atención de mesas durante la jornada de integración.',
         requirements: 'Disponibilidad completa.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(created.status).toBe(201);
     shiftId = created.body.id;

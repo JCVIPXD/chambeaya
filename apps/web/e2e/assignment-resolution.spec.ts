@@ -15,7 +15,7 @@ import {
 // podía llamar a mano. La API es simulada; el cierre real (API + base de
 // datos) lo cubre `apps/web/e2e-real/assignment-resolution.spec.ts`.
 
-const CONFIRM_NO_CUSTODY = 'Chambeaya no cobra, guarda ni transfiere dinero';
+const CONFIRM_NO_CUSTODY = 'El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte';
 
 async function openShifts(page: Page, isMobile: boolean | undefined) {
   await page.goto('/');
@@ -74,7 +74,6 @@ test.describe('asignación NO_SHOW', () => {
     await ana.getByRole('button', { name: confirmAction('Ana Pérez'), exact: true }).click();
     await expect(ana.getByText('¿Confirmas que Ana Pérez sí trabajó este turno?')).toBeVisible();
     await expect(ana).toContainText('pago pendiente de S/ 120');
-    await expect(ana).toContainText('tú pagas directamente al trabajador');
     await expect(ana).toContainText(CONFIRM_NO_CUSTODY);
     await expect(ana).toContainText('no se puede deshacer');
     expect(server.resolveCalls).toEqual([]);

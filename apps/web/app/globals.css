@@ -384,6 +384,13 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 .publication-checklist { display: flex; gap: 10px; align-items: flex-start; margin-top: 18px; padding: 13px; border: 1px solid rgba(0,200,150,.28); border-radius: 12px; background: var(--teal-soft); color: var(--teal-dark); }
 .publication-checklist p { margin: 3px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .publication-checklist strong { color: var(--navy); font-size: 10px; }
+.commission-preview { margin-top: 4px; padding: 12px; border: 1px solid #e8edf3; border-radius: 12px; background: #f7f9fc; }
+.commission-preview > span { display: block; margin-bottom: 6px; color: #95a3b5; font-size: 7px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+.commission-preview p { margin: 0 0 4px; color: var(--navy); font-size: 9px; line-height: 1.5; }
+.commission-preview p strong { font-size: 10px; }
+.commission-preview small { display: block; margin-top: 4px; color: var(--muted); font-size: 8px; line-height: 1.4; }
+.commission-preview-error { color: var(--danger); font-weight: 700; }
+.commission-preview .secondary-button { margin-top: 2px; }
 .modal-actions { margin-top: 22px; display: flex; justify-content: flex-end; gap: 9px; }
 
 .drawer-scrim { z-index: 39; }
@@ -633,7 +640,7 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 .transaction-panel { padding: 0; overflow: hidden; }
 .payment-toolbar { justify-content: space-between; }
 .transaction-table { overflow-x: auto; }
-.transaction-head, .transaction-row { min-width: 690px; display: grid; grid-template-columns: minmax(255px, 1fr) 90px 105px 95px 32px; gap: 10px; align-items: center; }
+.transaction-head, .transaction-row { min-width: 970px; display: grid; grid-template-columns: minmax(220px, 1fr) 80px 105px 85px 85px 75px 90px 32px; gap: 10px; align-items: center; }
 .transaction-head { min-height: 38px; padding: 0 16px; background: #f7f9fc; color: #95a3b5; font-size: 7px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
 .transaction-row { min-height: 74px; padding: 0 16px; border-top: 1px solid #e8edf3; color: var(--muted); font-size: 9px; }
 .transaction-name { display: flex; align-items: center; gap: 10px; }
@@ -794,6 +801,12 @@ h1 { margin: 0; font-size: clamp(26px, 3vw, 36px); line-height: 1.15; letter-spa
 .assignment-resolution-saving { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .admin-head-actions,.admin-detail-actions,.admin-modal-actions { display:flex; align-items:center; gap:8px; }.admin-detail-actions { margin-top:22px; flex-wrap:wrap; }.danger-button { border:1px solid #efc5c1; color:#b42318; background:#fff; border-radius:9px; padding:9px 12px; font-weight:700; cursor:pointer; }.admin-modal-backdrop { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:18px; background:rgba(20,33,61,.28); }.admin-modal { width:min(620px,100%); max-height:calc(100vh - 36px); overflow:auto; background:#fff; border-radius:16px; padding:24px; }.admin-modal header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px; }.admin-modal h2 { margin:3px 0 0; }.admin-modal form { display:grid; gap:12px; }.admin-form-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }.admin-modal-actions { justify-content:flex-end; margin-top:8px; }
 @media (max-width: 560px) { .admin-form-row { grid-template-columns:1fr; }.admin-head-actions { align-items:flex-end; flex-direction:column; }.admin-head-actions .primary-button { font-size:11px; } }
+.admin-settings-form { display:grid; gap:16px; max-width:420px; }
+.admin-settings-percent { display:flex; align-items:center; gap:8px; }
+.admin-settings-percent input { flex:1; }
+.admin-settings-percent.readonly input { background:#f2f4f8; color:var(--muted); }
+.admin-settings-form small { color:var(--muted); font-size:11px; line-height:1.5; margin-top:2px; }
+.admin-settings-meta { color:var(--muted); font-size:11px; margin:0; }
 .admin-nav { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:16px; overflow:auto; }
 .admin-nav button { border:0; background:none; color:var(--muted); padding:10px 14px; font-weight:700; cursor:pointer; white-space:nowrap; border-bottom:2px solid transparent; }
 .admin-nav button.active { color:var(--navy); border-bottom-color:var(--teal); }

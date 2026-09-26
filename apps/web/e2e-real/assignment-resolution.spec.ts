@@ -61,7 +61,7 @@ test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda
   await expect(row).toContainText('si lo cancelaste tú, seguirá cancelado');
   await expect(row).not.toContainText('Aunque este turno figure como cancelado');
   await expect(row).not.toContainText('se actualizará al confirmar');
-  await expect(row).toContainText('Chambeaya no cobra, guarda ni transfiere dinero');
+  await expect(row).toContainText('El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte');
 
   const [resolveResponse] = await Promise.all([
     page.waitForResponse((response) => response.request().method() === 'POST' && /\/assignments\/[^/]+\/resolve$/.test(response.url())),

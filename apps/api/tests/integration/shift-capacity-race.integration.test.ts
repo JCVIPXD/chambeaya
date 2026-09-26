@@ -86,6 +86,8 @@ describe('shift capacity stays consistent under a real concurrent race', () => {
         requiredWorkers: 1,
         description: 'Un único cupo disputado por dos postulaciones simultáneas.',
         requirements: 'Disponibilidad completa para el horario indicado.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(createdShift.status).toBe(201);
     const shiftId = createdShift.body.id as string;

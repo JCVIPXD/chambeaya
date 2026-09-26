@@ -31,6 +31,14 @@ const companyUpdateSchema = companyCreateSchema
     message: "At least one field is required",
   });
 
+// `commissionBps` entero entre 0 (0,00%) y 5000 (50,00%): un tope defensivo
+// contra un valor absurdo por error de tecleo, sin ser tan bajo que impida un
+// ajuste comercial real. `taxBps` es de solo lectura en este alcance (no
+// existe ningún endpoint que lo modifique).
+const platformSettingsUpdateSchema = z.object({
+  commissionBps: z.number().int().min(0).max(5000),
+});
+
 export function createAdminRouter(
   authService: AuthService = new DatabaseAuthService(),
   prisma = new PrismaClient(),
@@ -294,6 +302,81 @@ export function createAdminRouter(
           updatedAt: shift.updatedAt,
         })),
       ]);
+    }),
+  );
+
+  router.get("/settings", (request, response) =>
+    guard(request, response, async () => {
+      const settings = await prisma.platformSettings.findUnique({
+        where: { id: "global" },
+        include: { updatedBy: { select: { id: true, name: true } } },
+      });
+      // No debería faltar (la migración la inserta), pero responde con los
+      // valores por defecto en vez de romper el panel de administración si
+      // alguna vez faltara (misma defensa que `getPlatformSettings`).
+      if (!settings) {
+        response.json({ commissionBps: 1000, taxBps: 1800, updatedAt: null, updatedBy: null });
+        return;
+      }
+      response.json({
+        commissionBps: settings.commissionBps,
+        taxBps: settings.taxBps,
+        updatedAt: settings.updatedAt,
+        updatedBy: settings.updatedBy,
+      });
+    }),
+  );
+
+  router.patch("/settings", (request, response) =>
+    guard(request, response, async (adminId) => {
+      const input = platformSettingsUpdateSchema.parse(request.body);
+      const updated = await prisma.$transaction(async (tx) => {
+        // MEDIO-1 de CN-20260926-012: un `upsert` con `update: {}` no toma
+        // ningún bloqueo de fila bajo `READ COMMITTED` (el nivel por
+        // defecto), así que dos `PATCH` concurrentes leían el mismo
+        // `oldValue` y la auditoría quedaba con una cadena rota (8 `PATCH`
+        // simultáneos dejaron 6 `oldValue` duplicados, reproducido por
+        // auditoría). `INSERT ... ON CONFLICT DO NOTHING` es idempotente y
+        // nunca aborta la transacción aunque la fila ya exista (a
+        // diferencia de un `INSERT` simple, que sí lo haría); el `SELECT
+        // ... FOR UPDATE` que sigue bloquea la fila `global` hasta el
+        // commit, así que una segunda transacción que llegue a ese mismo
+        // `SELECT` espera y relee el `commissionBps` que la primera ya
+        // escribió, nunca el que había antes de las dos.
+        await tx.$executeRaw`
+          INSERT INTO "PlatformSettings" ("id", "commissionBps", "taxBps", "updatedAt")
+          VALUES ('global', 1000, 1800, now())
+          ON CONFLICT ("id") DO NOTHING
+        `;
+        const [locked] = await tx.$queryRaw<{ commissionBps: number }[]>`
+          SELECT "commissionBps" FROM "PlatformSettings" WHERE "id" = 'global' FOR UPDATE
+        `;
+        const oldValue = locked!.commissionBps;
+        const next = await tx.platformSettings.update({
+          where: { id: "global" },
+          data: { commissionBps: input.commissionBps, updatedById: adminId },
+          include: { updatedBy: { select: { id: true, name: true } } },
+        });
+        // Auditoría inmutable del cambio (`PlatformSettingChange`): un cambio
+        // que deja el mismo valor todavía se registra, porque el admin
+        // confirmó la acción explícitamente (no es un guard de "sin cambios",
+        // como `EMPTY_UPDATE` en otros formularios).
+        await tx.platformSettingChange.create({
+          data: {
+            field: "commissionBps",
+            oldValue: String(oldValue),
+            newValue: String(input.commissionBps),
+            changedById: adminId,
+          },
+        });
+        return next;
+      });
+      response.json({
+        commissionBps: updated.commissionBps,
+        taxBps: updated.taxBps,
+        updatedAt: updated.updatedAt,
+        updatedBy: updated.updatedBy,
+      });
     }),
   );
 

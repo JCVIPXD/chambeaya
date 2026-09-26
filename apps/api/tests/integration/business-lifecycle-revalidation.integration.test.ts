@@ -158,6 +158,8 @@ describe('the company lifecycle revalidates inside its transaction before writin
         requiredWorkers: 1,
         description: 'Turno de prueba de integración de la revalidación del ciclo de vida.',
         requirements: 'Disponibilidad completa para el horario indicado.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(created.status).toBe(201);
     const shiftId = created.body.id as string;

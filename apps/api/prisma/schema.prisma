@@ -180,6 +180,8 @@ model User {
   documents     WorkerDocument[]
   externalIdentities ExternalIdentity[]
   talentInvitationsCreated TalentInvitation[] @relation("TalentInvitationCreatedBy")
+  platformSettingsUpdates PlatformSettings[] @relation("PlatformSettingsUpdatedBy")
+  platformSettingChanges PlatformSettingChange[] @relation("PlatformSettingChangedBy")
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 }
@@ -226,6 +228,18 @@ model Shift {
   startsAt         DateTime
   endsAt           DateTime
   payCents         Int
+  /// Comisión de Chambeaya (en puntos básicos, 1000 = 10,00%) vigente en
+  /// `PlatformSettings` al momento de publicar el turno. Queda fijada aquí
+  /// para siempre: cambiar el ajuste global después no altera turnos ya
+  /// publicados. Siempre tiene un valor: la migración que introdujo esta
+  /// columna fijó los turnos preexistentes en `0` (decisión del usuario: se
+  /// publicaron sin que la empresa viera ninguna comisión), así que ningún
+  /// código lee un ajuste global de respaldo para un turno ya creado.
+  commissionBps    Int
+  /// IGV (en puntos básicos) sobre la comisión, fijado junto con
+  /// `commissionBps` al publicar el turno. Misma regla: siempre tiene un
+  /// valor, `0` para los turnos anteriores a esta migración.
+  taxBps           Int
   requiredWorkers  Int                 @default(1)
   confirmedWorkers Int                 @default(0)
   description      String?
@@ -617,7 +631,34 @@ model Payment {
   assignment  ShiftAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   reference   String
   description String
+  /// Monto que recibe el trabajador (100% de lo publicado). La comisión de
+  /// Chambeaya se cobra ENCIMA de este monto, a la empresa; nunca se
+  /// descuenta de aquí.
   amountCents Int
+  /// Puntos básicos (1000 = 10,00%) copiados de `Shift.commissionBps` (o del
+  /// ajuste global si el turno es anterior a esta migración) al crear el
+  /// pago. Fijo desde ese momento.
+  commissionBps   Int      @default(0)
+  /// `floor((amountCents * commissionBps + 5000) / 10000)`, ver
+  /// `payment-amounts.ts#buildPaymentAmounts`.
+  commissionCents Int      @default(0)
+  /// IGV (puntos básicos) sobre `commissionCents`, copiado junto con
+  /// `commissionBps`.
+  taxBps          Int      @default(0)
+  taxCents        Int      @default(0)
+  /// `amountCents + commissionCents + taxCents`: lo que paga la empresa.
+  totalCents      Int      @default(0)
+  /// Adaptador que originó el pago. `'manual'`: generado por `checkOut`/
+  /// `resolveAssignment` (reporte manual, sin pasarela). `'legacy'`: creado
+  /// con el CRUD manual de pagos (`business.routes.ts`, hasta el Alcance D)
+  /// o backfill de un pago sin `assignmentId` anterior a esta migración;
+  /// siempre con comisión e IGV en 0. Los adaptadores de pasarela (Alcance E)
+  /// usarán otros valores.
+  provider    String        @default("manual")
+  /// Señala una discrepancia que un humano debe revisar (p. ej. un monto o
+  /// moneda que no coincide al recibir un webhook, Alcance E). No se usa
+  /// todavía en este alcance.
+  needsReview Boolean       @default(false)
   workerCount Int           @default(0)
   status      PaymentStatus @default(PENDING)
   dueAt       DateTime?
@@ -629,6 +670,38 @@ model Payment {
   @@unique([companyId, reference])
   @@index([companyId, status])
   @@index([shiftId])
+}
+
+/// Fila única (`id = 'global'`) con el % de comisión y el IGV vigentes. Un
+/// turno nuevo copia estos valores al publicarse (`Shift.commissionBps`/
+/// `taxBps`); cambiar esta fila nunca altera turnos ya publicados. `taxBps`
+/// es de solo lectura vía API en este alcance (no existe un endpoint que lo
+/// modifique).
+model PlatformSettings {
+  id            String    @id @default("global")
+  commissionBps Int       @default(1000)
+  taxBps        Int       @default(1800)
+  updatedAt     DateTime  @updatedAt
+  updatedById   String?
+  updatedBy     User?     @relation("PlatformSettingsUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+/// Auditoría inmutable de cada cambio a `PlatformSettings` (hoy solo
+/// `commissionBps`, vía `PATCH /api/admin/settings`). `changedById` es
+/// nullable con `onDelete: SetNull` (BAJO-3 de CN-20260926-012): con
+/// `Cascade`, borrar la cuenta del admin que hizo el cambio borraría la
+/// fila de auditoría entera, y una bitácora de dinero no debe poder
+/// desaparecer por la baja de quien la generó.
+model PlatformSettingChange {
+  id          String   @id @default(cuid())
+  field       String
+  oldValue    String
+  newValue    String
+  changedById String?
+  changedBy   User?    @relation("PlatformSettingChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@index([field, createdAt])
 }
 
 model WalletMovement {

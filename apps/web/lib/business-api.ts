@@ -62,6 +62,23 @@ export type ShiftRecord = {
   notes: string | null;
   rescueActive: boolean;
   status: 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
+  // Comisión de Chambeaya e IGV, fijados al publicar el turno (nunca
+  // cambian después). Siempre tienen un valor entero: `Shift.commissionBps`/
+  // `taxBps` son `NOT NULL` desde la migración que los introdujo (los
+  // turnos anteriores a ella quedaron fijados en 0, decisión del usuario
+  // en CN-20260926-012 MEDIO-2). Ningún turno lee un ajuste global de
+  // respaldo.
+  commissionBps: number;
+  taxBps: number;
+};
+
+// `GET /business/payment-settings`: ajuste global vigente que se congelaría
+// en un turno nuevo. `mode` queda fijo en `'manual'` hasta el Alcance E.
+export type PaymentSettingsRecord = {
+  commissionBps: number;
+  taxBps: number;
+  currency: 'PEN';
+  mode: 'manual';
 };
 
 // Estado persistido de una asignación. `NO_SHOW` (confirmó y nunca hizo
@@ -168,7 +185,19 @@ export type PaymentRecord = {
   id: string;
   reference: string;
   description: string;
+  // Monto que recibe el trabajador (100% de lo publicado). La comisión de
+  // Chambeaya se cobra ENCIMA, a la empresa; nunca se descuenta de aquí.
   amountCents: number;
+  // Puntos básicos (1000 = 10,00%) y céntimos fijados al crear el pago. Un
+  // pago `provider: 'legacy'` (CRUD manual, hasta el Alcance D) siempre
+  // trae comisión e IGV en 0 y `totalCents === amountCents`.
+  commissionBps: number;
+  commissionCents: number;
+  taxBps: number;
+  taxCents: number;
+  // `amountCents + commissionCents + taxCents`: lo que paga la empresa.
+  totalCents: number;
+  provider: string;
   workerCount: number;
   status: 'PENDING' | 'SCHEDULED' | 'PROCESSED' | 'CANCELLED';
   dueAt: string | null;
@@ -259,6 +288,9 @@ export const businessApi = {
   },
   subscription: {
     get: (token: string) => request<SubscriptionRecord>('/business/subscription', { token }),
+  },
+  paymentSettings: {
+    get: (token: string) => request<PaymentSettingsRecord>('/business/payment-settings', { token }),
   },
   shifts: {
     ...resource<ShiftRecord>('/business/shifts'),

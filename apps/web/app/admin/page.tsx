@@ -10,6 +10,7 @@ import {
   LogOut,
   Search,
   RefreshCw,
+  Settings,
   Shield,
   Users,
   X,
@@ -21,6 +22,7 @@ import {
   type AdminCompany,
   type AdminIncident,
   type AdminOverview,
+  type AdminPlatformSettings,
   type AdminSession,
   type AdminWorker,
 } from "../../lib/admin-api";
@@ -270,10 +272,11 @@ function AdminWorkspace({
   const [companies, setCompanies] = useState<AdminCompany[]>([]);
   const [workers, setWorkers] = useState<AdminWorker[]>([]);
   const [incidents, setIncidents] = useState<AdminIncident[]>([]);
+  const [settings, setSettings] = useState<AdminPlatformSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [failedSections, setFailedSections] = useState<string[]>([]);
   const [section, setSection] = useState<
-    "overview" | "companies" | "workers" | "incidents"
+    "overview" | "companies" | "workers" | "incidents" | "settings"
   >("overview");
   const [query, setQuery] = useState("");
   const [incidentFilter, setIncidentFilter] = useState<
@@ -288,6 +291,8 @@ function AdminWorkspace({
   );
   const [savingCompany, setSavingCompany] = useState(false);
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
   const load = async () => {
     setLoading(true);
     const results = await Promise.allSettled([
@@ -295,18 +300,42 @@ function AdminWorkspace({
       adminApi.companies(session.token),
       adminApi.workers(session.token),
       adminApi.incidents(session.token),
+      adminApi.settings(session.token),
     ]);
-    const labels = ["resumen", "empresas", "trabajadores", "incidencias"];
+    const labels = ["resumen", "empresas", "trabajadores", "incidencias", "configuración"];
     const failures = results.flatMap((result, index) =>
       result.status === "rejected" ? [labels[index]] : [],
     );
-    const [summary, companyData, workerData, incidentData] = results;
+    const [summary, companyData, workerData, incidentData, settingsData] = results;
     if (summary.status === "fulfilled") setOverview(summary.value);
     if (companyData.status === "fulfilled") setCompanies(companyData.value);
     if (workerData.status === "fulfilled") setWorkers(workerData.value);
     if (incidentData.status === "fulfilled") setIncidents(incidentData.value);
+    if (settingsData.status === "fulfilled") setSettings(settingsData.value);
     setFailedSections(failures);
     setLoading(false);
+  };
+  const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSettingsError("");
+    const data = new FormData(event.currentTarget);
+    const commissionPercent = Number(data.get("commissionPercent"));
+    if (!Number.isFinite(commissionPercent) || commissionPercent < 0 || commissionPercent > 50) {
+      setSettingsError("El porcentaje debe estar entre 0% y 50%.");
+      return;
+    }
+    // Puntos básicos enteros (1000 = 10,00%): redondea el porcentaje con dos
+    // decimales que admite el campo a la unidad entera que espera la API.
+    const commissionBps = Math.round(commissionPercent * 100);
+    setSavingSettings(true);
+    try {
+      const saved = await adminApi.updateSettings(session.token, commissionBps);
+      setSettings(saved);
+    } catch {
+      setSettingsError("No se pudo guardar el cambio. Intenta nuevamente.");
+    } finally {
+      setSavingSettings(false);
+    }
   };
   useEffect(() => {
     void load();
@@ -450,6 +479,7 @@ function AdminWorkspace({
             ["companies", "Empresas"],
             ["workers", "Trabajadores"],
             ["incidents", "Incidencias"],
+            ["settings", "Configuración"],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -465,7 +495,7 @@ function AdminWorkspace({
           </button>
         ))}
       </nav>
-      {section !== "overview" && (
+      {section !== "overview" && section !== "settings" && (
         <div className="admin-toolbar">
           <label className="admin-search">
             <Search size={16} />
@@ -720,6 +750,65 @@ function AdminWorkspace({
                   </button>
                 ))}
               </div>
+            </section>
+          )}
+          {section === "settings" && (
+            <section className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <p className="eyebrow">Ajuste global</p>
+                  <h2>Configuración</h2>
+                </div>
+                <Settings size={18} />
+              </div>
+              <form className="admin-settings-form" onSubmit={saveSettings}>
+                <div className="field">
+                  <label htmlFor="admin-commission-percent">Comisión de Chambeaya</label>
+                  <div className="admin-settings-percent">
+                    <input
+                      id="admin-commission-percent"
+                      name="commissionPercent"
+                      type="number"
+                      required
+                      step="0.01"
+                      defaultValue={settings ? settings.commissionBps / 100 : ""}
+                      key={settings?.commissionBps ?? "loading"}
+                    />
+                    <span>%</span>
+                  </div>
+                  <small>
+                    Se cobra a la empresa, encima del pago al trabajador. Este
+                    cambio solo aplica a los turnos que se publiquen desde
+                    ahora: los turnos ya publicados conservan la comisión con
+                    la que se publicaron, aunque cambies este valor.
+                  </small>
+                </div>
+                <div className="field">
+                  <label htmlFor="admin-tax-percent">IGV sobre la comisión</label>
+                  <div className="admin-settings-percent readonly">
+                    <input
+                      id="admin-tax-percent"
+                      type="number"
+                      value={settings ? settings.taxBps / 100 : ""}
+                      disabled
+                      readOnly
+                    />
+                    <span>%</span>
+                  </div>
+                  <small>Solo lectura en este alcance.</small>
+                </div>
+                {settingsError && <p className="admin-error">{settingsError}</p>}
+                <p className="admin-settings-meta">
+                  {settings?.updatedBy
+                    ? `Último cambio por ${settings.updatedBy.name}${settings.updatedAt ? ` · ${new Date(settings.updatedAt).toLocaleString("es-PE")}` : ""}`
+                    : "Todavía no se registró ningún cambio manual."}
+                </p>
+                <div className="admin-modal-actions">
+                  <button className="primary-button" type="submit" disabled={savingSettings || !settings}>
+                    {savingSettings ? "Guardando…" : "Guardar cambio"}
+                  </button>
+                </div>
+              </form>
             </section>
           )}
           {selected &&

@@ -63,6 +63,15 @@ export const test = base.extend<Fixtures>({
     );
     const businessHeaders = { Authorization: `Bearer ${business.token}` };
 
+    // `expectedCommissionBps`/`expectedTaxBps` son obligatorios al crear un
+    // turno desde CN-20260926-015 (BAJO-1 de CN-20260926-014): se leen del
+    // ajuste vigente en este momento (nunca un valor fijo), igual que hace
+    // el panel real con `GET /business/payment-settings` antes de publicar.
+    const paymentSettings = await json<{ commissionBps: number; taxBps: number }>(
+      await api.get('/api/business/payment-settings', { headers: businessHeaders }),
+      'Leer el ajuste de comisión vigente',
+    );
+
     const endsAtMs = Date.now() + 12_000;
     const shift = await json<{ id: string }>(
       await api.post('/api/business/shifts', {
@@ -74,6 +83,8 @@ export const test = base.extend<Fixtures>({
           endsAt: new Date(endsAtMs).toISOString(),
           payCents: 12000,
           requiredWorkers: 1,
+          expectedCommissionBps: paymentSettings.commissionBps,
+          expectedTaxBps: paymentSettings.taxBps,
         },
       }),
       'Crear el turno',

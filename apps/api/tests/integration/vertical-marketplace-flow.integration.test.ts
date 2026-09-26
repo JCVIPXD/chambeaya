@@ -102,6 +102,8 @@ describe('vertical marketplace flow with PostgreSQL', () => {
         requiredWorkers: 1,
         description: 'Atención de invitados durante la jornada de integración.',
         requirements: 'Disponibilidad completa para el horario indicado.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(createdShift.status).toBe(201);
     expect(createdShift.body).toMatchObject({ status: 'PUBLISHED', confirmedWorkers: 0, requiredWorkers: 1 });

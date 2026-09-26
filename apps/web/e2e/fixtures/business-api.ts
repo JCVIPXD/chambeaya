@@ -1,5 +1,5 @@
 import { test as base, expect } from '@playwright/test';
-import type { BusinessSession, CompanyRecord, SubscriptionRecord } from '../../lib/business-api';
+import type { BusinessSession, CompanyRecord, PaymentSettingsRecord, SubscriptionRecord } from '../../lib/business-api';
 import { DAY_MS, isoFromNow } from './dates';
 
 // Synthetic identities only. These credentials do not belong to an API account.
@@ -48,6 +48,16 @@ export const inactiveSubscription: SubscriptionRecord = {
   trialEndsAt: null,
 };
 
+// Ajuste global por defecto (10% de comisión + 18% de IGV sobre la comisión,
+// ver el plan de pagos). Un test puede sobreescribirlo con `test.use({
+// paymentSettings: { ... } })`, igual que `subscription`.
+export const defaultPaymentSettings: PaymentSettingsRecord = {
+  commissionBps: 1000,
+  taxBps: 1800,
+  currency: 'PEN',
+  mode: 'manual',
+};
+
 // Empresa con un plan `PRO` activado de forma manual (no existe endpoint de
 // activación; el plan solo puede venir de una fila creada por administración).
 export const proSubscription: SubscriptionRecord = {
@@ -62,10 +72,11 @@ export const proSubscription: SubscriptionRecord = {
 type ApiCall ={ method: string; path: string; authorization: string | undefined };
 type BrowserApi = { calls: ApiCall[] };
 
-export const test = base.extend<{ browserApi: BrowserApi; subscription: SubscriptionRecord }>({
+export const test = base.extend<{ browserApi: BrowserApi; subscription: SubscriptionRecord; paymentSettings: PaymentSettingsRecord }>({
   // Override per file/describe with `test.use({ subscription: ... })`.
   subscription: [activeSubscription, { option: true }],
-  browserApi: [async ({ context, baseURL, subscription }, use) => {
+  paymentSettings: [defaultPaymentSettings, { option: true }],
+  browserApi: [async ({ context, baseURL, subscription, paymentSettings }, use) => {
     const calls: ApiCall[] = [];
     const unexpected: string[] = [];
     const pageErrors: string[] = [];
@@ -135,6 +146,7 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
       const data: Record<string, unknown> = {
         '/api/business/company': company,
         '/api/business/subscription': subscription,
+        '/api/business/payment-settings': paymentSettings,
         '/api/business/shifts': [],
         '/api/business/workers': [],
         '/api/business/conversations': [],

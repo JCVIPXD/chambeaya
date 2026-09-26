@@ -37,6 +37,15 @@ export const test = base.extend<{ browserApi: BrowserApi; deleteSessionFails: bo
     const unexpected: string[] = [];
     const pageErrors: string[] = [];
     let authenticated = false;
+    // Ajuste global por defecto (10% de comisión + 18% de IGV), con estado
+    // propio de este test: `PATCH /api/admin/settings` lo actualiza en el
+    // sitio, igual que haría la API real, sin filtrar a otros tests.
+    let platformSettings = {
+      commissionBps: 1000,
+      taxBps: 1800,
+      updatedAt: null as string | null,
+      updatedBy: null as { id: string; name: string } | null,
+    };
 
     context.on('page', (page) => {
       page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -102,11 +111,29 @@ export const test = base.extend<{ browserApi: BrowserApi; deleteSessionFails: bo
         return;
       }
 
+      if (path === '/api/admin/settings' && method === 'PATCH') {
+        const body = request.postDataJSON() as { commissionBps?: number } | null;
+        const commissionBps = body?.commissionBps;
+        if (typeof commissionBps !== 'number' || !Number.isInteger(commissionBps) || commissionBps < 0 || commissionBps > 5000) {
+          await route.fulfill({ status: 400, json: { error: 'INVALID_INPUT' } });
+          return;
+        }
+        platformSettings = {
+          ...platformSettings,
+          commissionBps,
+          updatedAt: new Date().toISOString(),
+          updatedBy: { id: session.userId, name: session.name },
+        };
+        await route.fulfill({ json: platformSettings });
+        return;
+      }
+
       const data: Record<string, unknown> = {
         '/api/admin/overview': emptyOverview,
         '/api/admin/companies': [],
         '/api/admin/workers': [],
         '/api/admin/incidents': [],
+        '/api/admin/settings': platformSettings,
       };
       if (method === 'GET' && Object.hasOwn(data, path)) {
         await route.fulfill({ json: data[path] });

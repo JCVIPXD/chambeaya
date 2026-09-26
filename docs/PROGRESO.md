@@ -54,6 +54,344 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260926-018 — Reauditoría de `CN-20260926-017` y cierre del Alcance C (`011`, `013`, `015`, `017`)
+
+- Fecha: 2026-09-26 14:22 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-011` (implementación), `CN-20260926-013`, `CN-20260926-015` y `CN-20260926-017` (correcciones), y las auditorías `012`, `014` y `016`. Sin comitear, sobre HEAD `b543e33`. **Cierra el Alcance C** (comisión congelada y ajustes globales) del plan `dynamic-prancing-bear.md`.
+- Alcance: verificación del MEDIO-1 de `016` (suite `e2e-real` rota), búsqueda independiente en todo el repositorio de otros caminos afectados y regresión de tipos.
+- Archivos:
+  - Diff desde `016`: por fecha de modificación y `git diff`, se limita a `apps/web/e2e-real/fixtures/business-real.ts` (lee `GET /api/business/payment-settings` con el token de la empresa y envía los `expected*` vigentes, sin valores fijos), `apps/web/e2e-real/assignment-resolution.spec.ts:64` (texto vigente) y `docs/PROGRESO.md`. No cambió ningún otro archivo de código, así que las suites validadas en `016` siguen vigentes y no se repitieron.
+  - Modificado por el auditor (solo documentación):
+    - `docs/reference/api.md`: el "Ejemplo de creación" de turno no traía `expectedCommissionBps`/`expectedTaxBps`, y copiado tal cual respondía 400. Ahora los incluye, con la nota de tomarlos de `payment-settings`.
+    - `apps/web/e2e/README.md:81`: describía el texto retirado "Chambeaya no cobra, guarda ni transfiere dinero".
+    - `docs/product/project-master-plan.md:650`: el mismo texto, ahora marcado como histórico junto al vigente.
+- Hallazgos: ninguno crítico, alto, medio ni bajo abierto en código.
+  - MEDIO-1 de `016`, cerrado.
+  - Búsqueda propia en todo el repositorio (excluidos `node_modules`, `.next` y los reportes), de creación de turnos por HTTP y del texto retirado:
+    - Los únicos `POST /api/business/shifts` están en el panel (envía `expected*`), el fixture de `e2e-real` (corregido), las pruebas de integración y unitarias (ya corregidas en `015`) y los fixtures simulados de `apps/web/e2e`, que no validan el cuerpo.
+    - `demo.seed.ts` crea turnos con Prisma y `demo.smoke.ts` solo los lee.
+    - Las guías (`docs/guides/*`) no tienen ejemplos `curl` de creación de turnos.
+    - El texto retirado solo quedaba en los dos documentos corregidos arriba y en entradas históricas de este registro, que no se editan.
+- Validaciones (reales; contenedor propio `cn-audit018-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - `e2e-real` completa (`playwright.admin-real.config.ts`, API y panel reales contra `chambeaya_e2e_test`): **3/3**. El pago generado por "Confirmar que sí trabajó" quedó `12000 + 1200 + 216 = 13416`, `provider: 'manual'`, con la comisión al 10% y el IGV al 18%.
+  - `npx tsc --noEmit`: API sin errores; web sin errores.
+  - No se repitieron `npm test`, la integración ni Playwright rápido, porque el diff desde `016` no toca código de producción ni esas suites. En `016` pasaron 463/463, 95/95 y 131 más 1 omitida.
+  - Limpieza: se eliminaron el contenedor y los procesos de la suite (4415 y 3415). `apps/web/next-env.d.ts` quedó restaurado.
+- Resumen del Alcance C validado a lo largo de `012`, `014`, `016` y `018`:
+  - Redondeo entero "mitad hacia arriba", idéntico en la API y en el panel (8,8 millones de casos).
+  - % e IGV fijados en el turno al publicar (NOT NULL; turnos anteriores en 0%) y copiados al pago.
+  - El trabajador no recibe comisión, IGV ni total en ninguna respuesta, incluido el SSE.
+  - Auditoría del ajuste coherente con PATCH concurrentes.
+  - `409 COMMISSION_CHANGED` con `expected*` obligatorios.
+  - Tope de S/ 100 000.
+  - Migración segura sobre una base con datos, sin divergencia.
+  - Recorridos reales en el panel `/empresas`.
+- Riesgos residuales (no bloquean):
+  - El tope de 0-50% de `commissionBps` sigue sin confirmar por el usuario.
+  - El CRUD manual de pagos (`createPayment`/`updatePayment`) sigue vivo y permite editar `amountCents` de un pago `manual`. El Alcance D debe retirarlo antes de cualquier reporte de comisiones.
+  - La vista previa mantiene estado propio (`previewPay`/`previewRequired`). Toda escritura programática futura sobre esos campos debe llamar también a sus setters.
+  - No hay suite unitaria en el front.
+  - `DemoMarketplaceService` no modela la comisión.
+  - `e2e-real` no corre en CI, por eso la rotura de `015` pasó inadvertida hasta `016`.
+  - `apps/web/.next` quedó compilado sin `basePath` por la suite real (artefacto ignorado que se regenera).
+- Siguiente paso: commit local del Alcance C según el plan (sin push sin confirmación del usuario); luego, Alcance D con `implementador-sonnet`.
+
+### CN-20260926-017 — Corrección de `CN-20260926-015` (hallazgo nuevo de `CN-20260926-016`: la suite `e2e-real` quedó rota)
+
+- Fecha: 2026-09-26 19:19 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-016` (reauditoría: MEDIO-1, BAJO-1 y BAJO-2 de `014` quedan cerrados; queda un MEDIO nuevo). Sin comitear. No toqué `docs/reference/api.md` (ya lo actualizó el auditor en `016`).
+- Alcance: `apps/web/e2e-real` (`npm run test:web:admin-real`) dejó de pasar por dos efectos de `015`, ninguno detectado antes porque esta suite es opcional y no corre en CI.
+  - `apps/web/e2e-real/fixtures/business-real.ts`: el turno se creaba sin `expectedCommissionBps`/`expectedTaxBps` (ahora obligatorios) y la API respondía `400 INVALID_INPUT`. Corregido leyendo `GET /api/business/payment-settings` con el token de la empresa sembrada justo antes de crear el turno, y enviando esos dos valores (nunca fijos, para no quedar frágil si el ajuste global cambia).
+  - `apps/web/e2e-real/assignment-resolution.spec.ts:64`: buscaba el texto retirado en `013` ("Chambeaya no cobra, guarda ni transfiere dinero"). Actualizado al texto vigente ("El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte").
+  - Revisé el resto de `apps/web/e2e-real` (`admin-worker-delete.spec.ts`, `fixtures/admin-real.ts`) y los demás caminos señalados (`apps/api/scripts/e2e-serve.ts`, `apps/api/src/demo/demo.smoke.ts`, `scripts/demo-smoke.ps1`, y una búsqueda del repositorio completo por otro `POST /business/shifts` o el texto retirado): ninguno crea turnos con `payCents` por HTTP fuera de lo ya corregido, ni conserva el texto anterior. `demo.smoke.ts` solo lee turnos ya sembrados por Prisma (`demo.seed.ts`, que ya trae `commissionBps`/`taxBps` desde `011`); `e2e-serve.ts` no crea ningún `Shift`.
+- Archivos: `apps/web/e2e-real/fixtures/business-real.ts`, `apps/web/e2e-real/assignment-resolution.spec.ts`.
+- Decisiones: ninguna nueva; se siguió el mismo criterio de `015` (leer el ajuste vigente, nunca fijarlo) aplicado ahora al fixture real.
+- Validaciones (reales; contenedor Postgres 16-alpine descartable propio `cn-scopec4-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - `npm run test:web:admin-real` contra `chambeaya_e2e_test` (base desechable propia, con `CHAMBEAYA_E2E_DATABASE_URL`): **3/3** (`admin-worker-delete` y las dos de `assignment-resolution`), build de producción + API real + Postgres real, sin ningún `page.route`.
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **463/463** (sin cambios: esta corrección no toca código de la API). `npm run test:integration` contra otra base `_test` propia: 14 archivos, **95/95**.
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **131/131** (1 omitida, preexistente).
+  - `npm run demo:smoke`: ejecutado de verdad contra una tercera base propia (`chambeaya_smoke_test`), migrada, sembrada con `npm run demo:seed` (`NODE_ENV=development`, `CHAMBEAYA_ALLOW_DEMO_SEED=true`) y una API real en el puerto 4499 (`API_PORT=4499`, `CHAMBEAYA_DEMO_SMOKE=true`, `DEMO_SMOKE_API_BASE_URL` apuntando ahí): **completado sin errores** ("Smoke local de demostración completado para empresa, trabajador y superadmin").
+  - Flutter: no aplica; ningún cambio de este cierre toca un contrato que la app consuma.
+  - Limpieza: los tres contenedores/bases descartables propios y el proceso de la API de `demo:smoke` (puerto 4499) se detuvieron y eliminaron; `apps/web/next-env.d.ts` revertido; no se tocó `docs/reference/api.md` ni `docs/product/memberships.md`.
+- Riesgos: los ya documentados en `011`/`013`/`015` siguen vigentes sin cambios (tope 0-50% de `commissionBps` sin confirmar por el usuario, ausencia de suite unitaria en `apps/web`, `DemoMarketplaceService` sin modelar comisión). La suite `e2e-real` sigue fuera de CI, como ya señaló `016`; queda expuesta a que un cambio futuro similar la rompa sin que ninguna otra suite lo detecte.
+- Siguiente paso: reauditoría de `auditor-opus` sobre `CN-20260926-017` para cerrar el Alcance C.
+
+### CN-20260926-016 — Reauditoría de `CN-20260926-015` (Alcance C: `011`, `013`, `015`)
+
+- Fecha: 2026-09-26 14:05 (America/Lima; las horas de `013` y `015` están en UTC)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-011` (implementación), `CN-20260926-013` y `CN-20260926-015` (correcciones), y `CN-20260926-014` (reauditoría previa). Sin comitear, sobre HEAD `b543e33`. El Alcance C **no** queda cerrado.
+- Alcance: verificación de MEDIO-1, BAJO-1 y BAJO-2 de `014`. Incluye todos los caminos que pueden desincronizar la vista previa, en el build de producción, la obligatoriedad de `expected*` con su efecto sobre otros clientes y suites, el fallo aislado de `payment-settings`, la integridad de las pruebas modificadas y la regresión completa.
+- Archivos: revisados los de `015`, además de `apps/web/e2e-real/**` y `apps/api/src/demo/demo.smoke.ts`. Modificado por el auditor: `docs/reference/api.md` (`expected*` obligatorios con 400, y el comportamiento del panel cuando `payment-settings` falla).
+- Hallazgos de `014`:
+  - MEDIO-1 (vista previa con "Rellenar ejemplo"), cerrado. El diseño se acepta; justificación abajo.
+    - Recorrí en el build de producción (`/empresas`) todos los caminos que cambian los campos. En todos, la vista previa coincidió con el valor del campo y con el cálculo de la API:
+      - teclado real: escribir S/123.45 y dos flechas arriba en cupos;
+      - inserción por el editor (`execCommand('insertText')`, el mismo camino que pegar): S/87.65, con S/8.77 de comisión, S/1.58 de IGV y S/98.00;
+      - asignación nativa más `input` (el camino del autocompletado): 4 cupos;
+      - `stepDown` más `input` (el camino del spinner);
+      - "Rellenar ejemplo" al crear: S/134.16 y S/268.32 por 2 cupos;
+      - "Rellenar ejemplo" al editar, confirmado y cancelado;
+      - cerrar y reabrir el modal, que vuelve a S/100 y 1 cupo;
+      - editar dos turnos distintos seguidos: S/250.50 × 3 da S/280.06 y S/840.18; luego S/100 × 2.
+    - El pegado con el portapapeles real no se pudo probar (el arnés niega el permiso de escritura). Se cubrió con `insertText`, que genera el mismo evento `input` nativo.
+    - Un texto inválido (`12e`) deja la vista previa en S/0.00. El campo queda `badInput`, el formulario no valida y no se puede publicar, igual que con una lectura directa del formulario.
+    - Por qué se acepta: los campos no controlados reciben todo cambio del usuario por `onChange`. El modal se monta de nuevo en cada apertura (`publishOpen && <PublishModal>`), así que el estado nace de `shift` igual que los `defaultValue`. La única escritura programática del repositorio (`fillExample`) ya actualiza el estado.
+    - Riesgo residual de mantenimiento: cualquier escritura programática nueva sobre `pay` o `required` debe llamar también a los setters. Derivar la vista previa del formulario lo eliminaría; queda como recomendación, no como hallazgo.
+    - El turno publicado tras "Rellenar ejemplo" quedó en la base con `12000 × 2` al `1000/1800`, igual que la vista previa.
+  - BAJO-1, cerrado en la API y en el panel.
+    - `POST /business/shifts` sin `expected*` responde `400 INVALID_INPUT`.
+    - Con `PlatformSettings` renombrada en la base desechable, `payment-settings` respondió 500 y el resto del panel cargó (turnos visibles). El modal mostró el error sin ningún "%", "Revisar y publicar" quedó deshabilitado y Enter no publicó. Al restaurar la tabla, "Reintentar" devolvió la vista previa al 10% y habilitó publicar.
+    - El seed usa Prisma directo y no se ve afectado. Pero rompe la suite real, ver MEDIO-1 nuevo.
+  - BAJO-2, cerrado: los tipos son `number`.
+  - Pruebas modificadas: `git diff` muestra solo agregados en `tests/integration/*`. Las dos líneas eliminadas en las pruebas unitarias se reemplazaron por aserciones más estrictas (desglose completo de comisión y fixture con bps). Ninguna aserción se debilitó.
+- Hallazgos nuevos:
+  - Críticos y altos: ninguno.
+  - MEDIO-1: la suite real `apps/web/e2e-real` (`playwright.admin-real.config.ts`) quedó rota. Es la que el plan exige en el Alcance D y en la verificación final. La ejecuté contra un Postgres desechable propio:
+    1. `apps/web/e2e-real/fixtures/business-real.ts:68-78` crea el turno sin `expected*`. Resultado: `400 INVALID_INPUT` y 2 de 3 pruebas fallan ("Crear el turno falló"). Viene de `015`.
+    2. Con `expected*` agregados de forma temporal (revertido con `git checkout`), sigue fallando `apps/web/e2e-real/assignment-resolution.spec.ts:64`: busca el texto retirado en `013`, "Chambeaya no cobra, guarda ni transfiere dinero". Resultado: 1 fallida y 2 pasadas.
+    - Ninguno de los dos registros lo detectó porque la suite es opcional y no corre en CI.
+    - Corrección: agregar los bps vigentes al fixture (leídos de `GET /api/business/payment-settings`, no fijos), actualizar la aserción de texto y ejecutar la suite real.
+- Documentación: `docs/reference/api.md` quedó actualizado. `guides/` y `product/` no requieren cambios en este cierre.
+- Validaciones (reales; contenedor propio `cn-audit016-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 24 archivos, 463/463. `npm run test:integration` sobre `chambeaya_test`: 14 archivos, 95/95.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido: 131 pasadas y 1 omitida (preexistente).
+  - Suite real `e2e-real` sobre `chambeaya_e2e_test`: 1 pasada y 2 fallidas; con el arreglo temporal del fixture, 2 pasadas y 1 fallida (ver MEDIO-1).
+  - Navegador: build de producción `/empresas` contra la API real con Postgres desechable. La autenticación se hizo por HTTP con el token en `localStorage`; no se escribieron contraseñas en formularios. Los recorridos son los listados arriba.
+  - Flutter: no aplica, porque `015` no toca contratos que consuma la app.
+  - Limpieza: se eliminaron el contenedor y los procesos propios (4114, 3114 y 4413/3413 de la suite real). `apps/web/next-env.d.ts` quedó restaurado. `e2e-real/fixtures/business-real.ts` quedó revertido y sin cambios en `git status`.
+- Riesgos residuales: el tope de 0-50% sigue sin confirmar por el usuario; no hay suite unitaria en el front; `DemoMarketplaceService` no modela la comisión; la suite `e2e-real` no está en CI (este hallazgo lo muestra).
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (fixture y aserción de `e2e-real`) y ejecuta esa suite. Después, reauditoría de `auditor-opus` para cerrar el Alcance C.
+
+### CN-20260926-015 — Corrección de `CN-20260926-013` (hallazgos nuevos de `CN-20260926-014`: vista previa desincronizada con "Rellenar ejemplo", `expected*` obligatorios y tipos alineados a NOT NULL)
+
+- Fecha: 2026-09-26 18:50 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-014` (reauditoría, `REQUIERE_CAMBIOS`: los 8 hallazgos de `012` quedaron cerrados; 1 medio y 2 bajos nuevos, del código de `011`, no detectados antes). Sin comitear. No toqué `docs/reference/api.md` (ya lo actualizó el auditor en `014`).
+- Alcance:
+  - **MEDIO-1 (la vista previa no reflejaba "Rellenar ejemplo").** `fillExample` (`apps/web/app/page.tsx`) asignaba `control.value` y disparaba `input`/`change` con `dispatchEvent`, pero ese patrón no siempre llega al `onChange` de React (reproducido por el auditor: el formulario quedaba en S/120 y 2 cupos, la vista previa seguía en S/100 y 1 cupo, y el turno real salía a S/282.48). Corregido llamando `setPreviewPay`/`setPreviewRequired` directamente dentro de `fillExample`, con los mismos valores que se acaban de escribir en el formulario — ya no depende de que el evento disparado llegue a React. Nueva prueba de Playwright que recorre "Rellenar ejemplo" y dos cambios manuales más, comprobando en cada paso que la vista previa coincide con lo que la API cobraría.
+  - **BAJO-1 (`expected*` opcionales; valores fijos si `payment-settings` no carga).**
+    - API: `expectedCommissionBps`/`expectedTaxBps` pasaron de `.optional()` a obligatorios en el esquema de creación (`business.routes.ts`); faltar cualquiera de los dos responde `400 INVALID_INPUT` (Zod) antes de llegar al servicio.
+    - Web: quitados los valores fijos (`?? 1000`/`?? 1800`). `paymentSettings` se carga aparte de `loadData` (nueva función `loadPaymentSettings`, para que un fallo no bloquee el resto del panel) y expone un estado de error propio. Si se está creando un turno nuevo y ese ajuste no cargó, `PublishModal` no calcula ninguna vista previa: muestra el error y un botón "Reintentar" que vuelve a pedirlo, y el botón "Revisar y publicar" queda deshabilitado (con una defensa adicional en `publishShift`, por si algo lo dejara habilitado). Editar un turno existente no depende de esto: usa los valores ya congelados del propio turno.
+    - Actualicé los 10 archivos de `tests/integration` que crean un turno por HTTP (ninguno pasaba estos campos) y las dos entradas `valid` de `business.routes.test.ts` que les faltaban, para que sigan creando turnos igual que antes. El helper `createShift` de `payment-commission.integration.test.ts` ahora lee el ajuste global vigente de la base antes de crear (no un valor fijo), para no quedar frágil si otro test de ese archivo deja el ajuste en un valor distinto.
+  - **BAJO-2 (tipos y comentarios desactualizados).** `ShiftRecord.commissionBps`/`taxBps` (`apps/web/lib/business-api.ts`) y el tipo `Shift` de `apps/web/app/page.tsx` pasaron de `number | null` a `number`, con el comentario alineado a que `Shift.commissionBps`/`taxBps` son `NOT NULL` desde la migración (los turnos anteriores a ella quedaron en 0, no en `null`).
+- Archivos:
+  - `apps/api/src/modules/business/business.routes.ts` (esquema de creación con `expected*` obligatorios).
+  - `apps/api/tests/business.routes.test.ts` (dos payloads `valid` completados) y los 10 archivos de `apps/api/tests/integration/*.integration.test.ts` que crean turnos por HTTP.
+  - `apps/web/app/page.tsx` (`fillExample`, `loadPaymentSettings` separado de `loadData`, `paymentSettingsError`, `PublishModal` sin valores fijos y con el estado de error/reintento, tipo `Shift`), `apps/web/lib/business-api.ts` (tipo `ShiftRecord`), `apps/web/app/globals.css` (`.commission-preview-error`).
+  - `apps/web/e2e/shift-publish-preview.spec.ts` (dos pruebas nuevas: "Rellenar ejemplo" con cambios manuales, y el fallo de carga de `payment-settings` con su reintento).
+- Decisiones:
+  - No reescribí `fillExample` con un mecanismo genérico de sincronización (p. ej. `onInput` delegado en el `<form>`): habría cargado con la misma incertidumbre sobre si React captura el evento disparado a mano. Llamar a los `setState` directamente en el mismo punto donde se escribe el valor es determinista y no depende de ningún comportamiento de eventos del DOM.
+  - `loadPaymentSettings` quedó separado de `loadData` (antes formaba parte de un único `Promise.all`): así un fallo de esa lectura no le impide cargar company/turnos/trabajadores/pagos al resto del panel, y el mismo `loadPaymentSettings` sirve como función de reintento desde el modal sin recargar todo lo demás.
+  - Elegí no tocar el tipo `ShiftInput` de `business.service.ts` (los mantuve `expectedCommissionBps?`/`expectedTaxBps?` opcionales a nivel de TypeScript): la exigencia real vive en el esquema Zod de la ruta (el guardián real de la API), igual que otros campos "opcionales en el tipo, obligatorios en el esquema" ya existentes en este archivo; cambiarlo habría exigido tocar además las firmas de las pruebas unitarias que llaman al servicio directamente con `as never`.
+- Validaciones (reales; contenedor Postgres 16-alpine descartable propio `cn-scopec3-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **463/463** (sin cambios de conteo: los hallazgos de esta corrección no agregaron pruebas unitarias nuevas en la API, solo ajustaron payloads existentes).
+  - `npm run test:integration` contra la base `_test`: 14 archivos, **95/95**, confirmando que los 10 archivos ajustados con `expectedCommissionBps`/`expectedTaxBps` siguen creando turnos con éxito tras volverse obligatorios. `prisma migrate diff --from-url ... --to-schema-datamodel` → sin divergencia (el esquema no cambió en esta corrección).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **131/131** (1 omitida, preexistente), incluidas las dos pruebas nuevas de `shift-publish-preview.spec.ts` (la de "Rellenar ejemplo" verifica S/134.16 por persona / S/268.32 por 2 cupos tras rellenar, y S/335.40 / S/1.341,60 tras el cambio manual siguiente; la del fallo de carga verifica que no aparece ningún "Comisión Chambeaya" inventado, que "Revisar y publicar" queda deshabilitado, y que "Reintentar" recupera el formulario).
+  - Flutter: no se ejecutó; ningún cambio de este cierre toca un contrato que la app consuma (todo el alcance es del panel web y de la validación de creación de turnos, que Flutter no usa).
+  - Limpieza: contenedor y base descartables propios eliminados; `apps/web/next-env.d.ts` revertido; no se tocó `docs/reference/api.md` ni `docs/product/memberships.md`.
+- Riesgos:
+  - No agregué una prueba unitaria de Vitest para `fillExample` (sigue sin existir una suite unitaria del front): la cobertura de este hallazgo es exclusivamente Playwright, igual que el resto de la vista previa.
+  - Los riesgos ya documentados en `011`/`013` (tope 0-50% de `commissionBps`, ausencia de vitest en `apps/web`, `DemoMarketplaceService` sin modelar comisión) siguen vigentes sin cambios.
+- Siguiente paso: reauditoría de `auditor-opus` sobre `CN-20260926-015`.
+
+### CN-20260926-014 — Reauditoría de `CN-20260926-013` (corrección de `CN-20260926-011`, Alcance C)
+
+- Fecha: 2026-09-26 10:15 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-011` (implementación), `CN-20260926-012` (auditoría) y `CN-20260926-013` (corrección). Sin comitear, sobre HEAD `b543e33`.
+- Alcance: verificación independiente de los 8 hallazgos de `012`, la decisión del usuario de fijar en 0% los turnos anteriores a la comisión, el nuevo `409 COMMISSION_CHANGED`, la regresión completa y un nuevo recorrido en navegador.
+- Archivos: revisados todos los de `011` y `013`. Modificado por el auditor: `docs/reference/api.md`, que aún describía el respaldo NULL→global eliminado. Ahora documenta el backfill 0/0 con NOT NULL, `expectedCommissionBps`/`expectedTaxBps` y el `409`, el tope de S/ 100 000, el bloqueo `FOR UPDATE` con `SetNull` en la auditoría y la respuesta sin comisión de `POST /api/workers/payments/:id/confirm`.
+- Hallazgos de `012`:
+  - ALTO-1, cerrado. Repetí la reproducción con un escaneo propio de todas las respuestas del trabajador contra Postgres: postulación, postulaciones, confirmar, activo, check-in, check-out, lista y detalle de conversación, envío de mensaje, confirmación de pago (dos veces), wallet, disponibilidad, invitaciones, perfil, sesión, cancelación, feed y la primera instantánea del SSE `/api/shifts/events`. Resultado: 0 fugas. `confirmPayment` ahora responde solo `id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId`. Revisé los demás caminos del trabajador: `talent_invitation` usa `select` explícito y `createAssignmentReview` devuelve solo la reseña. El escaneo de `013` es recursivo, aunque no incluye SSE ni los POST de escritura; los cubrí aquí.
+  - MEDIO-1, cerrado. Tres rondas de 10 `PATCH` concurrentes: todas respondieron 200 y la cadena `oldValue→newValue` quedó completa en las tres, sin duplicados.
+  - MEDIO-2, cerrado según la decisión del usuario (0%).
+    - Migración sobre base vacía y sobre base con datos (2 turnos NULL, 4 pagos, 1 ADMIN): los turnos quedaron 0/0, las columnas son `NOT NULL`, `changedById` es nullable y el backfill de pagos no cambió respecto a `012`. `migrate diff` no muestra diferencias en ninguna de las dos.
+    - Solo hay tres caminos que crean turnos, y todos fijan bps explícitos: `createShift` y los dos `upsert` de `demo.seed.ts`. `DemoMarketplaceService` no usa Prisma. Rescate y la reapertura no crean turnos. Las pruebas y los fixtures crean turnos por HTTP.
+    - El texto "quedaron fijados" ahora es cierto.
+    - En producción, `Dockerfile.production` ejecuta `migrate deploy` antes de arrancar el contenedor nuevo, así que ninguna API anterior inserta turnos durante la migración. El `SET NOT NULL` recorre `Shift` una sola vez; es aceptable al volumen actual.
+  - BAJO-1, cerrado. `MAX_MONEY_AMOUNT_CENTS` coincide en la API (`payCents` y `amountCents`) y en la web (`max="100000"` en los dos formularios). Un `payCents` de 10.000.001 responde 400; un pago de 2e9 responde 400 (antes 500); el máximo da `totalCents` 11.180.000. En el peor caso (50% más 18% de IGV) el total es 1,59×10^7, muy por debajo de `Int`.
+  - BAJO-2 y BAJO-3, cerrados; comprobados en el navegador y en la base.
+  - BAJO-4, aceptable. Envié 48 publicaciones con `expected*` en paralelo a un `PATCH` de 10% a 15%: se crearon 45 turnos, todos con 1000/1800; 3 recibieron `409 COMMISSION_CHANGED`; 0 turnos quedaron con bps distintos de los validados.
+    - El supuesto TOCTOU no puede fijar un % distinto del validado: el valor comparado y el que se escribe son la misma lectura (`business.service.ts:199-213`). Lo único que queda es que un turno se crea con el % anterior milisegundos después de un `PATCH`, lo que equivale a publicarlo justo antes. No hace falta `FOR SHARE`.
+    - Que los `expected*` sean opcionales se considera en BAJO-1 nuevo.
+- Hallazgos nuevos (son del código de `011`; no los detecté en `012`):
+  - Críticos y altos: ninguno.
+  - MEDIO-1 (la vista previa no refleja "Rellenar ejemplo", un error de dinero visible), `apps/web/app/page.tsx:4257-4302`.
+    - `fillExample` asigna `control.value` directamente y dispara `input`/`change`, pero React no ejecuta `onChange` con ese patrón. `previewPay` y `previewRequired` no se actualizan.
+    - Reproducido en el build de producción: el formulario quedó con S/120 y 2 cupos, pero la vista previa mostraba "S/ 100.00 … = S/ 117.70 por persona. Total por 1 cupo: S/ 117.70". Se publicó un turno de S/120 × 2 al 15%, que cuesta S/ 282.48.
+    - Corrección: llamar a `setPreviewPay`/`setPreviewRequired` en `fillExample`, o calcular la vista previa desde el formulario con `onInput`. Agregar un caso en `shift-publish-preview.spec.ts` que pulse "Rellenar ejemplo".
+  - BAJO-1: `expected*` son opcionales y el panel solo los envía si `paymentSettings` cargó. Si no cargó, la vista previa usa 1000/1800 fijos (`page.tsx:4252-4253`) y la publicación no se valida. El panel es el único cliente BUSINESS, así que conviene exigirlos al crear y quitar esos valores fijos. No bloquea.
+  - BAJO-2: tipos y comentarios desactualizados. `ShiftRecord.commissionBps: number | null`, con un comentario que dice "la API usa el ajuste global" (`apps/web/lib/business-api.ts:64-71`), y `page.tsx:116`. Deberían ser `number`.
+- Documentación: `docs/reference/api.md` quedó actualizado por el auditor. `docs/product/memberships.md` sigue vigente desde `012`. `guides/` no requiere cambios.
+- Validaciones (reales; contenedor propio `cn-audit014-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 24 archivos, 463/463. `npm run test:integration` sobre `chambeaya_test`: 14 archivos, 95/95.
+  - Sondeo de integración temporal (fuga, concurrencia, TOCTOU y límites) en `tests/integration`, eliminado al terminar: 3/3.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido: 127 pasadas y 1 omitida (preexistente).
+  - Navegador: build de producción con `NEXT_BASE_PATH=/empresas` y `next start`, contra la API real con Postgres desechable. La autenticación se hizo por HTTP con el token en `localStorage`; no se escribieron contraseñas en formularios.
+    - La empresa abrió "Publicar turno" al 10%.
+    - El superadmin cambió a 15% por HTTP.
+    - "Revisar y publicar" devolvió 409: el modal siguió abierto, la vista previa pasó al 15% y no se creó el turno.
+    - Al publicar de nuevo, el turno quedó con 1500/1800.
+    - El turno previo conservó 1000.
+    - Pagos mostró S/100.00, S/10.00, S/1.80 y S/111.80 con el texto nuevo.
+    - Configuración cambió de 15 a 12 y la auditoría registró `1000->1500 | 1500->1200`.
+  - Flutter: no se ejecutó, y no hacía falta. En `http_worker_marketplace_repository.dart`, `confirmPayment` es `Future<void>` y descarta el cuerpo, y `_conversationFromJson` solo lee `shift['id']`/`shift['title']`, que siguen presentes. Los turnos del trabajador salen de `toMarketplaceShift`, que no cambió.
+  - Limpieza: se eliminaron el contenedor y los procesos propios (4112 y 3112). `apps/web/next-env.d.ts` quedó restaurado. `apps/web/.next` quedó compilado con `basePath=/empresas` (artefacto ignorado que se regenera).
+- Riesgos residuales: el tope de 0-50% sigue sin confirmar por el usuario; no hay prueba unitaria del redondeo del front (validado exhaustivamente en `012`); `DemoMarketplaceService` no modela la comisión.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (vista previa con "Rellenar ejemplo") y, de preferencia, BAJO-1 y BAJO-2. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-013 — Corrección de `CN-20260926-011` (hallazgos de `CN-20260926-012`: fuga de comisión al trabajador, concurrencia del ajuste, turnos preexistentes en 0%, límites de monto y carrera de la vista previa)
+
+- Fecha: 2026-09-26 14:57 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-012` (auditoría, `REQUIERE_CAMBIOS`: 1 alto, 2 medios, 5 bajos sobre `CN-20260926-011`). Sin comitear. No toqué `docs/product/memberships.md` (ya lo actualizó el auditor en `012`).
+- Alcance: los 8 hallazgos, uno por uno.
+  - **ALTO-1 (el trabajador recibía comisión/IGV).** `marketplace.service.ts#confirmPayment` ya no devuelve la fila `Payment` cruda: nuevo DTO `toWorkerPayment` (lista blanca: `id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId`), igual criterio que `wallet()`. `getWorkerConversation` cambió `shift: true` por el mismo `select` explícito que ya usaba `listWorkerConversations` (`id, title, startsAt, endsAt`). Revisé sistemáticamente cada ruta de `marketplace.routes.ts` (`/shifts`, `/shifts/events`, `/shifts/active`, `/workers/applications`, `/workers/conversations[/:id]`, `applyToShift`, `confirmAssignment`, `checkIn`, `checkOut`, `cancelAssignment`, `availability`, `wallet`): todas las demás ya construían su respuesta con `toMarketplaceShift`/`toWorkerApplication` (listas blancas explícitas) o campos sueltos, sin `include`/spread de `Shift`/`Payment` crudos. Flutter no depende de nada retirado: `confirmPayment` es `Future<void>` (descarta el cuerpo) y `_conversationFromJson` solo lee `shift['id']`/`shift['title']`, ambos siguen presentes.
+  - **MEDIO-1 (auditoría de `PATCH /admin/settings` no fiable en concurrencia).** Reemplacé el `upsert` con `update: {}` por, dentro de la misma transacción: `INSERT ... ON CONFLICT DO NOTHING` (idempotente, nunca aborta) seguido de `SELECT "commissionBps" FROM "PlatformSettings" WHERE id='global' FOR UPDATE`, que bloquea la fila hasta el commit. El `oldValue` de la auditoría se lee de ese `SELECT`, no de un `upsert` sin bloqueo.
+  - **MEDIO-2 (turnos preexistentes con `commissionBps` NULL usaban el ajuste global vigente al pagar).** Decisión del usuario: 0% para esos turnos, no el ajuste global. Como la migración `20260926180000_payment_commission` no está comiteada ni aplicada en ningún servidor, la corregí en el mismo archivo (no creé una nueva): `Shift.commissionBps`/`taxBps` quedan nullable únicamente mientras el backfill los llena, después `UPDATE "Shift" SET commissionBps=0, taxBps=0 WHERE commissionBps IS NULL` y `ALTER COLUMN ... SET NOT NULL` en ambas. `schema.prisma` ya no las declara `Int?`. Eliminé por completo el respaldo a `getPlatformSettings` en `resolveAssignment` y `checkOut` (ya no existe ningún caso NULL); ambos usan directamente `assignment.shift.commissionBps/taxBps`. El texto del panel "la comisión y el IGV quedaron fijados al publicarlo" (`page.tsx`) ya era cierto para todo turno con esta corrección; no requería cambio de texto, solo de comportamiento.
+  - **BAJO-1 (límite de `amountCents`/`payCents`).** Nueva constante `MAX_MONEY_AMOUNT_CENTS = 100_000_00` (S/100.000) en `business.routes.ts`, aplicada a `payCents` (ya la tenía) y `amountCents` (antes admitía hasta 10¹⁰, por encima del `Int` de Postgres). Con el `bps` máximo (5000/5000, aunque `taxBps` no sea editable hoy) el total nunca supera `amount * 1.75`, muy por debajo de `Int32Max`. Excede con `400 INVALID_INPUT` (Zod), nunca `500`. Mismo tope en el input "Pago por persona y turno" (`page.tsx`) y "Monto" del CRUD manual (`crud-modal.tsx`), `max="100000"` (soles).
+  - **BAJO-2 (texto "Chambeaya no cobra...").** Reemplazado por "El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte" en las dos ubicaciones señaladas (`page.tsx`, resumen de Pagos y diálogo de confirmación de una asignación NO_SHOW/ABANDONED). Revisé el resto de `page.tsx` y Flutter: "Chambeaya no custodia fondos" (línea de Pagos) y "no cobramos por publicar/postular/rechazar/cancelar" (Membresía) son afirmaciones distintas (custodia y tarifas por acción, no la comisión) y siguen siendo ciertas; no las toqué.
+  - **BAJO-3 (`PlatformSettingChange.changedById` con `onDelete: Cascade`).** Cambiado a nullable con `onDelete: SetNull`, en el schema y en la misma migración (FK y columna).
+  - **BAJO-4 (carrera entre la vista previa y la publicación).** `ShiftInput` acepta `expectedCommissionBps`/`expectedTaxBps` opcionales (solo en el schema de creación, `business.routes.ts`; `shiftUpdateSchema` no los admite). `createShift` compara contra el ajuste vigente y lanza `CommissionChangedError` (nueva clase) si no coinciden; la ruta responde `409 {error:'COMMISSION_CHANGED', commissionBps, taxBps}` sin crear el turno. El panel (`page.tsx`) envía esos dos campos solo al crear (no al editar), y ante el 409 refresca `paymentSettings` (que `PublishModal` ya recalcula en cada render) y avisa a la empresa que confirme de nuevo, sin cerrar el modal ni publicar.
+  - **BAJO-5 (editar `amountCents` de un pago manual).** Sin cambio de alcance: ya queda cubierto por el tope de BAJO-1 (no puede desbordar ni ser negativo); `updatePayment` sigue recalculando `totalCents` con la comisión ya fijada del pago, como en `011`.
+- Archivos:
+  - `apps/api/src/modules/marketplace/marketplace.service.ts` (DTO `toWorkerPayment`, `select` de `getWorkerConversation`, quitado el respaldo de `checkOut`).
+  - `apps/api/src/modules/business/business.service.ts` (`CommissionChangedError`, `expectedCommissionBps/expectedTaxBps`, quitado el respaldo de `resolveAssignment`).
+  - `apps/api/src/modules/business/business.routes.ts` (`MAX_MONEY_AMOUNT_CENTS`, esquema de creación con los `expected*`, manejo de `CommissionChangedError`).
+  - `apps/api/src/modules/admin/admin.routes.ts` (`SELECT ... FOR UPDATE` en el `PATCH`).
+  - `apps/api/prisma/schema.prisma` y `apps/api/prisma/migrations/20260926180000_payment_commission/migration.sql` (editada in situ, no es una migración nueva).
+  - Pruebas nuevas: `apps/api/tests/marketplace.no-commission-leak.test.ts`; casos nuevos en `apps/api/tests/business.service.test.ts`, `business.routes.test.ts`, `admin.routes.test.ts`, `marketplace.service.test.ts`; `apps/api/tests/integration/payment-commission.integration.test.ts` (concurrencia de 8 `PATCH` y escaneo de fuga de punta a punta contra Postgres real).
+  - `apps/web/app/page.tsx`, `apps/web/components/crud-modal.tsx`, `apps/web/e2e/assignment-resolution.spec.ts` (texto actualizado), `apps/web/e2e/shift-publish-preview.spec.ts` (prueba nueva del 409).
+- Decisiones:
+  - El respaldo a `getPlatformSettings` fuera de la transacción (documentado en `011`) queda sin uso en `resolveAssignment`/`checkOut` tras MEDIO-2, pero la función sigue viva: la usan `createShift` y `GET /business/payment-settings`.
+  - `expectedCommissionBps`/`expectedTaxBps` son opcionales a propósito: una llamada a la API que no los envíe (otro cliente, o una prueba) sigue publicando sin exigir nada nuevo; solo se valida si el panel los manda.
+  - No amplié BAJO-5 más allá de lo pedido (el Alcance D retira ese CRUD).
+- Validaciones (reales; contenedor Postgres 16-alpine descartable propio `cn-scopec2-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **463/463**.
+  - Migración corregida: aplicada sobre base vacía y sobre base con datos preexistentes (turno con `commissionBps` NULL antes del backfill, dos pagos, un usuario ADMIN). Verificado con `psql`: el turno quedó en `commissionBps=0, taxBps=0`; los pagos con comisión 0 y `totalCents=amountCents`; y al borrar el usuario ADMIN que había hecho un cambio registrado en `PlatformSettingChange`, la fila de auditoría sobrevivió con `changedById` en `NULL` (antes se habría borrado en cascada). `prisma migrate diff --from-url ... --to-schema-datamodel` → sin divergencia en ambas bases.
+  - `npm run test:integration` contra la base `_test`: 14 archivos, **95/95**, incluidas las dos pruebas nuevas: 8 `PATCH /admin/settings` concurrentes con cadena `oldValue→newValue` coherente y sin duplicados, y el escaneo de fuga de punta a punta (turno → postulación → conversación → check-in/out → pago `PROCESSED` → `confirmPayment` del trabajador → wallet → disponibilidad), sin ninguna clave prohibida en ninguna respuesta.
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **127/127** (1 omitida, preexistente), incluida la prueba nueva del 409 `COMMISSION_CHANGED` (el modal refresca la vista previa de 10% a 15% y publica solo al confirmar de nuevo) y el ajuste de una aserción de texto obsoleta en `assignment-resolution.spec.ts`.
+  - Flutter: no se ejecutó. Los únicos cambios que tocan contratos consumidos por la app (`confirmPayment`, la conversación del trabajador) solo QUITAN campos que Flutter nunca leía (`Future<void>` y `shift['id']`/`shift['title']`, verificado en el código de `http_worker_marketplace_repository.dart`); no hay renombres ni campos nuevos que Flutter necesite.
+  - Limpieza: contenedor y bases descartables propios eliminados; `apps/web/next-env.d.ts` revertido (Next lo regenera con cada `tsc`/`playwright test`); no se tocó `docs/product/memberships.md`.
+- Riesgos:
+  - `expectedCommissionBps`/`expectedTaxBps` no eliminan la ventana por completo (TOCTOU entre la comparación y el `create`): es una mejora de UX ("no publiques a ciegas"), no una garantía transaccional; el caso real (dos admins cambiando el % en el mismo segundo en que una empresa publica) es raro y de bajo impacto.
+  - No hay prueba de integración que fuerce una condición de carrera real de 409 contra Postgres (solo unit test + Playwright con mocks); el riesgo es bajo porque la lectura y la comparación son secuenciales y deterministas en el código.
+  - El resto de las decisiones y riesgos de `011` (tope 0-50% de `commissionBps`, ausencia de vitest en `apps/web`, `DemoMarketplaceService` sin modelar comisión) siguen vigentes sin cambios.
+- Siguiente paso: reauditoría de `auditor-opus` sobre `CN-20260926-013`.
+
+### CN-20260926-012 — Auditoría de `CN-20260926-011` (Alcance C: comisión congelada y ajustes globales)
+
+- Fecha: 2026-09-26 08:54 (America/Lima; la hora de `CN-20260926-011`, "13:32", corresponde a UTC)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-011`, sobre HEAD `b543e33` con los 26 cambios sin comitear del Alcance C del plan `dynamic-prancing-bear.md`.
+- Alcance: revisión del diff completo (API, migración, web, pruebas y docs), cálculo y redondeo, puntos de fijado, backfill, ajustes del superadmin, exposición al trabajador, recorrido real en navegador y regresión de los Alcances A y B.
+- Archivos: revisados todos los de `CN-20260926-011`. Modificado por el auditor: `docs/product/memberships.md` (punto 4: la comisión existe, es aparte de la cuota y la paga la empresa).
+- Hallazgos:
+  - Críticos: ninguno.
+  - ALTO-1 (el trabajador recibe comisión e IGV). Hay dos rutas del trabajador que devuelven filas Prisma crudas:
+    - `apps/api/src/modules/marketplace/marketplace.service.ts:837` y `:851` (`confirmPayment`, `POST /api/workers/payments/:id/confirm`) responden el `Payment` completo. Reproducido contra Postgres: la respuesta al trabajador trae `"commissionBps":1000,"commissionCents":1000,"taxBps":1800,"taxCents":180,"totalCents":11180,"provider":"manual"`.
+    - `marketplace.service.ts:372` (`getWorkerConversation`, `GET /api/workers/conversations/:id`) incluye `shift: true`, y la respuesta trae `"commissionBps":1000,"taxBps":1800`.
+    - Esto contradice la regla del usuario ("el trabajador nunca ve la comisión") y la afirmación del registro de `011`, que solo comprobó la wallet. La app Flutter no muestra esos campos, pero llegan al dispositivo.
+    - Corrección: proyectar con `select` o mapear las dos respuestas, y agregar una prueba de integración que falle si aparece `commission`, `tax` o `totalCents` en cualquier respuesta `/api/workers/*` o `/api/shifts*`.
+    - Verificado sin fuga: wallet, `workers/applications`, `workers/conversations` (lista), feed `/api/shifts` y SSE (usan `toMarketplaceShift`), `shifts/active` y la respuesta del check-out.
+  - MEDIO-1 (auditoría de `PATCH /api/admin/settings` no fiable en concurrencia), `apps/api/src/modules/admin/admin.routes.ts:333-356`.
+    - El `upsert` con `update: {}` no bloquea la fila en READ COMMITTED, así que dos PATCH simultáneos leen el mismo `oldValue`.
+    - Reproducido con 8 PATCH concurrentes (1100..1800): todos respondieron 200 y el valor final fue 1400, pero la cadena de auditoría quedó `1000->1100 | 1000->1200 | 1000->1600 | 1000->1800 | 1000->1500 | 1000->1700 | 1000->1300 | 1200->1400`, con 6 `oldValue` duplicados. La bitácora de un ajuste de dinero no permite reconstruir la historia.
+    - Corrección: leer con `SELECT ... FOR UPDATE` (`$queryRaw`) dentro de la transacción, o usar una transacción serializable con reintento, más una prueba de integración de concurrencia.
+  - MEDIO-2 (los turnos anteriores a la migración no quedan fijados). `Shift.commissionBps/taxBps` quedan en NULL y los dos puntos de pago (`business.service.ts:424`, `marketplace.service.ts:664`) usan el ajuste global vigente al momento del pago.
+    - En la base de producción existente, cualquier turno abierto publicado antes del despliegue cambia de comisión si el superadmin cambia el %. Distintas asignaciones del mismo turno pueden salir con porcentajes distintos. Es el único camino en que "cambiar el ajuste no altera turnos publicados" no se cumple.
+    - En el panel, al editar un turno así (`apps/web/app/page.tsx:4223-4224` y el texto `:4503`), la vista previa usa el global y dice "quedaron fijados al publicarlo", lo que es falso para ese turno.
+    - Corrección: fijar los turnos existentes en la propia migración (`UPDATE "Shift" SET "commissionBps"=…,"taxBps"=… WHERE "commissionBps" IS NULL`). Decisión del usuario: con 1000/1800 (el global inicial) o con 0/0 (esos turnos se publicaron sin comisión). Así se eliminan el respaldo y los `!` de `fallbackSettings!`.
+  - BAJO-1: `updatePayment` (`business.service.ts:722-746`) deja que la empresa cambie `amountCents` de un pago `manual` nacido de una asignación y recalcula la comisión. Reproducido: `amountCents: 1` dejó comisión 0 y total 1. `commission*`, `totalCents` y `provider` sí se ignoran si se envían directamente (Zod los descarta; verificado). Se acepta solo porque el Alcance D retira este CRUD; D debe eliminarlo antes de cualquier reporte de comisiones.
+  - BAJO-2: `paymentFields.amountCents` admite hasta `100_000_000_00` (`business.routes.ts:98`), por encima del máximo de `Int` (2.147.483.647). Ya existía, pero ahora también `totalCents` puede desbordarse: un `PATCH` con `amountCents: 2000000000` responde `500 INTERNAL_ERROR` en vez de 400. Bajar el tope a un valor cuyo total quepa en `Int`.
+  - BAJO-3: el panel sigue diciendo "Chambeaya no cobra, guarda ni transfiere dinero" (`apps/web/app/page.tsx:2665` y `:3744`), junto a las columnas nuevas de Comisión, IGV y Total. El plan lo corrige en D; si D se retrasa, cambiarlo antes.
+  - BAJO-4: `PlatformSettingChange.changedById` tiene `onDelete: Cascade` (`schema.prisma`), así que borrar un usuario ADMIN desde la base borra su historial "inmutable". Hoy ninguna ruta borra administradores; preferir `Restrict` o `SetNull`.
+  - BAJO-5: `createShift` fija el ajuste leído en el instante de publicar, pero la empresa vio la vista previa con un valor anterior. Si el superadmin cambia el % entre ambos momentos, el turno queda con un % que la empresa no vio, y no se le avisa. Opcional: enviar los bps esperados y responder 409 si no coinciden.
+- Documentación: `docs/reference/api.md` describe correctamente los endpoints, el redondeo y el fijado, salvo que el caso NULL depende de MEDIO-2. `docs/product/memberships.md` se actualizó (antes decía "la cuota reemplaza la comisión"). Quedan para el Alcance D, según el plan, `roadmap.md` y los textos de `client-demo.md`. `guides/` no requiere cambios en este alcance.
+- Validaciones (ejecutadas; contenedor propio `cn-audit011-pg`, Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 23 archivos, 454/454.
+  - `npm run test:integration` sobre `chambeaya_test`: 14 archivos, 93/93. El primer intento falló por conectividad (`P1001` en `localhost`); con `127.0.0.1` pasó completo.
+  - Redondeo: script que compara `buildPaymentAmounts` con una copia literal de `previewCommission` de `page.tsx` y con una referencia en BigInt. Hubo 8.801.012 combinaciones (montos 0, 1, 4, 5, 9999, 12345, 10^7, 2^31-1 y 200.000 aleatorios; bps 0, 1, 1800, 5000 y otros; IGV 0, 1, 1800 y 5000), con 0 diferencias. La conversión soles→céntimos del formulario (`Math.round(Number(pay)*100)`) es exacta para todos los montos de 2 decimales hasta 10^7. Con `amountCents` 2^31-1, `totalCents` es 2.400.886.718 y desborda `Int` (ver BAJO-2).
+  - Migración: se aplicó sobre una base vacía (`prisma migrate deploy`). También sobre una base migrada hasta `20260918120000` con datos: 2 turnos, 1 asignación y 4 pagos (`PROCESSED` con `assignmentId`, `SCHEDULED` sin asignación, `PROCESSED` sin asignación y `PENDING` con `amountCents` 2^31-1).
+  - Backfill verificado con `psql`: `totalCents=amountCents` y comisión e IGV en 0. `provider` quedó `manual` para el pago con asignación y `legacy` para los 3 sin ella, `SCHEDULED` pasó a `PENDING`, los turnos quedaron con NULL y la fila `global` con 1000/1800.
+  - `prisma migrate diff --exit-code` sin diferencias en ambas bases.
+  - Las columnas nuevas con `DEFAULT` constante no reescriben la tabla en PG ≥ 11. El único costo es un `UPDATE "Payment"` completo, aceptable al volumen actual.
+  - Sondeos HTTP e integración (archivo temporal, eliminado):
+    - Se reprodujeron ALTO-1, MEDIO-1, BAJO-1 y BAJO-2.
+    - `POST /business/shifts` con `commissionBps` responde 400 (esquema estricto).
+    - `PATCH` de un turno con `commissionBps/taxBps` los ignora y conserva 1500/1800 aunque cambie `payCents`.
+    - `PATCH /admin/settings`: 403 con sesión BUSINESS; 400 con `"1000"` y con `10.5`; `taxBps` enviado se ignora.
+    - `payment-settings` responde 401 sin sesión.
+  - Navegador: build de producción con `NEXT_BASE_PATH=/empresas` y `next start`, contra la API real (`tsx`) con Postgres desechable. La autenticación se hizo por HTTP con un token inyectado en `localStorage`; no se escribieron contraseñas en formularios.
+    - El superadmin cambió el % de 10 a 15 desde la sección Configuración; se muestran "Último cambio por…" y el aviso de que solo aplica a turnos nuevos.
+    - "Publicar turno" mostró S/100 + 15% S/15.00 + IGV S/2.70 = S/117.70. Con S/123.45 y 3 cupos mostró S/18.52 + S/3.33 = S/145.30 por persona y S/435.90 en total, coincidente con la API.
+    - Editar el turno publicado antes al 10% mostró S/111.80 por persona y S/223.60 por 2 cupos.
+    - Pagos, tras un check-out real: S/100.00, S/10.00, S/1.80 y S/111.80.
+    - Un turno nuevo por API quedó con 1500/1800.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido (`npx playwright test`): 125 pasadas y 1 omitida (preexistente), incluidos los dos specs nuevos y las suites de los Alcances A y B (cambio de contraseña, "Salir").
+  - Flutter: no se ejecutó, y no hacía falta. El contrato que consume la app solo agrega campos: nada se renombra ni se elimina, `confirmPayment` es `Future<void>` y el mapeo de conversación ignora claves extra. El backfill `SCHEDULED`→`PENDING` ya se mostraba como pendiente en la wallet.
+  - Limpieza: se eliminaron el contenedor y los procesos propios (API en 4111, web en 3111). `apps/web/next-env.d.ts` quedó restaurado, sin cambios en `git status`. `apps/web/.next` quedó compilado con `basePath=/empresas` (artefacto ignorado; Playwright y `npm run dev` lo regeneran).
+- Riesgos residuales: el valor del tope de 0-50% sigue sin confirmar por el usuario. No hay prueba unitaria del redondeo del front, aunque el script de esta auditoría lo cubre de forma exhaustiva y conviene convertirlo en prueba. `DemoMarketplaceService` no modela la comisión (aceptable: es un servicio en memoria de demostración).
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1, MEDIO-1 y MEDIO-2 (esta última con la decisión 1000/1800 o 0/0 del usuario) y, de preferencia, BAJO-2 y BAJO-4. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-011 — Alcance C: comisión de Chambeaya congelada al publicar y ajustes globales
+
+- Fecha: 2026-09-26 13:32 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: N/A. Sobre HEAD `b543e33`, árbol limpio antes de empezar. Sigue el plan `dynamic-prancing-bear.md` (Alcances A y B ya cerrados); implementa solo el Alcance C. El flujo de pago no cambia (sin proveedor, checkout ni botones nuevos de pagar).
+- Alcance:
+  - Migración `20260926180000_payment_commission`: `Payment.commissionBps/commissionCents/taxBps/taxCents/totalCents/provider/needsReview`; `Shift.commissionBps/taxBps` (nullable); tabla `PlatformSettings` (fila única `id:'global'`, `commissionBps:1000`, `taxBps:1800`) y `PlatformSettingChange` (auditoría). Backfill: `totalCents = amountCents`, `provider='legacy'` en pagos sin `assignmentId`, `SCHEDULED`→`PENDING`; turnos existentes con `commissionBps/taxBps` NULL.
+  - Helper `apps/api/src/modules/payments/payment-amounts.ts`: `buildPaymentAmounts` (redondeo entero "mitad hacia arriba": `floor((n*bps+5000)/10000)`) y `getPlatformSettings` (defensivo si falta la fila global).
+  - `business.service.ts#createShift` fija `commissionBps/taxBps` del ajuste global vigente en el turno nuevo (no hay ciclo de borrador: todo turno nace `PUBLISHED`). `resolveAssignment` (outcome `COMPLETED`) y `marketplace.service.ts#checkOut` usan `Shift.commissionBps/taxBps`, con fallback a `getPlatformSettings` leído **fuera** de la transacción reintentable solo si el turno es anterior a la migración. `createPayment`/`updatePayment` (CRUD manual, hasta el Alcance D) quedan `provider:'legacy'`, comisión 0, `totalCents` coherente si cambia `amountCents`.
+  - `GET/PATCH /api/admin/settings` (guard ADMIN, Zod `commissionBps` 0-5000, auditoría en `PlatformSettingChange` en cada cambio) y `GET /api/business/payment-settings` (`{commissionBps,taxBps,currency:'PEN',mode:'manual'}`). `GET /api/workers/wallet` sigue sin exponer comisión/IGV (ya no los mapeaba).
+  - `demo.seed.ts`: turnos y pago histórico con `commissionBps:1000, taxBps:1800` y `provider:'manual'`.
+  - Web: `PublishModal` (`apps/web/app/page.tsx`) con vista previa en vivo por persona y total por cupos (función de redondeo replicada localmente con comentario explícito, ver Decisiones); usa `payment-settings` al crear y los bps congelados del turno al editar. Tabla de Pagos con columnas trabajador/comisión/IGV/total. Panel de superadmin: sección "Configuración" (ver/editar `commissionBps`, IGV solo lectura, quién y cuándo cambió, aviso de que solo aplica a turnos nuevos).
+  - `docs/reference/api.md`: nueva sección de ajuste global bajo Superadmin, `payment-settings` bajo Empresa, nota de campos congelados bajo Turnos, y reescritura de "Pagos y movimientos" con la regla de redondeo y el ejemplo S/100+S/10+S/1.80=S/111.80.
+- Archivos:
+  - `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20260926180000_payment_commission/migration.sql`.
+  - `apps/api/src/modules/payments/payment-amounts.ts` (nuevo).
+  - `apps/api/src/modules/business/business.service.ts`, `business.routes.ts`; `apps/api/src/modules/marketplace/marketplace.service.ts`; `apps/api/src/modules/admin/admin.routes.ts`; `apps/api/src/demo/demo.seed.ts`.
+  - Pruebas: `apps/api/tests/payment-amounts.test.ts` (nuevo), `apps/api/tests/business.service.test.ts`, `business.routes.test.ts`, `admin.routes.test.ts`, `marketplace.service.test.ts` (todos con casos nuevos), `apps/api/tests/integration/payment-commission.integration.test.ts` (nuevo).
+  - `apps/web/app/page.tsx`, `apps/web/app/admin/page.tsx`, `apps/web/app/globals.css`, `apps/web/lib/business-api.ts`, `apps/web/lib/admin-api.ts`.
+  - `apps/web/e2e/fixtures/business-api.ts`, `admin-api.ts`, `shift-assignments.ts`; `apps/web/e2e/admin-settings.spec.ts` y `shift-publish-preview.spec.ts` (nuevos).
+  - `docs/reference/api.md`.
+- Decisiones:
+  - **`packages/shared` no está cableado** a ningún `package.json` (ni `apps/api` ni `apps/web` lo referencian ni tiene build propio): compartir `buildPaymentAmounts` real habría exigido resolver ese cableado en este mismo cierre, fuera del alcance pedido. Se replicó la fórmula en `page.tsx` (`previewCommission`, con comentario explícito citando la fuente de verdad) y se cubrió solo con Playwright (vista previa renderizada), no con una suite unitaria nueva del front (no existe ninguna hoy; añadirla habría sido ampliar el alcance).
+  - **Dónde se lee `PlatformSettings` de respaldo:** siempre fuera de la transacción reintentable de `resolveAssignment`/`checkOut` (usando la lectura previa del turno, ya hecha antes de abrir la transacción), nunca dentro. `Shift.commissionBps` nunca cambia tras crearse, así que esa lectura previa sigue siendo válida en cualquier reintento; leer el ajuste global dentro de la transacción sí sumaría superficie de conflicto de serialización con un `PATCH /api/admin/settings` concurrente.
+  - Turnos sin ciclo de "borrador" (`createShift` siempre publica): no hay un punto anterior a la publicación donde fijar la comisión valga más que al crear.
+  - `updatePayment` recalcula `totalCents` con la comisión/IGV **ya fijados** del pago (no reinterpreta un cambio de `amountCents` como si fuera un turno nuevo).
+  - Límite defensivo `commissionBps` 0-5000 (0%-50%) en el PATCH de admin, arbitrario pero conservador; no estaba especificado un tope exacto.
+- Validaciones (todas ejecutadas de verdad, sobre Postgres 16-alpine descartable en Docker, contenedor propio `cn-scopec-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 23 archivos, **454/454**.
+  - Migración: aplicada sobre base vacía (dos veces, en bases distintas) y sobre base con datos preexistentes (turno y dos pagos, uno con `assignmentId` y otro sin él) con backfill verificado a mano vía `psql`. `prisma migrate diff --from-url ... --to-schema-datamodel` → sin divergencia.
+  - `npm run test:integration` contra la base `_test`: 14 archivos, **93/93**, incluido `payment-commission.integration.test.ts` (comisión congelada tras un `PATCH` de admin, mismo resultado vía `resolveAssignment`, turno legacy con `commissionBps` NULL usando el ajuste global, wallet del trabajador sin comisión, y auditoría del `PATCH /admin/settings`).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo (`npx playwright test`): **125/125** (1 omitida, preexistente), incluidos los dos specs nuevos.
+- Riesgos:
+  - Ningún test de integración verifica que `commissionBps` quede realmente `NOT NULL`/`NULL` en la fila real tras el backfill sobre una base con volumen grande (solo se probó con un par de filas); riesgo bajo, la migración es un `UPDATE` simple sin condición compleja.
+  - El límite 0-50% del `commissionBps` del admin es una elección conservadora propia, no una cifra pedida por el usuario; revisar si el negocio necesita otro tope.
+  - `apps/web` no tiene suite unitaria (vitest) wireada pese a la dependencia en `package.json`; la réplica de `buildPaymentAmounts` en el panel solo la cubre Playwright, no una prueba unitaria aislada del redondeo.
+  - No se tocó `DemoMarketplaceService` (servicio en memoria de `marketplace.service.ts`): no modela `Payment` con estos campos (su `wallet()`/`confirmPayment()` son valores fijos de demostración), así que no necesitaba los campos nuevos; queda documentada la decisión de no tocarlo.
+- Siguiente paso: auditoría de `auditor-opus` sobre este ID; después, Alcance D (registro confiable y modo manual) según el plan.
+
 ### CN-20260926-010 — Reauditoría de `CN-20260926-009` y cierre del Alcance B (`CN-20260926-007`, `009`)
 
 - Fecha: 2026-09-26 10:30 (America/Lima)

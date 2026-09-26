@@ -78,8 +78,8 @@ siempre con Chromium; no es una prueba en un teléfono físico):
    "Confirmar que sí trabajó" y "Cerrar sin pago". Elegir una acción solo abre una
    confirmación (ninguna llamada a `POST .../resolve` hasta el "Sí, ..."; "Volver"
    tampoco llama). Confirmar el trabajo envía `{ outcome: 'COMPLETED' }`, el copy dice
-   que el pago lo hace la empresa directo al trabajador y que Chambeaya no cobra, guarda
-   ni transfiere dinero, y tras responder se releen turno, postulaciones y pagos sin
+   que "el pago al trabajador se hace fuera de la app; la comisión de Chambeaya se
+   factura aparte" (texto vigente desde `CN-20260926-013`), y tras responder se releen turno, postulaciones y pagos sin
    recargar (el pago pendiente aparece en `Pagos`). Cerrar sin pago envía
    `{ outcome: 'CANCELLED', reason? }` (sin `reason` si no se escribió motivo; un motivo
    de 1-2 caracteres se rechaza en el panel sin llamar a la API) y no genera pago. Cubre

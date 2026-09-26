@@ -198,3 +198,113 @@ describe('DELETE /api/admin/workers/:id', () => {
     expect(prisma.inspect().users.has('worker-2')).toBe(false);
   });
 });
+
+describe('GET/PATCH /api/admin/settings', () => {
+  function fakeSettingsPrisma(initial: { commissionBps: number; taxBps: number; updatedById: string | null; updatedAt: Date } = {
+    commissionBps: 1000, taxBps: 1800, updatedById: null, updatedAt: new Date('2026-09-01T00:00:00.000Z'),
+  }) {
+    const state = { settings: { id: 'global', ...initial } };
+    const changes: Record<string, unknown>[] = [];
+    const users: Record<string, { id: string; name: string }> = { 'admin-1': { id: 'admin-1', name: 'Superadmin de pruebas' } };
+    const platformSettings = {
+      findUnique: vi.fn(async () => ({ ...state.settings, updatedBy: state.settings.updatedById ? users[state.settings.updatedById] : null })),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        Object.assign(state.settings, data);
+        return { ...state.settings, updatedBy: state.settings.updatedById ? users[state.settings.updatedById] : null };
+      }),
+    };
+    const platformSettingChange = {
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => { changes.push(data); return { id: `change-${changes.length}`, ...data }; }),
+    };
+    // El `PATCH` real bloquea la fila con `SELECT ... FOR UPDATE` dentro de
+    // `$executeRaw`/`$queryRaw` (ver MEDIO-1 de CN-20260926-012); este doble
+    // no modela concurrencia real (esa cobertura es de integración contra
+    // Postgres, ver `tests/integration/payment-commission.integration.test.ts`),
+    // solo que el flujo secuencial lee el `commissionBps` vigente ANTES del
+    // `update` de esta misma llamada.
+    const executeRaw = vi.fn(async () => 0);
+    const queryRaw = vi.fn(async () => [{ commissionBps: state.settings.commissionBps }]);
+    const prisma = {
+      platformSettings,
+      platformSettingChange,
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({ platformSettings, platformSettingChange, $executeRaw: executeRaw, $queryRaw: queryRaw })),
+    };
+    return { prisma, state, changes, platformSettings, platformSettingChange, queryRaw };
+  }
+
+  function buildSettingsApp(prisma: ReturnType<typeof fakeSettingsPrisma>['prisma'], sessions: Record<string, AuthSession>) {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/admin', createAdminRouter(fakeAuthService(sessions), prisma as never, fakeDocumentStorage()));
+    return app;
+  }
+
+  it('rejects a request without a valid session', async () => {
+    const { prisma } = fakeSettingsPrisma();
+    const app = buildSettingsApp(prisma, {});
+
+    const response = await request(app).get('/api/admin/settings');
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects a session that is not ADMIN', async () => {
+    const { prisma } = fakeSettingsPrisma();
+    const worker = session({ userId: 'worker-1', role: 'WORKER' });
+    const app = buildSettingsApp(prisma, { [worker.token]: worker });
+
+    const getResponse = await request(app).get('/api/admin/settings').set('Authorization', `Bearer ${worker.token}`);
+    expect(getResponse.status).toBe(403);
+    expect(getResponse.body).toEqual({ error: 'ADMIN_ACCOUNT_REQUIRED' });
+
+    const patchResponse = await request(app).patch('/api/admin/settings').set('Authorization', `Bearer ${worker.token}`).send({ commissionBps: 1200 });
+    expect(patchResponse.status).toBe(403);
+  });
+
+  it('returns the current global settings, including who last changed them', async () => {
+    const { prisma } = fakeSettingsPrisma({ commissionBps: 1000, taxBps: 1800, updatedById: 'admin-1', updatedAt: new Date('2026-09-20T00:00:00.000Z') });
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const app = buildSettingsApp(prisma, { [admin.token]: admin });
+
+    const response = await request(app).get('/api/admin/settings').set('Authorization', `Bearer ${admin.token}`);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      commissionBps: 1000, taxBps: 1800,
+      updatedBy: { id: 'admin-1', name: 'Superadmin de pruebas' },
+    });
+  });
+
+  it('rejects a commissionBps out of the 0-5000 range', async () => {
+    const { prisma, platformSettingChange } = fakeSettingsPrisma();
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const app = buildSettingsApp(prisma, { [admin.token]: admin });
+
+    const tooHigh = await request(app).patch('/api/admin/settings').set('Authorization', `Bearer ${admin.token}`).send({ commissionBps: 5001 });
+    expect(tooHigh.status).toBe(400);
+    expect(tooHigh.body.error).toBe('INVALID_INPUT');
+
+    const negative = await request(app).patch('/api/admin/settings').set('Authorization', `Bearer ${admin.token}`).send({ commissionBps: -1 });
+    expect(negative.status).toBe(400);
+
+    const notAnInteger = await request(app).patch('/api/admin/settings').set('Authorization', `Bearer ${admin.token}`).send({ commissionBps: 12.5 });
+    expect(notAnInteger.status).toBe(400);
+
+    expect(platformSettingChange.create).not.toHaveBeenCalled();
+  });
+
+  it('updates commissionBps, leaves taxBps untouched, and records the change in PlatformSettingChange', async () => {
+    const { prisma, state, changes } = fakeSettingsPrisma({ commissionBps: 1000, taxBps: 1800, updatedById: null, updatedAt: new Date('2026-09-01T00:00:00.000Z') });
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const app = buildSettingsApp(prisma, { [admin.token]: admin });
+
+    const response = await request(app).patch('/api/admin/settings').set('Authorization', `Bearer ${admin.token}`).send({ commissionBps: 1200 });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ commissionBps: 1200, taxBps: 1800 });
+    expect(state.settings.commissionBps).toBe(1200);
+    expect(state.settings.taxBps).toBe(1800);
+    expect(changes).toEqual([expect.objectContaining({
+      field: 'commissionBps', oldValue: '1000', newValue: '1200', changedById: 'admin-1',
+    })]);
+  });
+});
