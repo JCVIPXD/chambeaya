@@ -45,6 +45,38 @@ export type AdminPlatformSettings = {
   updatedAt: string | null;
   updatedBy: { id: string; name: string } | null;
 };
+// `GET /admin/commissions?from&to` (Alcance D): cuánto le corresponde
+// facturar Chambeaya a cada empresa en modo manual ("por facturar": comisión
+// e IGV de todo pago `provider: 'manual'` no `CANCELLED`, pagado o no) y
+// cuánto ya cobró/tiene por cobrar vía pasarela (Alcance E; hoy siempre 0,
+// sin proveedor contratado). `from`/`to` son fechas de calendario de Lima
+// ("AAAA-MM-DD"), nunca UTC (corrección de ALTO-1 de CN-20260926-020).
+// `closedWithoutPayment` cuenta asignaciones que la empresa cerró sin pagar
+// (señal estructurada, nunca texto libre; corrección de MEDIO-1) y
+// `pendingResolution` cuenta las `NO_SHOW`/`ABANDONED` que todavía no
+// resolvió -sin filtro de período, para que no resolverlas no las oculte-.
+export type AdminCommissionsTotals = {
+  toInvoiceCents: number;
+  toInvoiceTaxCents: number;
+  collectedCents: number;
+  pendingCollectionCents: number;
+  payments: number;
+  pendingResolution: number;
+};
+export type AdminCommissionsCompanyRow = AdminCommissionsTotals & {
+  companyId: string;
+  name: string;
+  ruc: string;
+  closedWithoutPayment: number;
+};
+export type AdminCommissionsReport = {
+  // `from`/`to`: fechas de Lima recibidas ("AAAA-MM-DD"), o `null`. `fromUtc`/
+  // `toUtcExclusive`: los instantes UTC efectivos de la consulta (el segundo
+  // es un límite EXCLUSIVO), para que no haya ambigüedad.
+  period: { from: string | null; to: string | null; fromUtc: string | null; toUtcExclusive: string | null };
+  totals: AdminCommissionsTotals;
+  companies: AdminCommissionsCompanyRow[];
+};
 export type AdminIncident = {
   id: string;
   type: string;
@@ -93,6 +125,17 @@ export const adminApi = {
     request<AdminIncident[]>("/admin/incidents", token),
   settings: (token: string) =>
     request<AdminPlatformSettings>("/admin/settings", token),
+  // `from`/`to` en formato estricto `AAAA-MM-DD`, fechas de CALENDARIO DE
+  // LIMA (nunca UTC; corrección de ALTO-1 de CN-20260926-020): la API cubre
+  // desde las 00:00 de Lima de `from` hasta el final del día de `to`, hora
+  // Lima. Sin ninguno de los dos, cubre todo el historial.
+  commissions: (token: string, range: { from?: string; to?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (range.from) query.set("from", range.from);
+    if (range.to) query.set("to", range.to);
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return request<AdminCommissionsReport>(`/admin/commissions${suffix}`, token);
+  },
   updateSettings: (token: string, commissionBps: number) =>
     request<AdminPlatformSettings>("/admin/settings", token, {
       method: "PATCH",

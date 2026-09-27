@@ -6,6 +6,8 @@ import 'package:file_picker/file_picker.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/theme_mode_controller.dart';
 import '../auth/auth_repository.dart';
+import '../marketplace/marketplace_repository.dart';
+import '../marketplace/worker_payments_page.dart';
 import 'talent_profile_repository.dart';
 
 class ProfileHomePage extends StatefulWidget {
@@ -17,12 +19,19 @@ class ProfileHomePage extends StatefulWidget {
     this.authRepository,
     this.sessionToken,
     this.googleOnlyAccount = false,
+    this.marketplaceRepository,
     super.key,
   });
 
   final TalentProfileRepository talentProfileRepository;
   final bool showNavigation;
   final VoidCallback? onLogout;
+
+  /// Optional: when provided, this page shows a "Mis pagos" card that opens
+  /// `WorkerPaymentsPage` (Alcance D). Omitted in widget tests that build
+  /// `ProfileHomePage` in isolation, in which case the card is not rendered
+  /// (same convention as `authRepository`/`sessionToken` below).
+  final WorkerMarketplaceRepository? marketplaceRepository;
 
   /// Optional: when provided, this page shows a "Modo oscuro" toggle bound
   /// to it. Widget tests that build `ProfileHomePage` directly can omit it,
@@ -207,6 +216,7 @@ class _ProfileHomePageState extends State<ProfileHomePage> {
             authRepository: widget.authRepository,
             sessionToken: widget.sessionToken,
             googleOnlyAccount: widget.googleOnlyAccount,
+            marketplaceRepository: widget.marketplaceRepository,
             uploadingCv: _uploadingCv,
             onUploadCv: () => _uploadCv(data),
             uploadingPhoto: _uploadingPhoto,
@@ -297,6 +307,7 @@ class _ProfileContent extends StatelessWidget {
     this.authRepository,
     this.sessionToken,
     this.googleOnlyAccount = false,
+    this.marketplaceRepository,
   });
   final _ProfileScreenData data;
   final VoidCallback onEdit;
@@ -309,6 +320,7 @@ class _ProfileContent extends StatelessWidget {
   final AuthRepository? authRepository;
   final String? sessionToken;
   final bool googleOnlyAccount;
+  final WorkerMarketplaceRepository? marketplaceRepository;
 
   @override
   Widget build(BuildContext context) => CustomScrollView(
@@ -450,6 +462,17 @@ class _ProfileContent extends StatelessWidget {
                         subtitle: 'Idiomas que hablas',
                         child: _LanguagesDetail(profile: profile),
                       ),
+                      if (marketplaceRepository != null) ...[
+                        const SizedBox(height: 18),
+                        _ProfileCard(
+                          icon: Icons.payments_outlined,
+                          title: 'Mis pagos',
+                          subtitle: 'Lo que te pagaron y lo que sigue pendiente',
+                          child: _PaymentsDetail(
+                            repository: marketplaceRepository!,
+                          ),
+                        ),
+                      ],
                       if (authRepository != null && sessionToken != null) ...[
                         const SizedBox(height: 18),
                         _ProfileCard(
@@ -1147,6 +1170,38 @@ class _LanguagesDetail extends StatelessWidget {
               )
               .toList(),
         ),
+    ],
+  );
+}
+
+/// Cuerpo de la tarjeta "Mis pagos": solo un resumen y un botón que abre
+/// `WorkerPaymentsPage` (Alcance D) en una pantalla completa, igual que
+/// "Invitaciones" abre su propia página en vez de expandirse en esta
+/// tarjeta.
+class _PaymentsDetail extends StatelessWidget {
+  const _PaymentsDetail({required this.repository});
+  final WorkerMarketplaceRepository repository;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Expanded(
+        child: Text(
+          'Revisa el estado de cada pago y confirma la recepción cuando la '
+          'empresa te haya pagado por fuera de la app.',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+      ),
+      const SizedBox(width: 12),
+      OutlinedButton(
+        onPressed: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => WorkerPaymentsPage(repository: repository),
+          ),
+        ),
+        child: const Text('Ver mis pagos'),
+      ),
     ],
   );
 }

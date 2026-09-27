@@ -253,8 +253,18 @@ describe('the company lifecycle revalidates inside its transaction before writin
     expect(response.body).toMatchObject({ status: 'CANCELLED' });
     const shift = await verifier.shift.findUniqueOrThrow({ where: { id: setup.shiftId } });
     expect(shift.status, 'a cancelled shift must not be reopened by a stale lifecycle decision').toBe('CANCELLED');
-    expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: setup.assignmentId } })).status).toBe('CANCELLED');
-    expect(await systemEvents(setup.shiftId)).toBe(0);
+    const assignment = await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: setup.assignmentId } });
+    expect(assignment.status).toBe('CANCELLED');
+    // Corrección de MEDIO-1 (nuevo) de CN-20260926-022: `cancelShift` ahora
+    // resuelve el ciclo de vida (su propia llamada, sin pausa, corre
+    // completa mientras `plainApp` cancela) ANTES de decidir, así que la
+    // asignación vencida pasa primero por `NO_SHOW` (1 evento automático
+    // legítimo) y luego a `CANCELLED` con `closedWithoutPayment`. Antes de
+    // esta corrección, `cancelShift` nunca tocaba el ciclo de vida y este
+    // conteo era 0; ya no es el comportamiento correcto (dejaba la señal sin
+    // marcar, ver CN-20260926-022).
+    expect(assignment.closedWithoutPayment).toBe(true);
+    expect(await systemEvents(setup.shiftId)).toBe(1);
   });
 
   // El caso más grave del defecto (MEDIO-1 de CN-20260923-017): `resolve` como
@@ -295,7 +305,16 @@ describe('the company lifecycle revalidates inside its transaction before writin
     expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: setup.assignmentId } })).status).toBe('CANCELLED');
     expect(await verifier.shiftCancellation.count({ where: { shiftId: setup.shiftId, actorRole: 'BUSINESS' } })).toBe(1);
     expect(await verifier.shiftEvent.count({ where: { shiftId: setup.shiftId, type: 'COMPLETED' } })).toBe(0);
-    expect(await systemEvents(setup.shiftId), 'no automatic NO_SHOW transition may be recorded over the cancellation').toBe(0);
+    // Corrección de MEDIO-1 (nuevo) de CN-20260926-022: igual que en la
+    // prueba anterior, `cancelShift` (vía `plainApp`, sin pausa) ahora
+    // resuelve el ciclo de vida antes de decidir, así que SÍ queda un
+    // evento automático legítimo (la asignación pasó por `NO_SHOW` antes de
+    // `CANCELLED`) -era justamente la señal que antes se perdía si nadie
+    // abría el turno-. Lo que la prueba protege de verdad (que `resolve`
+    // pierda la carrera y no genere ningún pago ni reabra el turno) sigue
+    // intacto en las aserciones de arriba.
+    expect(await systemEvents(setup.shiftId)).toBe(1);
+    expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: setup.assignmentId } })).closedWithoutPayment).toBe(true);
   });
 
   it('two lifecycle resolutions that both read ASSIGNED before either writes record a single NO_SHOW transition', async () => {

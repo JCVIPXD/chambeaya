@@ -24,15 +24,35 @@ const emptyOverview = {
   pendingApplications: 0,
 };
 
+// `GET /api/admin/commissions` (Alcance D). El panel siempre lo llama en el
+// resumen (mes en curso) y en la sección "Comisiones" (rango del filtro),
+// sin importar el spec: por defecto, un reporte vacío pero con la forma
+// correcta. Un test puede sobreescribirlo con `test.use({ commissionsReport: { ... } })`.
+export type AdminCommissionsReport = {
+  period: { from: string | null; to: string | null; fromUtc: string | null; toUtcExclusive: string | null };
+  totals: { toInvoiceCents: number; toInvoiceTaxCents: number; collectedCents: number; pendingCollectionCents: number; payments: number; pendingResolution: number };
+  companies: {
+    companyId: string; name: string; ruc: string;
+    toInvoiceCents: number; toInvoiceTaxCents: number; collectedCents: number; pendingCollectionCents: number;
+    payments: number; closedWithoutPayment: number; pendingResolution: number;
+  }[];
+};
+export const emptyCommissionsReport: AdminCommissionsReport = {
+  period: { from: null, to: null, fromUtc: null, toUtcExclusive: null },
+  totals: { toInvoiceCents: 0, toInvoiceTaxCents: 0, collectedCents: 0, pendingCollectionCents: 0, payments: 0, pendingResolution: 0 },
+  companies: [],
+};
+
 type ApiCall = { method: string; path: string; authorization: string | undefined };
 type BrowserApi = { calls: ApiCall[] };
 
-export const test = base.extend<{ browserApi: BrowserApi; deleteSessionFails: boolean }>({
+export const test = base.extend<{ browserApi: BrowserApi; deleteSessionFails: boolean; commissionsReport: AdminCommissionsReport }>({
   // Override per file/describe with `test.use({ deleteSessionFails: true })`
   // to simulate `DELETE /api/auth/session` failing (CN-20260926-008, BAJO-5:
   // "Salir" debe limpiar el estado local igual aunque la API falle).
   deleteSessionFails: [false, { option: true }],
-  browserApi: [async ({ context, baseURL, deleteSessionFails }, use) => {
+  commissionsReport: [emptyCommissionsReport, { option: true }],
+  browserApi: [async ({ context, baseURL, deleteSessionFails, commissionsReport }, use) => {
     const calls: ApiCall[] = [];
     const unexpected: string[] = [];
     const pageErrors: string[] = [];
@@ -134,6 +154,7 @@ export const test = base.extend<{ browserApi: BrowserApi; deleteSessionFails: bo
         '/api/admin/workers': [],
         '/api/admin/incidents': [],
         '/api/admin/settings': platformSettings,
+        '/api/admin/commissions': commissionsReport,
       };
       if (method === 'GET' && Object.hasOwn(data, path)) {
         await route.fulfill({ json: data[path] });

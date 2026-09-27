@@ -82,16 +82,6 @@ export type ConversationInput = {
   status?: ConversationStatus;
 };
 
-export type PaymentInput = {
-  reference: string;
-  description: string;
-  amountCents: number;
-  workerCount?: number;
-  status?: PaymentStatus;
-  dueAt?: Date | null;
-  processedAt?: Date | null;
-};
-
 export type ApplicationDecision = 'ACCEPTED' | 'REJECTED';
 export type PendingApplicationsSummary = { count: number; shiftIds: string[] };
 export type AssignmentResolutionOutcome = 'COMPLETED' | 'CANCELLED';
@@ -99,6 +89,36 @@ export type AssignmentResolutionOutcome = 'COMPLETED' | 'CANCELLED';
 export class BusinessRecordNotFoundError extends Error {}
 export class BusinessValidationError extends Error {}
 export class BusinessForbiddenError extends Error {}
+
+/**
+ * `POST /business/payments/:id/mark-paid` (Alcance D) contra un pago que
+ * existe y es de la empresa, pero no está en condición de marcarse pagado:
+ * ya no es `PENDING` (otra llamada ganó la carrera, o está `PROCESSED`/
+ * `CANCELLED`), o su `provider` no es `'manual'`/`'legacy'` (una pasarela,
+ * Alcance E, tiene su propio flujo de confirmación vía webhook, nunca este
+ * endpoint manual). 409, nunca 400: el `id` es válido y de esta empresa,
+ * solo que la transición pedida ya no aplica.
+ */
+export class PaymentNotPayableError extends Error {}
+
+/**
+ * "Cerrada sin pago" (Alcance D; corrección de MEDIO-1 de `CN-20260926-020`):
+ * una asignación que llegó a `NO_SHOW` o `ABANDONED` (el trabajador se
+ * presentó o no) y que una decisión de la empresa cerró sin generar
+ * `Payment`. Nunca se detecta por texto libre (`ShiftEvent.detail`): un
+ * motivo de `cancelShift` que casualmente empezara con cierto prefijo podía
+ * falsear el conteo, y una `NO_SHOW`/`ABANDONED` nunca resuelta lo evadía
+ * sin dejar ningún rastro. La señal es estructurada, en `ShiftAssignment`:
+ * `closedWithoutPayment`/`closedWithoutPaymentAt`/`closedWithoutPaymentById`,
+ * escritos en los dos únicos caminos que la producen -`resolveAssignment`
+ * con `outcome: 'CANCELLED'` (abajo) y `cancelShift` arrastrando una
+ * asignación `NO_SHOW` (más abajo)-, nunca en una `ASSIGNED` simple (jamás
+ * llegó a "presentarse o no", cancelar un turno futuro no es evasión) ni en
+ * una ya `CANCELLED`/`COMPLETED`. `GET /api/admin/commissions` los cuenta
+ * por empresa junto con `pendingResolution` (`NO_SHOW`/`ABANDONED` que la
+ * empresa todavía no resolvió), para que dejarlas sin resolver no las
+ * esconda del reporte.
+ */
 
 /**
  * BAJO-4 de CN-20260926-012: la vista previa que la empresa vio antes de
@@ -147,9 +167,14 @@ export interface BusinessOperations {
   deleteMessage(session: AuthSession, conversationId: string, messageId: string): Promise<void>;
   listPayments(session: AuthSession): Promise<unknown>;
   getPayment(session: AuthSession, id: string): Promise<unknown>;
-  createPayment(session: AuthSession, input: PaymentInput): Promise<unknown>;
-  updatePayment(session: AuthSession, id: string, input: Partial<PaymentInput>): Promise<unknown>;
-  deletePayment(session: AuthSession, id: string): Promise<void>;
+  /**
+   * Único endpoint de escritura que le queda al CRUD de pagos (Alcance D
+   * retira `POST`/`PATCH`/`DELETE`: la empresa ya no puede inventar,
+   * alterar montos ni borrar pagos). Solo transiciona un pago `PENDING` con
+   * `provider` `'manual'` o `'legacy'` a `PROCESSED`; nunca toca ningún
+   * monto.
+   */
+  markPaymentPaid(session: AuthSession, id: string): Promise<unknown>;
 }
 
 export class DatabaseBusinessService implements BusinessOperations {
@@ -248,6 +273,19 @@ export class DatabaseBusinessService implements BusinessOperations {
     // Solo comprueba la propiedad (404 si el turno no es de la empresa); el
     // estado y las asignaciones se leen DENTRO de la transacción reintentable.
     const owned = await this.ownedShift(session, id);
+    // Corrección de MEDIO-1 (nuevo) de CN-20260926-022: sin esto, una
+    // asignación que ya venció su ventana de check-in pero seguía `ASSIGNED`
+    // en la base (nadie había abierto las postulaciones ni `resolve` para
+    // persistir el `NO_SHOW`) pasaba a `CANCELLED` por el `updateMany` de
+    // `ASSIGNED` de abajo, SIN la señal `closedWithoutPayment` -era otra vía
+    // para ocultar un cierre sin pago con solo no abrir el panel-. Mismo
+    // patrón que ya usa `resolveAssignment` (ver esa función): se persiste el
+    // ciclo de vida en su propia transacción, ANTES de la de `cancelShift`,
+    // para que la transacción de abajo relea el estado ya correcto
+    // (`NO_SHOW`/`ABANDONED`) y aplique el `updateMany` que corresponde. Su
+    // resultado no se usa como base de nada: `owned` sigue siendo solo una
+    // lectura previa de propiedad.
+    await this.resolveShiftAssignmentsLifecycle(owned);
     // `Serializable` + reintento (BAJO-1 y BAJO-2 de CN-20260920-004): antes esta
     // transacción no tenía aislamiento y los guards se evaluaban fuera de ella,
     // así que un `resolveAssignment` concurrente (que también es Serializable)
@@ -276,7 +314,19 @@ export class DatabaseBusinessService implements BusinessOperations {
       // PostgreSQL detectaba un interbloqueo (`40P01`) tras 1 s y una de las dos
       // llamadas respondía `500`. Ver `docs/reference/api.md`, "Orden de bloqueo".
       await tx.shiftApplication.updateMany({ where: { shiftId: shift.id, status: { in: ['PENDING', 'ACCEPTED'] } }, data: { status: 'CANCELLED' } });
-      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: { in: ['ASSIGNED', 'NO_SHOW'] } }, data: { status: 'CANCELLED' } });
+      // Separado en dos `updateMany` (antes uno solo): una `NO_SHOW` sí
+      // "se presentó o no" (llegó a vencer su ventana de check-in) y esta
+      // cancelación la cierra sin pago por decisión de la empresa, así que
+      // cuenta como `closedWithoutPayment` (corrección de MEDIO-1 de
+      // CN-20260926-020, "ocultar, segunda vía"). Una `ASSIGNED` simple
+      // nunca llegó a ese punto -cancelar un turno futuro no es evasión- y
+      // no lleva la señal.
+      const cancelledAt = new Date();
+      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: 'ASSIGNED' }, data: { status: 'CANCELLED' } });
+      await tx.shiftAssignment.updateMany({
+        where: { shiftId: shift.id, status: 'NO_SHOW' },
+        data: { status: 'CANCELLED', closedWithoutPayment: true, closedWithoutPaymentAt: cancelledAt, closedWithoutPaymentById: session.userId },
+      });
       await tx.shiftCancellation.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', reason: reason.trim() } });
       await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'CANCELLED', detail: reason.trim() } });
       return tx.shift.update({ where: { id: shift.id }, data: { status: 'CANCELLED', confirmedWorkers: 0 }, include: { company: true } });
@@ -493,6 +543,12 @@ export class DatabaseBusinessService implements BusinessOperations {
         data: {
           status: outcome,
           completedAt: outcome === 'COMPLETED' ? completedAt : assignment.completedAt,
+          // Señal estructurada de "cerrada sin pago" (ver el comentario
+          // arriba de este archivo): nunca se lee para nada más que este
+          // `if`, y nunca depende de `reason` ni de ningún texto.
+          ...(outcome === 'CANCELLED'
+            ? { closedWithoutPayment: true, closedWithoutPaymentAt: completedAt, closedWithoutPaymentById: session.userId }
+            : {}),
         },
       });
       const sourceLabel = sourceStatus === 'ABANDONED' ? 'abandonada (check-in sin check-out)' : 'no-show (sin check-in a tiempo)';
@@ -724,60 +780,51 @@ export class DatabaseBusinessService implements BusinessOperations {
     return payment;
   }
 
-  async createPayment(session: AuthSession, input: PaymentInput) {
+  /**
+   * Alcance D: único escritor de `Payment` que le queda a la empresa (el
+   * CRUD manual -crear/editar/borrar- se retira: inflaba montos y falseaba
+   * el registro de comisión). Solo transiciona `PENDING` -> `PROCESSED`
+   * para `provider` `'manual'` (nacido de `checkOut`/`resolveAssignment`) o
+   * `'legacy'` (creado con el CRUD antes de este cierre, o backfill de un
+   * pago sin `assignmentId`): en producción puede haber pagos `legacy`
+   * todavía `PENDING`, y marcarlos no altera ningún monto (comisión e IGV
+   * ya están en 0 desde que se crearon), así que es seguro seguir
+   * permitiéndolo. Un pago de pasarela (Alcance E) nunca es `'manual'` ni
+   * `'legacy'`, así que este endpoint jamás lo toca: se confirma solo por
+   * su propio webhook.
+   *
+   * Atómico: el `updateMany` de abajo es el único guardián de la carrera
+   * (dos llamadas simultáneas, o esta contra un cambio de estado
+   * concurrente). Bajo `READ COMMITTED` (el nivel por defecto, sin falta de
+   * `Serializable`), Postgres serializa las dos escrituras sobre la misma
+   * fila: la segunda relee el `WHERE` tras el commit de la primera y afecta
+   * 0 filas, así que a lo sumo una transacción ve `count === 1` y crea el
+   * `ShiftEvent`. Nunca se lee el estado fuera de la transacción para
+   * decidir: eso dejaría una ventana donde dos lecturas "PENDING"
+   * simultáneas pasan el guard.
+   */
+  async markPaymentPaid(session: AuthSession, id: string) {
     const company = await this.companyFor(session);
-    // Un pago creado a mano con este CRUD (retirado en el Alcance D) nunca
-    // nace de una asignación ni de una pasarela: siempre `provider: 'legacy'`,
-    // con comisión e IGV en 0 (la empresa no le debe ninguna comisión a
-    // Chambeaya por este registro) y `totalCents === amountCents`.
-    return this.prisma.payment.create({
-      data: {
-        ...input,
-        companyId: company.id,
-        provider: 'legacy',
-        commissionBps: 0,
-        commissionCents: 0,
-        taxBps: 0,
-        taxCents: 0,
-        totalCents: input.amountCents,
-        processedAt: input.status === PaymentStatus.PROCESSED ? input.processedAt ?? new Date() : input.processedAt,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.payment.updateMany({
+        where: { id, companyId: company.id, status: PaymentStatus.PENDING, provider: { in: ['manual', 'legacy'] } },
+        data: { status: PaymentStatus.PROCESSED, processedAt: new Date() },
+      });
+      if (updated.count === 0) {
+        // Distingue 404 (no existe o es de otra empresa) de 409 (existe,
+        // pero ya no es marcable: perdió la carrera, ya está
+        // PROCESSED/CANCELLED, o es de una pasarela). La misma transacción
+        // ve un estado consistente con el `updateMany` que acaba de fallar.
+        const existing = await tx.payment.findFirst({ where: { id, companyId: company.id }, select: { id: true } });
+        if (!existing) throw new BusinessRecordNotFoundError('PAYMENT_NOT_FOUND');
+        throw new PaymentNotPayableError('PAYMENT_NOT_PAYABLE');
+      }
+      const payment = await tx.payment.findUniqueOrThrow({ where: { id } });
+      if (payment.shiftId) {
+        await tx.shiftEvent.create({ data: { shiftId: payment.shiftId, actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: payment.id } });
+      }
+      return payment;
     });
-  }
-
-  async updatePayment(session: AuthSession, id: string, input: Partial<PaymentInput>) {
-    const payment = await this.getPayment(session, id) as {
-      id: string; status: PaymentStatus; assignmentId: string | null; shiftId: string | null;
-      amountCents: number; commissionBps: number; taxBps: number;
-    };
-    const nextStatus = input.status ?? payment.status;
-    // Si cambia `amountCents`, `totalCents` se recalcula con la comisión/IGV
-    // YA FIJADOS de este pago (nunca se reinterpretan como "nuevo turno"):
-    // para un pago `legacy` (comisión 0) esto mantiene `totalCents ===
-    // amountCents`; para uno `manual` con comisión ya fijada, mantiene el
-    // total coherente con el monto nuevo.
-    const amounts = input.amountCents !== undefined
-      ? buildPaymentAmounts(input.amountCents, payment.commissionBps, payment.taxBps)
-      : null;
-    const updated = await this.prisma.payment.update({
-      where: { id: payment.id },
-      data: {
-        ...input,
-        ...(amounts ? { commissionCents: amounts.commissionCents, taxCents: amounts.taxCents, totalCents: amounts.totalCents } : {}),
-        processedAt: nextStatus === PaymentStatus.PROCESSED
-          ? input.processedAt ?? new Date()
-          : input.processedAt ?? null,
-      },
-    });
-    if (nextStatus === PaymentStatus.PROCESSED && payment.assignmentId && payment.shiftId) {
-      await this.prisma.shiftEvent.create({ data: { shiftId: payment.shiftId, actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: payment.id } });
-    }
-    return updated;
-  }
-
-  async deletePayment(session: AuthSession, id: string) {
-    const payment = await this.getPayment(session, id) as { id: string };
-    await this.prisma.payment.delete({ where: { id: payment.id } });
   }
 
   private async companyFor(session: AuthSession) {

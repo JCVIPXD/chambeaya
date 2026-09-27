@@ -54,6 +54,290 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260926-024 — Reauditoría de `CN-20260926-023` y cierre del Alcance D (`019`, `021`, `023`)
+
+- Fecha: 2026-09-27 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-019` (implementación), `CN-20260926-021` y `CN-20260926-023` (correcciones), y las auditorías `020` y `022`. Sin comitear, sobre HEAD `0cc01dd`. **Cierra el Alcance D** (registro confiable y modo manual) del plan `dynamic-prancing-bear.md`.
+- Alcance: verificación de MEDIO-1 y BAJO-1 de `022` y de las reservas del coordinador (transacción aparte en `cancelShift`, prefiltro de 60 minutos, pruebas ajustadas, rate limit y fallos en paralelo), más la regresión completa.
+- Archivos: revisados los de `023`. No se modificó código ni documentación; `docs/reference/api.md` ya describe las fechas reales y `pendingResolution`.
+- Hallazgos: ninguno crítico, alto, medio ni bajo abierto.
+  - MEDIO-1 de `022`, cerrado. Probado contra Postgres:
+    - Una `NO_SHOW` no persistida (sigue `ASSIGNED` con la ventana vencida) ahora cuenta en `pendingResolution` (0→1).
+    - Tras `cancelShift` (200) queda `CANCELLED` con `closedWithoutPayment=true` (`closed` 0→1, `pending` 1→0).
+    - También cuentan como pendientes, sin tocarse, una `ABANDONED` no persistida y un turno corto (30 min) sin check-in.
+    - Una asignación tardía todavía dentro de su gracia no cuenta, como corresponde.
+  - Transacción aparte en `cancelShift` (reserva 1): se acepta.
+    - Un check-in entre ambas transacciones lo rechaza el guard `checkedIn > 0` dentro de la transacción serializable (409).
+    - Un `resolve` concurrente lo serializa `Serializable` con reintento; en `022` la carrera ya quedaba consistente.
+    - Lo único que difiere de una sola transacción es el instante "ahora" con que se evalúa la ventana (milisegundos). Una asignación cuya ventana vence justo en ese intervalo equivale a haberla cancelado un instante antes del vencimiento, no a un ocultamiento.
+    - Seis intentos en el borde (vencimiento de 40 a 190 ms después): ninguna mal clasificada.
+  - Prefiltro de 60 minutos (reserva 2): coherente con `checkInWindowViolation`. `closesAt` es siempre al menos `startsAt + CHECK_IN_LATE_LIMIT_MS` (el `max` con la gracia tardía nunca lo adelanta) y `ABANDONED` exige `now > endsAt + 60 min > startsAt + 60 min`. Casos límite verificados: 61 minutos desde el inicio, turno de 30 minutos, asignación tardía y `ABANDONED`.
+  - Pruebas ajustadas (reserva 3): en `business-lifecycle-revalidation.integration.test.ts` los conteos pasan de 0 a exactamente 1 evento automático, y se agregó `closedWithoutPayment=true`. El conteo sigue siendo exacto: un `NO_SHOW` registrado después de la cancelación daría 2 y fallaría. Las aserciones de "sin pago y sin reapertura" siguen intactas.
+  - `rateLimit: false` (reserva 4): es el patrón que ya usan otras 8 suites de integración. El limitador de autenticación tiene su propia cobertura; no oculta nada del alcance.
+  - Fallos en paralelo (reserva 5): Playwright rápido, dos corridas aisladas, 147 pasadas y 1 omitida en ambas; `e2e-real` aislado 3/3. Los 14 fallos solo aparecieron corriendo suites a la vez: contención de recursos (dos builds y servidores de Next más Postgres), no inestabilidad del panel.
+  - BAJO-1 de `022`, cerrado (reserva 6):
+    - Aceptadas: `2028-02-29` y `2026-12-31`.
+    - `400 INVALID_CALENDAR_DATE`: `2027-02-29`, `2026-02-30`, `2026-13-01`, `2026-00-10`, `2026-04-31` y `0000-01-01`.
+    - `400 INVALID_DATE_FORMAT`: `2026-9-1`.
+- Validaciones (reales; contenedor propio `cn-audit024-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `tsc` sin errores. `npm test`: 24 archivos, 482/482. Integración: 14 archivos, 111/111.
+  - Sondeo temporal (fechas, señal, prefiltro y borde entre transacciones): 2/2 ejecutados; archivo eliminado.
+  - Web: `tsc` sin errores. Playwright rápido: 147 pasadas y 1 omitida, en dos corridas. `e2e-real`: 3/3.
+  - Flutter: sin cambios desde `020` (161/161 y `analyze` limpio en 3.44.0).
+  - Limpieza: se eliminó el contenedor y no quedaron procesos. `apps/web/next-env.d.ts` quedó restaurado.
+- Resumen del Alcance D validado en `020`, `022` y `024`:
+  - CRUD retirado; `mark-paid` atómico y restringido a la empresa.
+  - Reporte con fechas de calendario de Lima.
+  - `closedWithoutPayment` estructurado, no falseable, y `pendingResolution` efectivo.
+  - El trabajador no recibe comisión; "Mis pagos" en Flutter.
+  - Recorridos reales en `/empresas`.
+- Riesgos residuales (no bloquean):
+  - El reporte no pagina.
+  - Los cierres anteriores a la migración `20260927005242` no cuentan (sin backfill).
+  - "Por facturar" incluye pagos `manual` todavía `PENDING` (decisión documentada).
+  - Flutter no se probó en un dispositivo.
+  - `e2e-real` no corre en CI.
+  - Correr varias suites de navegador a la vez produce fallos por contención; deben ejecutarse por separado.
+- Siguiente paso: commit local del Alcance D según el plan (sin push sin confirmación del usuario); luego, Alcance E.
+
+### CN-20260926-023 — Corrección de `CN-20260926-021` (hallazgos de `CN-20260926-022`: `cancelShift` resuelve el ciclo de vida antes de decidir, `pendingResolution` sin depender de lecturas previas, fechas de calendario reales)
+
+- Fecha: 2026-09-27 05:04 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-022` (auditoría, `REQUIERE_CAMBIOS`: 1 medio nuevo, 1 bajo, sobre `CN-20260926-021`; cerró ALTO-1 y la mayor parte de MEDIO-1). Sin comitear.
+- Alcance:
+  - **MEDIO (nuevo): `cancelShift` no resolvía el ciclo de vida antes de cancelar.** `business.service.ts#cancelShift` ahora llama a `this.resolveShiftAssignmentsLifecycle(owned)` (mismo mecanismo que ya usan `resolveAssignment` y la lectura de postulaciones) en su propia transacción, ANTES de abrir la transacción `Serializable` de la cancelación. Así, una asignación que ya venció su ventana de check-in pero seguía `ASSIGNED` en la base (nadie había abierto el panel ni llamado a `resolve`) se persiste primero como `NO_SHOW`/`ABANDONED`, y la transacción de `cancelShift` -que relee después- la trata como `NO_SHOW` y le marca `closedWithoutPayment`, en vez de arrastrarla silenciosamente por la vía de `ASSIGNED` (la "segunda vía para ocultar" que seguía abierta).
+  - **`pendingResolution` no puede depender de una lectura previa.** `admin.routes.ts`: el reporte nunca escribe (evitar abrir una transacción `Serializable` por turno candidato en una ruta de solo lectura, por rendimiento y por concurrencia con `resolveAssignment`/`cancelShift`). En vez de eso, la consulta trae también las `ASSIGNED` cuyo turno empezó hace más de `CHECK_IN_LATE_LIMIT_MS` (60 min, prefiltro de rendimiento: ninguna asignación puede calificar antes de eso) y aplica la misma función pura `resolveAssignmentLifecycle` -sin persistir nada- para decidir si cuenta, junto con las `NO_SHOW`/`ABANDONED` ya persistidas.
+  - **Revisión de otros caminos que tocan asignaciones sin resolver el ciclo de vida antes (pedida por la auditoría):** cancelación del trabajador (`marketplace.service.ts#cancelAssignment`), edición del turno (`updateShift`) y "Rescate" (`rescueActive`) no afectan dinero por esta vía y quedan documentados en el código (comentario en `cancelAssignment`) y en `docs/reference/api.md`, sin cambiar su comportamiento: la cancelación del trabajador es una decisión suya, no de la empresa, y de por sí `NO_SHOW`/`ABANDONED` nunca generan un `Payment` automáticamente; `updateShift`/`rescueActive` no tocan ninguna `ShiftAssignment`. `mark-paid` solo escribe `Payment`, tampoco aplica.
+  - **BAJO (fechas imposibles).** `admin.routes.ts`: `isRealCalendarDate` reconstruye la fecha en UTC a partir de año/mes/día y compara los tres componentes contra lo recibido, agregado como `.refine()` sobre el esquema `dayOnly` existente. `"2026-02-30"` y `"2026-13-01"` (y `"2026-00-10"`, `"2026-01-32"`) responden ahora `400 INVALID_INPUT` con `"INVALID_CALENDAR_DATE"` en `issues`; `"2024-02-29"` (bisiesto real) se sigue aceptando.
+  - **Efecto colateral esperado, no una regresión:** dos pruebas de integración preexistentes (`business-lifecycle-revalidation.integration.test.ts`) asumían que `cancelShift` nunca tocaba el ciclo de vida y afirmaban `0` eventos automáticos `SYSTEM` en dos escenarios de carrera; con la corrección, esos escenarios ahora sí producen 1 evento automático legítimo (la asignación pasa por `NO_SHOW` antes de `CANCELLED`) y quedan con `closedWithoutPayment: true`. Se actualizaron esas dos aserciones (con comentario explicando el cambio); lo que esas pruebas protegen de verdad -que `resolve` pierda la carrera sin generar pago ni reabrir el turno- sigue intacto.
+- Archivos:
+  - API: `apps/api/src/modules/admin/admin.routes.ts`, `apps/api/src/modules/business/business.service.ts`, `apps/api/src/modules/marketplace/marketplace.service.ts` (solo comentario).
+  - Pruebas API: `apps/api/tests/admin.routes.test.ts` (mock de `shiftAssignment.findMany` actualizado al nuevo `where.OR`; 3 casos nuevos: `ASSIGNED` vencida sin persistir, y las fechas imposibles/bisiesto), `apps/api/tests/business.service.test.ts` (los dobles de `cancelShift` necesitan `shiftAssignment.findMany` en el prisma de nivel superior, no solo dentro de `tx`), `apps/api/tests/integration/payment-commission.integration.test.ts` (2 casos nuevos: `ASSIGNED` vencida sin tocar antes cuenta como `pendingResolution`, y la misma cancelada con `cancelShift` sin abrir antes el panel marca `closedWithoutPayment`; además `rateLimit: false` en la construcción de `createApp`, porque las pruebas nuevas sumadas a las ya existentes de este archivo superan el límite de intentos de `/api/auth/*`, igual que el resto de `apps/api/tests/integration`), `apps/api/tests/integration/business-lifecycle-revalidation.integration.test.ts` (2 aserciones actualizadas, ver arriba).
+  - Docs: `docs/reference/api.md` (`pendingResolution` perezoso, `cancelShift` resuelve el ciclo de vida, validación de fecha real, revisión de los otros caminos).
+- Decisiones:
+  - `pendingResolution` calcula en memoria (función pura, sin persistir) en vez de forzar la resolución y escritura del ciclo de vida de cada turno candidato antes de contar: evita que una ruta de reporte (potencialmente golpeada seguido por el panel de administración) abra una transacción `Serializable` por turno, compitiendo con `resolveAssignment`/`cancelShift` reales.
+  - El prefiltro de 60 minutos (`CHECK_IN_LATE_LIMIT_MS`) es el límite más temprano en que cualquier `ASSIGNED` puede volverse `NO_SHOW`/`ABANDONED` (ver `checkInWindowViolation`): filtrar por `shift.startsAt` antes de traer las filas es seguro (no descarta ningún candidato real) y evita traer todas las `ASSIGNED` de turnos futuros o recién empezados.
+  - Las dos aserciones de `business-lifecycle-revalidation.integration.test.ts` se corrigieron a `1` en vez de relajarlas a "mayor o igual": el número exacto de eventos automáticos en esos escenarios deterministas es una propiedad real del sistema, no una casualidad del entorno de prueba.
+- Validaciones (reales; contenedores Postgres 16-alpine propios y descartables, eliminados al terminar; `chambeaya-stable-postgres-data` nunca se tocó):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **482/482**.
+  - API integración (`cn-fix2-pg`, puerto 5593): 14 archivos, **111/111**, incluidos los dos escenarios exactos que pidió la auditoría (`ASSIGNED` con ventana vencida y `cancelShift` después, que cuenta como cerrada sin pago; la misma sin cancelar, que cuenta como pendiente) y las dos pruebas de `business-lifecycle-revalidation` corregidas.
+  - Web: `npx tsc --noEmit` → 0 errores. `e2e-real` (`cn-e2ereal-fix2-pg`, puerto 5592): **3/3**. Playwright rápido: la primera corrida (ejecutada en paralelo con `e2e-real`, compitiendo por CPU/puertos) dejó 14 fallas de tiempo/render en `chromium-mobile`, todas en specs sin relación con este cambio (`membership`, `render-cost`, `shift-publish-preview`, `talent-invite`, `talent-load-more`, un caso de `change-password`); repetidas en aislado (`--project=chromium-mobile` y `--project=chromium-desktop`, sin nada más corriendo a la vez): **147/147** (1 omitida, preexistente), sin ninguna falla.
+  - `apps/web/next-env.d.ts` revertido; ningún contenedor propio ni proceso quedó corriendo al terminar.
+- Riesgos:
+  - Ninguna migración nueva en esta corrección (los dos hallazgos eran de lógica, no de esquema); la migración `20260927005242` sigue vigente sin cambios.
+  - Mismos riesgos residuales ya aceptados en `CN-20260926-021`/`022` (el reporte no pagina; sin backfill histórico de `closedWithoutPayment`; Flutter no se probó en un dispositivo real; `e2e-real` no corre en CI).
+  - La suite Playwright rápida es sensible a correr en paralelo con otras cargas pesadas (`e2e-real`, contenedores Postgres) en esta máquina: en aislado es estable; no se investigó más a fondo porque no es un defecto de este cambio.
+- Siguiente paso: reauditoría de `auditor-opus` sobre este ID.
+
+### CN-20260926-022 — Reauditoría de `CN-20260926-021` (corrección del Alcance D, `019`)
+
+- Fecha: 2026-09-26 23:50 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-019` (implementación), `CN-20260926-020` (auditoría) y `CN-20260926-021` (corrección). Sin comitear, sobre HEAD `0cc01dd`. El Alcance D **no** queda cerrado.
+- Alcance:
+  - Límites de fecha del reporte contra Postgres.
+  - La señal estructurada `closedWithoutPayment` en todos sus caminos, `pendingResolution` y la concurrencia de `cancelShift` contra `resolve`.
+  - La migración `20260927005242` sobre una base vacía y sobre una con datos.
+  - Regresión de la API y la web, `e2e-real` y el navegador.
+- Archivos: revisados los de `021`. No se modificó código ni documentación.
+- Hallazgos de `020`:
+  - ALTO-1, cerrado. Una sola conversión (`limaDayStartUtc`/`limaNextDayStartUtc`, `admin.routes.ts:63-71`), sin offsets repetidos; el panel usa `limaTodayIso()` con `America/Lima`. Contra Postgres, cada período incluyó exactamente lo esperado:
+
+    | Período | Pagos incluidos |
+    | --- | --- |
+    | Agosto | 00:00:00 del 01/08; 10:00, 19:00, 20:00 y 23:59:59 del 31/08 (5) |
+    | Solo el 31/07 | 23:59:59 del 31/07 (1) |
+    | Solo el 01/09 | 00:00:00 del 01/09 (1) |
+    | 31/12/2026 y 01/01/2027 (cambio de año) | 1 en cada día |
+
+    En el navegador (build `/empresas`), un pago creado a las 23:42 hora Lima del 26/09 (04:42 UTC del 27/09) aparece en "mes en curso" y en Comisiones: S/ 10.00 más IGV S/ 1.80.
+  - MEDIO-1, cerrado en parte:
+    - Un motivo falso en `cancelShift` ya no cuenta; tampoco la cancelación de un turno futuro.
+    - Cuentan, con conteo verificado: `NO_SHOW` resuelta como `CANCELLED`, `ABANDONED` resuelta como `CANCELLED` y `NO_SHOW` persistida y luego arrastrada por `cancelShift`.
+    - `pendingResolution` sube y baja correctamente con `NO_SHOW` y `ABANDONED` persistidas.
+    - Con `cancelShift` y `resolve(COMPLETED)` concurrentes (200/400), el estado quedó consistente: `CANCELLED` con la señal y sin pago.
+    - Queda el caso de MEDIO-1 nuevo.
+- Hallazgos nuevos:
+  - Críticos y altos: ninguno.
+  - MEDIO-1 (la señal se sigue pudiendo ocultar cuando el `NO_SHOW` aún no se persistió).
+    - `cancelShift` (`apps/api/src/modules/business/business.service.ts:271-321`) no ejecuta `resolveShiftAssignmentsLifecycle` antes de cancelar. `listShifts` tampoco lo ejecuta, y el `NO_SHOW` es perezoso.
+    - Una asignación que ya perdió su ventana de check-in pero nadie abrió sigue `ASSIGNED`. `cancelShift` la pasa a `CANCELLED` sin la señal (`:313`), y mientras tanto `pendingResolution` tampoco la cuenta (solo lee el estado persistido, `admin.routes.ts`).
+    - Reproducido: la asignación seguía `ASSIGNED` con la ventana vencida y `pending=0`; tras `cancelShift` (200) quedó `CANCELLED`, `closedWithoutPayment=false`, y el conteo siguió en 0.
+    - Es justo la "segunda vía para ocultar" de `020`, que sigue abierta si la empresa no abre las postulaciones.
+    - Corrección: resolver el ciclo de vida dentro de la transacción de `cancelShift` antes de los `updateMany`, o marcar la señal para toda `ASSIGNED` cuyo check-in ya venció. Además, que `pendingResolution` cuente también las `ASSIGNED` con ventana vencida, o que el reporte ejecute antes la resolución del ciclo de vida. Agregar una prueba de este camino.
+  - BAJO-1 (fechas imposibles aceptadas). La expresión regular admite `2026-02-30`, que responde 200 (Date lo corre al 02/03 en silencio), y `2026-13-01`, que responde 500 por `Invalid Date` en Prisma. Validar que la fecha exista y responder 400. El panel envía fechas válidas, así que el impacto es menor.
+- Migración `20260927005242`:
+  - Sobre una base con datos (turno, asignación y 4 pagos), la asignación quedó con `closedWithoutPayment=false` y `closedWithoutPaymentAt` NULL.
+  - También se aplicó con `migrate deploy` sobre una base vacía, `chambeaya_test` y la base de la interfaz.
+  - `migrate diff` sin divergencia en la base vacía y en la de datos.
+  - Es segura para producción: `ADD COLUMN` con un valor por defecto constante, un índice y una FK nullable con `SET NULL`.
+  - Sin backfill (declarado): los cierres anteriores no cuentan.
+- Documentación: no se modificó; `docs/reference/api.md` describe la conversión Lima y la señal nueva. El caso de MEDIO-1 debe documentarse con su corrección.
+- Validaciones (reales; contenedor propio `cn-audit022-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `tsc` sin errores. `npm test`: 24 archivos, 476/476. Integración: 14 archivos, 109/109.
+  - Sondeo temporal de fechas y señal: 2/2 ejecutados; archivo eliminado.
+  - Web: `tsc` sin errores. Playwright: 147 pasadas y 1 omitida. `e2e-real`: 3/3.
+  - Navegador: ver ALTO-1. La autenticación se hizo por HTTP.
+  - Limpieza: se eliminaron el contenedor y los procesos propios. `apps/web/next-env.d.ts` quedó restaurado.
+- Riesgos residuales: el reporte no pagina; los cierres anteriores a la migración no cuentan (sin backfill); Flutter no se probó en un dispositivo; `e2e-real` no corre en CI.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 y BAJO-1. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-021 — Corrección de `CN-20260926-019` (hallazgos de `CN-20260926-020`: fechas de Lima en el reporte de comisiones, señal estructurada para `closedWithoutPayment`)
+
+- Fecha: 2026-09-27 04:31 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-020` (auditoría, `REQUIERE_CAMBIOS`: 1 alto, 1 medio, sobre `CN-20260926-019`). Sin comitear.
+- Alcance: los dos hallazgos de `CN-20260926-020`.
+  - **ALTO-1 (fechas de calendario, no UTC).** `admin.routes.ts`: `from`/`to` ahora se validan estrictamente como `"AAAA-MM-DD"` (400 `INVALID_INPUT` para cualquier otro formato, incluida una fecha-hora completa: se retiró la ambigüedad en vez de documentarla) y se convierten con dos funciones puras (`limaDayStartUtc`/`limaNextDayStartUtc`, offset explícito `-05:00`, Perú no tiene horario de verano): `from` es `gte` la medianoche de Lima de ese día; `to` es `lt` (exclusivo, nunca `lte`) la medianoche de Lima del día SIGUIENTE. La respuesta agrega `period.fromUtc`/`period.toUtcExclusive` (instantes UTC efectivos, nombrados sin ambigüedad) junto a `period.from`/`to` (las fechas de Lima recibidas). El panel (`admin/page.tsx`) calculaba "hoy" y "el mes en curso" con `Date.getFullYear()/getMonth()/getDate()` del navegador (hora local del dispositivo, no necesariamente Lima); ahora usa `limaTodayIso()` (`Intl.DateTimeFormat` con `timeZone: 'America/Lima'`, una sola conversión explícita).
+    - **Búsqueda del mismo defecto en otros lugares (pedida por la auditoría):** el único `<input type="date">` de todo `apps/web` son los dos de esta misma sección (`commissions-from`/`commissions-to`); no hay otro sitio en la API o el panel que interprete una fecha de calendario sin hora como si fuera un instante. `Shift.startsAt/endsAt` y el `dueAt` que aceptaba el CRUD retirado siempre viajan como `Date`/ISO completo (`z.coerce.date()`), nunca como `"AAAA-MM-DD"` suelto, así que no tienen este problema. Reportado, no corregido en otro lado porque no hace falta.
+  - **MEDIO-1 (señal estructurada, sin texto libre).** Migración `20260927005242_assignment_closed_without_payment_signal`: `ShiftAssignment.closedWithoutPayment` (`Boolean`, default `false`), `closedWithoutPaymentAt` (`DateTime?`) y `closedWithoutPaymentById` (`String?`, FK a `User`, `onDelete: SetNull`). Definición exacta (documentada en el código y en `docs/reference/api.md`): una asignación que llegó a `NO_SHOW`/`ABANDONED` (el trabajador se presentó o no) y que una decisión de la empresa cerró sin `Payment`. Se escribe en los dos únicos caminos que la producen:
+      - `resolveAssignment` con `outcome: 'CANCELLED'` (ya existía; ahora además de dejar el `ShiftEvent`, marca los tres campos).
+      - `cancelShift`, que ahora hace DOS `updateMany` en vez de uno: las `ASSIGNED` pasan a `CANCELLED` sin la señal (nunca llegaron a "presentarse o no"; cancelar un turno futuro no es evasión), y las `NO_SHOW` pasan a `CANCELLED` CON la señal (antes, esta era exactamente la vía de "ocultar" que señaló la auditoría: quedaban `CANCELLED` sin ningún rastro).
+      - `cancelShift` nunca puede arrastrar una asignación con `checkedInAt` no nulo (lo bloquea antes con `409 SHIFT_NOT_CANCELLABLE`), así que "cancelShift con check-in" -mencionado por la auditoría como ejemplo- no es un camino que exista hoy; documentado en el código y en `docs/reference/api.md`.
+      - El texto de `ShiftEvent.detail` volvió a su forma anterior a `CN-20260926-019` (el motivo de la empresa tal cual, sin ningún prefijo forzado): ya no se lee para nada, así que no necesita ninguna forma especial. Se retiró la constante `CLOSED_WITHOUT_PAYMENT_DETAIL_PREFIX`.
+      - Sin backfill histórico (documentado en la migración y en la referencia): no hay forma de derivarlo de las filas existentes sin depender del mismo texto libre que se está reemplazando.
+    - `GET /api/admin/commissions`: `closedWithoutPayment` ahora cuenta por `ShiftAssignment.closedWithoutPayment`/`At` (nunca `ShiftEvent.detail`), filtrado por período igual que los demás buckets. Se agrega **`pendingResolution`** (`NO_SHOW`/`ABANDONED` sin resolver todavía), **sin filtro de período**, tanto por empresa como en `totals`, y esas empresas entran en `companies` aunque no tengan ningún pago ni cierre en el rango consultado: corrige la vía de "ocultar" que señaló la auditoría (dejar una asignación sin resolver, o arrastrarla con `cancelShift`, ya no la saca del reporte).
+    - Web superadmin: la sección "Comisiones" agrega una fila de totales y un badge por empresa para `pendingResolution`.
+- Archivos:
+  - Esquema/migración: `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20260927005242_assignment_closed_without_payment_signal/migration.sql` (nueva).
+  - API: `apps/api/src/modules/admin/admin.routes.ts`, `apps/api/src/modules/business/business.service.ts`.
+  - Pruebas API: `apps/api/tests/admin.routes.test.ts` (reescrito: fechas de Lima, formato estricto, señal estructurada, `pendingResolution`), `apps/api/tests/business.service.test.ts` (el `cancelShift` con `NO_SHOW` ahora espera dos `updateMany`), `apps/api/tests/integration/payment-commission.integration.test.ts` (6 casos nuevos: `resolveAssignment` CANCELLED sobre `NO_SHOW`/`ABANDONED`, `cancelShift` arrastrando una `NO_SHOW`, `cancelShift` antes de `NO_SHOW` con un motivo que imita el prefijo retirado, `pendingResolution` sin filtro de fecha, y los límites exactos de calendario de Lima —31/08 23:59:59, 01/09 00:00:00, cambio de año— contra Postgres real).
+  - Web: `apps/web/lib/admin-api.ts`, `apps/web/app/admin/page.tsx`.
+  - Fixtures/specs Playwright: `apps/web/e2e/fixtures/admin-api.ts`, `apps/web/e2e/admin-commissions.spec.ts`, `apps/web/e2e-real/assignment-resolution.spec.ts` (la aserción del `detail` vuelve al texto plano; se agrega la verificación de `closedWithoutPayment` vía el reporte real).
+  - Docs: `docs/reference/api.md` (período de Lima, `pendingResolution`, definición estructurada de "cerrada sin pago").
+- Decisiones:
+  - Formato estricto `"AAAA-MM-DD"` para `from`/`to` (en vez de aceptar una hora completa y documentar cuál huso asumir): elimina la ambigüedad de raíz, que era justamente el origen del hallazgo.
+  - `pendingResolution` nunca se filtra por período: es un estado actual ("todavía no decidido"), no un evento con fecha propia; filtrarlo habría reintroducido una forma de ocultarlo (bastaría con consultar un período viejo).
+  - `collectedCents`/`pendingCollectionCents` no se tocaron (fuera del alcance de los dos hallazgos).
+- Validaciones (reales; contenedores Postgres 16-alpine propios y descartables, eliminados al terminar; `chambeaya-stable-postgres-data` nunca se tocó):
+  - Migración: aplicada sobre una base vacía y sobre una con datos (`ShiftAssignment` preexistente vía `demo.seed.ts`, backfill verificado: `closedWithoutPayment=false`, `closedWithoutPaymentAt`/`ById` en `NULL`). `prisma migrate diff --from-url ... --to-schema-datamodel` sin divergencia contra tres bases distintas (vacía, con datos, y la de integración).
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **476/476**.
+  - API integración (`cn-corr-pg`, puerto 5595): 14 archivos, **109/109** (incluye los 21 casos de `payment-commission.integration.test.ts`, con los 6 nuevos de esta corrección).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **147/147** (1 omitida, preexistente).
+  - Web `e2e-real` (`cn-e2ereal-fix-pg`, puerto 5594): **3/3**, incluida la corrección de la aserción de `detail` y la nueva verificación de `closedWithoutPayment` vía el reporte real.
+  - `apps/web/next-env.d.ts` revertido; ningún contenedor propio ni proceso quedó corriendo al terminar.
+- Riesgos:
+  - Flutter no se tocó en esta corrección (ningún archivo Dart cambió) y no se volvió a ejecutar su suite.
+  - `pendingResolution` no pagina; mismo riesgo ya aceptado para el resto del reporte en `CN-20260926-019`.
+  - No se probaron husos horarios distintos de Lima/UTC en el navegador real (Playwright corrió con el huso por defecto del entorno); `limaTodayIso`/`limaDayStartUtc` son funciones puras y deterministas, pero no hay una prueba que emule explícitamente `timezoneId` de otro huso en el navegador.
+- Siguiente paso: reauditoría de `auditor-opus` sobre este ID.
+
+### CN-20260926-020 — Auditoría de `CN-20260926-019` (Alcance D: registro confiable y modo manual)
+
+- Fecha: 2026-09-26 19:52 (America/Lima; la hora de `019`, "2026-09-27 00:29", está en UTC)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-019`, sobre HEAD `0cc01dd` (Alcance C comiteado), con los 28 cambios sin comitear del Alcance D.
+- Alcance: diff completo de la API, la web y Flutter; `mark-paid`; retiro del CRUD; reporte de comisiones; `closedWithoutPayment`; exposición al trabajador; recorrido en navegador; suites completas y regresión de A, B y C.
+- Archivos: revisados todos los de `019`. No modifiqué código ni documentación; la corrección de `docs/reference/api.md:49` depende de ALTO-1.
+- Hallazgos:
+  - Críticos: ninguno.
+  - ALTO-1 (el filtro de fechas del reporte pierde comisiones por facturar en los límites de día y de mes).
+    - `apps/api/src/modules/admin/admin.routes.ts:49-52` interpreta `AAAA-MM-DD` como medianoche UTC y `to` como `lte` de ese instante. El panel (`apps/web/app/admin/page.tsx`, `monthRange`) envía justo esas fechas: `to` = hoy.
+    - Primer efecto: el `to` excluye el día completo que el usuario eligió como "Hasta", y los límites quedan corridos 5 horas respecto de Lima.
+    - Reproducido contra Postgres: el reporte `from=2026-08-01&to=2026-08-31` incluyó 0 de 2 pagos del 31/08 hora Lima (10:00 y 20:00); `from=to=2026-09-01` incluyó 0 del pago de las 02:00 del 01/09 hora Lima.
+    - Segundo efecto: los pagos creados entre las 19:00 del penúltimo día y las 19:00 del último día del mes (hora Lima) no aparecen en ningún reporte mensual. Es comisión que nunca se factura.
+    - Reproducido en el navegador (build de producción `/empresas`): un pago con S/10 + S/1.80 de comisión, creado hoy a las 19:44 Lima. "Comisión por facturar (mes en curso)" y la vista Comisiones por defecto mostraron S/ 0.00; la API sin filtro sí lo incluye.
+    - Corrección:
+      - Tratar `from`/`to` como fechas de calendario de Lima: `gte from 00:00 -05:00` y `lt (to + 1 día) 00:00 -05:00`.
+      - Rechazar horas ambiguas o documentar el formato exacto.
+      - Agregar pruebas de límite (23:59 Lima del último día, 00:00 Lima del primero) y de "mes en curso".
+      - Actualizar `docs/reference/api.md:49`.
+  - MEDIO-1 (`closedWithoutPayment` depende de texto libre y se puede falsear u ocultar).
+    - Falsear: `cancelShift` (`apps/api/src/modules/business/business.service.ts:303`) escribe `ShiftEvent` `CANCELLED`/`BUSINESS` con `detail` igual al motivo libre de la empresa. Un motivo que empiece con `CLOSED_WITHOUT_PAYMENT_DETAIL_PREFIX` suma al conteo sin que se haya cerrado ninguna asignación. Reproducido: el conteo pasó de 0 a 1.
+    - Ocultar, primera vía: una asignación `NO_SHOW` o `ABANDONED` que la empresa nunca resuelve no cuenta. Reproducido: `NO_SHOW` sin pago y el conteo sin cambios. Es la forma más simple de no generar ni pago ni comisión.
+    - Ocultar, segunda vía: `cancelShift` convierte asignaciones `NO_SHOW` en `CANCELLED` (`business.service.ts:300`) sin pago y tampoco cuenta.
+    - Además depende de un texto visible que cualquiera puede cambiar.
+    - Corrección: una señal estructurada. Por ejemplo, un `ShiftEventType` o un campo dedicado (migración), o contar desde `ShiftAssignment` por estado:
+      - `NO_SHOW` y `ABANDONED` sin resolver, como "pendientes de decisión";
+      - las cerradas sin pago por `resolveAssignment` (`CANCELLED`);
+      - las `NO_SHOW` canceladas junto con el turno.
+
+      En todos los casos, sin leer `detail`, y con pruebas de los tres caminos.
+  - Bajos: ninguno bloqueante; ver Riesgos.
+- Verificado sin hallazgos:
+  - `mark-paid`: 10 llamadas concurrentes dieron un 200 y nueve 409, un solo `PAYMENT_REPORTED`, estado `PROCESSED` y montos sin cambios.
+    - Otra empresa recibe `404 PAYMENT_NOT_FOUND` y el pago sigue `PENDING`.
+    - `legacy` sin turno responde 200 y no crea evento.
+    - Un pago de pasarela (`simulated`) responde `409 PAYMENT_NOT_PAYABLE`.
+  - `POST`/`PATCH`/`DELETE /business/payments` responden 404. `resource` ya no se usa para pagos. Los únicos escritores de montos que quedan son los dos `upsert` de creación y `mark-paid`, que solo cambia estado y `processedAt`.
+  - `GET /admin/commissions`: 403 con sesión BUSINESS; 400 con fecha inválida. La suma por empresa coincide con los totales. `manual` excluye `CANCELLED`; `legacy` queda fuera; el IGV va aparte.
+  - Trabajador: la lista `FORBIDDEN_KEYS` de la prueba de fuga no cambió. `canConfirmReceipt` solo revela lo que el trabajador ya puede intentar, y `confirm` aplica la misma regla (`manual` más `PROCESSED`). "Mis pagos" en Flutter no muestra comisión, deriva los estados de `status`/`receiptConfirmed` y muestra el botón solo con `canConfirmReceipt`.
+  - Navegador: el turno completado mostró 100 / 10 / 1.80 / 111.80. "Marcar como pagado" pidió confirmación con el desglose, quedó "Procesado" y un segundo intento por HTTP devolvió 409. Con la pestaña desactualizada (pagado desde otro cliente), el panel mostró el aviso y refrescó la lista. No queda ningún botón ni texto del CRUD retirado.
+- Documentación: `docs/reference/api.md:49` documenta hoy el comportamiento UTC; debe cambiar junto con ALTO-1. `roadmap.md` es coherente. `guides/` no requiere cambios.
+- Validaciones (reales; contenedor propio `cn-audit020-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 24 archivos, 473/473. Integración sobre `chambeaya_test`: 14 archivos, 103/103.
+  - Sondeo de integración temporal (concurrencia, propiedad, retiro, `legacy`/pasarela, `closedWithoutPayment`, límites de fecha), eliminado al terminar: 3/3 ejecutados, con los resultados citados.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido: 147 pasadas y 1 omitida. `e2e-real` completa: 3/3.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`: `pub get --enforce-lockfile` terminó con código 0 y `pubspec.lock` sin cambios; `analyze` sin problemas (código 0); `test` 161/161.
+  - Regresión de A, B y C: cubierta por las suites anteriores (cambio de contraseña, marca, comisión fijada, 409, fuga).
+  - Limpieza: se eliminaron el contenedor y los procesos propios (4116, 3116, 4420/3420). `apps/web/next-env.d.ts` quedó restaurado.
+- Riesgos residuales:
+  - El reporte no pagina y lee todas las empresas y todos los eventos de cierre del período. Es aceptable en el piloto.
+  - "Por facturar" incluye pagos `manual` todavía `PENDING` (decisión documentada).
+  - Flutter no se probó en un dispositivo real.
+  - `e2e-real` no corre en CI.
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1 y MEDIO-1. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-019 — Alcance D: registro confiable y modo manual (retiro del CRUD manual de pagos, `mark-paid`, reporte de comisiones y "Mis pagos")
+
+- Fecha: 2026-09-27 00:29 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-011`/`013`/`015`/`017` (implementación y correcciones del Alcance C) y `CN-20260926-018` (auditoría que cerró el Alcance C). Sobre HEAD `0cc01dd`, árbol limpio antes de empezar. Sigue `dynamic-prancing-bear.md`; implementa solo el Alcance D.
+- Alcance:
+  - **API — retiro del CRUD manual de pagos.** `POST`/`PATCH`/`DELETE /api/business/payments[/:id]` ya no existen (nunca se registran en el router; Express responde su 404 genérico). `GET` (lista y detalle) se conserva. `DatabaseBusinessService.createPayment`/`updatePayment`/`deletePayment` se eliminaron junto con `PaymentInput` y los esquemas Zod de pago.
+  - **API — `POST /business/payments/:id/mark-paid`.** Único escritor que le queda a la empresa: transiciona `PENDING` → `PROCESSED` (con `processedAt`) para `provider` `'manual'` o `'legacy'` de esa empresa; registra `ShiftEvent` `PAYMENT_REPORTED` si el pago tiene `shiftId`. Atómico (`updateMany` condicionado a `status`/`provider` dentro de una transacción, sin `Serializable`: el guardián es la propia fila). `404 PAYMENT_NOT_FOUND` (no existe o es de otra empresa) y `409 PAYMENT_NOT_PAYABLE` (estado o `provider` no válidos, o carrera perdida) vía la nueva `PaymentNotPayableError`.
+  - **API — cierres sin pago identificables sin migración.** `resolveAssignment` con `outcome: 'CANCELLED'` ahora deja siempre el `ShiftEvent.detail` con el prefijo fijo `CLOSED_WITHOUT_PAYMENT_DETAIL_PREFIX` ("Cierre manual sin pago de una asignación…"), con el motivo propio de la empresa a continuación si lo hay. Es la única transición que nunca genera `Payment` ni escribe `ShiftCancellation` (a diferencia de `cancelShift` y de la cancelación del trabajador), así que ese prefijo basta para contar `closedWithoutPayment` sin un campo de esquema nuevo.
+  - **API — `GET /api/admin/commissions?from&to`** (guard `ADMIN`, fechas ISO opcionales, filtra por `Payment.createdAt` —nunca `processedAt`, justificado en el código y en `docs/reference/api.md`—). Devuelve `{period, totals, companies[]}` con `toInvoiceCents`/`toInvoiceTaxCents` (todo pago `manual` no `CANCELLED`), `collectedCents`/`pendingCollectionCents` (pasarela `PROCESSED`/`PENDING+SCHEDULED`, siempre 0 hoy) y `closedWithoutPayment` por empresa.
+  - **API — trabajador.** `GET /workers/wallet` expone `canConfirmReceipt` (derivado: `provider==='manual' && status==='PROCESSED' && !workerConfirmedAt`), nunca `provider`. `POST /workers/payments/:id/confirm` ahora exige además `provider==='manual'`.
+  - **Web empresa.** Se retiraron "Registrar pago", editar y eliminar (`crud-modal.tsx` ya no tiene `kind: 'payment'`; `businessApi.payments` solo expone `list`/`get`/`markPaid`). "Marcar como pagado" pide confirmación con el desglose completo (trabajador/comisión/IGV/total) y la aclaración de que el pago se hizo fuera de la app; maneja el 409 refrescando la lista. Los `PROCESSED` muestran la fecha en que se marcaron pagados.
+  - **Web superadmin.** Nueva sección "Comisiones" (filtro de período, desglose por empresa incluido `closedWithoutPayment`) y una métrica en el Resumen ("Comisión por facturar", mes en curso, IGV aparte).
+  - **Flutter.** Pantalla "Mis pagos" de solo lectura (`worker_payments_page.dart`), accesible desde Perfil vía `WorkerShell.repository`. Reusa `walletMovements()`/`PaymentRecord`/`confirmPayment()`. `PaymentRecord` gana `canConfirmReceipt`/`date`; estados "Pendiente de pago"/"Pagado"/"Recepción confirmada" derivados de `status`/`receiptConfirmed`, nunca de `provider`. Modo demo coherente (`DemoWorkerMarketplaceRepository` con historial mutable de ejemplo).
+  - **Docs.** `docs/product/roadmap.md`: tabla de correspondencia del enum aspiracional (`DRAFT/APPROVED/DUE/PAID/DISPUTED/VOID`) contra el real (`PENDING/SCHEDULED/PROCESSED/CANCELLED`) y estado real de la Fase 5 y la Fase 6. `docs/reference/api.md`: endpoints retirados/nuevos, reglas de `mark-paid` y de `GET /admin/commissions`, DTO del wallet, y la sección de asignaciones cerradas sin pago.
+- Archivos:
+  - API: `apps/api/src/modules/business/business.service.ts`, `business.routes.ts`; `apps/api/src/modules/admin/admin.routes.ts`; `apps/api/src/modules/marketplace/marketplace.service.ts`.
+  - Pruebas API: `apps/api/tests/business.service.test.ts`, `business.routes.test.ts`, `admin.routes.test.ts` (los tres reescritos donde tocaba el CRUD retirado, con casos nuevos de `mark-paid`/`commissions`), `apps/api/tests/integration/payment-commission.integration.test.ts` (ampliado con 8 casos nuevos del Alcance D).
+  - Web: `apps/web/lib/business-api.ts`, `lib/admin-api.ts`, `app/page.tsx`, `app/admin/page.tsx`, `components/crud-modal.tsx`.
+  - Fixtures/specs Playwright: `apps/web/e2e/fixtures/business-api.ts`, `fixtures/admin-api.ts`, `e2e/business-payments.spec.ts` (nuevo), `e2e/admin-commissions.spec.ts` (nuevo), `e2e-real/assignment-resolution.spec.ts` (ampliado: `mark-paid` + verificación de la comisión vía `GET /admin/commissions`).
+  - Flutter: `apps/mobile_flutter/lib/features/marketplace/marketplace_data.dart`, `marketplace_repository.dart`, `http_worker_marketplace_repository.dart`, `worker_shell.dart`, `worker_payments_page.dart` (nuevo); `apps/mobile_flutter/lib/features/profile/profile_home_page.dart`; `apps/mobile_flutter/test/worker_payments_page_test.dart` (nuevo).
+  - Docs: `docs/product/roadmap.md`, `docs/reference/api.md`.
+- Decisiones:
+  - `mark-paid` acepta `legacy` además de `manual` (pedido explícito del encargo): en producción puede quedar un pago `legacy` todavía `PENDING` (backfill o del CRUD ya retirado) y marcarlo no altera ningún monto, porque su comisión e IGV ya están en 0 desde que se creó.
+  - `closedWithoutPayment` se calcula con un prefijo fijo de texto en `ShiftEvent.detail` en vez de una columna nueva: evita una migración en este alcance y es exacto, porque `resolveAssignment(CANCELLED)` es la única transición que no deja ningún `ShiftCancellation` (a diferencia de `cancelShift` y de la cancelación del trabajador). Riesgo aceptado: un motivo escrito a mano por la empresa que empiece textualmente con ese prefijo se contaría igual (colisión de texto libre, improbable).
+  - `GET /admin/commissions` filtra por `createdAt`: filtrar por `processedAt` excluiría del período justo los pagos manuales todavía sin marcar, que son los que más importa facturar en modo manual.
+  - `collectedCents`/`pendingCollectionCents` suman comisión + IGV juntos (sin desglosar), a diferencia de `toInvoiceCents`/`toInvoiceTaxCents`: la separación solo hace falta para facturar la comisión manual; un cobro de pasarela ya llega completo.
+  - No se tocó `apps/api/src/demo/demo.seed.ts`: no llama al CRUD retirado y ya trae los campos de comisión desde el Alcance C; no había nada que actualizar.
+  - No se tocó `DemoMarketplaceService` (servicio en memoria alterno de `marketplace.service.ts`) ni se le agregó `canConfirmReceipt`: decisión ya documentada en `CN-20260926-011`, reconfirmada aquí (su `wallet()`/`confirmPayment()` son valores fijos de demostración sin campos de comisión).
+  - `docs/product/memberships.md` no se tocó: revisado, sigue coherente con el modo manual (ya decía "la empresa sigue pagando directo a su equipo").
+- Validaciones (todas ejecutadas de verdad; contenedores Postgres 16-alpine propios y descartables, eliminados al terminar; `chambeaya-stable-postgres-data` nunca se tocó):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **473/473**.
+  - API integración (`cn-scoped-pg`, puerto 5599, `migrate deploy` + `CHAMBEAYA_INTEGRATION_TESTS=true npx vitest run --config vitest.integration.config.mts tests/integration`): 14 archivos, **103/103** (incluye los 8 casos nuevos de `mark-paid`/carrera concurrente/`closedWithoutPayment`/reporte de comisiones en `payment-commission.integration.test.ts`, ahora 15 tests en ese archivo).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo (`npx playwright test`, ambos proyectos): **147/147** (1 omitida, preexistente), incluidos `business-payments.spec.ts` y `admin-commissions.spec.ts` (nuevos).
+  - Web `e2e-real` (`cn-e2ereal-pg`, puerto 5598, `CHAMBEAYA_E2E_REAL_TESTS=true npm run test:web:admin-real`): **3/3**, incluida la extensión de `assignment-resolution.spec.ts` (marcar como pagado contra la API real y verificar la comisión resultante vía `GET /admin/commissions`, más el 409 de un segundo intento).
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0` (nunca el Flutter local 3.47.1): `flutter pub get --enforce-lockfile` (verificado sin cambios en `pubspec.lock`), `flutter analyze` → **sin problemas**, `flutter test` → **161/161** (155 preexistentes + 6 nuevos de `worker_payments_page_test.dart`).
+  - `npm run demo:smoke` (`cn-smoke-pg`, puerto 5597, seed con `CHAMBEAYA_ALLOW_DEMO_SEED=true` + API local `NODE_ENV=development`): **"Smoke local de demostración completado para empresa, trabajador y superadmin."**
+  - `apps/web/next-env.d.ts` revertido tras cada `tsc`/Playwright; ningún contenedor propio ni proceso (`tsx`/Next/Postgres) quedó corriendo al terminar.
+- Riesgos:
+  - No se probó la app Flutter en un dispositivo ni emulador real, solo `flutter test` (widgets) y `flutter analyze`.
+  - `GET /admin/commissions` no pagina `companies`: con muchas empresas activas en el período, la respuesta crece sin límite. Aceptable al volumen actual del piloto; revisar si el negocio crece.
+  - El filtro `from`/`to` interpreta una fecha `"AAAA-MM-DD"` como medianoche UTC, no medianoche de Lima (UTC-5): documentado en `docs/reference/api.md`, pero un uso descuidado del filtro por el superadmin podría excluir pagos de las primeras horas de un día en hora local.
+  - No hay exportación a archivo (CSV/Excel) del reporte de comisiones, solo el JSON vía el panel; ya estaba fuera de alcance explícito del encargo.
+  - Colisión de texto libre en `closedWithoutPayment` (ver Decisiones): riesgo bajo, no bloqueante.
+- Siguiente paso: auditoría de `auditor-opus` sobre este ID.
+
 ### CN-20260926-018 — Reauditoría de `CN-20260926-017` y cierre del Alcance C (`011`, `013`, `015`, `017`)
 
 - Fecha: 2026-09-26 14:22 (America/Lima)

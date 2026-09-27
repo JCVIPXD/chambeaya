@@ -213,6 +213,35 @@ Objetivo: validar la viabilidad económica antes de integrar un proveedor de pag
 - Añadir exportación y conciliación manual.
 - Probar precios con empresas piloto sin automatizar cobros.
 
+**Estado real (Alcances C y D del plan de pagos, `dynamic-prancing-bear.md`):**
+esta fase ya está construida en su mayor parte, aunque con un modelo y un
+enum distintos de los que anticipaba este documento cuando se escribió.
+`Payment` (`apps/api/prisma/schema.prisma`) es exactamente el ledger de
+obligaciones que pedía esta fase -nunca custodia fondos, relaciona cada
+movimiento con turno, asignación, trabajador y empresa- con el pago del
+trabajador (`amountCents`) y la comisión de Chambeaya (`commissionCents` +
+`taxCents`, congelada al publicar el turno) separados en la misma fila, en
+vez de un `PayQuote` aparte. El enum implementado (`PaymentStatus`) es más
+simple que el propuesto aquí, porque el flujo real nunca necesitó un estado
+de borrador ni de aprobación (un pago nace ya "debido" en cuanto la empresa
+o el trabajador cierran el turno):
+
+| Este documento (aspiracional) | `PaymentStatus` (real) | Cuándo |
+| --- | --- | --- |
+| `DRAFT` | *(no existe)* | Nunca: un `Payment` nace directamente `PENDING`. |
+| `APPROVED` | *(no existe)* | Nunca: no hay un paso de aprobación separado. |
+| `DUE` | `PENDING` | Al completarse la asignación (`checkOut`/`resolveAssignment`), o mientras un intento de pasarela sigue vigente. |
+| *(sin equivalente todavía)* | `SCHEDULED` | Reservado para el Alcance E: un checkout de pasarela en curso (`PENDING` -> `SCHEDULED` al crear el intento). Sin proveedor contratado, ningún pago llega hoy a este estado. |
+| `PAID` | `PROCESSED` | La empresa lo marca manualmente (`POST /business/payments/:id/mark-paid`, Alcance D) o, en el Alcance E, la pasarela lo confirma por webhook. |
+| `VOID` | `CANCELLED` | Un cierre manual sin pago (`resolveAssignment` con `outcome: 'CANCELLED'`) o, en el Alcance E, un webhook `REJECTED` sin reintento. |
+| `DISPUTED` | *(no existe)* | Fuera de alcance explícito (ver "Fuera de alcance" del plan de pagos): reembolsos, disputas y anulación por el admin quedan para después. |
+
+La exportación/conciliación manual que pedía esta fase existe hoy como
+`GET /api/admin/commissions` (Alcance D): cuánto le corresponde facturar
+Chambeaya a cada empresa en modo manual, y el desglose de asignaciones
+cerradas sin pago para detectar evasión de la comisión. No hay todavía un
+export a archivo (CSV/Excel), solo el JSON del reporte.
+
 ### Membresías empresariales — diseño temprano, cobro posterior
 
 La membresía se diseñará desde ahora, pero se activará comercialmente después de validar el flujo de publicación, postulación, asignación y asistencia.
@@ -266,6 +295,17 @@ Esta fase requiere validación legal, laboral y tributaria previa.
 - Incorporar disputas y reversos antes de habilitar producción.
 
 Chambeaya no custodiará fondos directamente salvo que una evaluación regulatoria posterior lo autorice y justifique.
+
+**Estado real:** todavía no empieza. El Alcance D del plan de pagos deja
+producción operando en **modo manual** (`provider: 'manual'`): la empresa
+paga al trabajador por fuera de la app y lo marca como pagado; Chambeaya
+factura la comisión aparte, sin mover el dinero del trabajador en ningún
+momento. El Alcance E (siguiente, todavía no implementado) solo agrega la
+capa de adaptadores de proveedor y un proveedor **simulado** para desarrollo
+-nunca un proveedor real ni producción-, y el Alcance F conecta ese
+checkout simulado al panel. Elegir un proveedor de pagos regulado, la
+validación legal/laboral/tributaria previa y todo lo demás de esta lista
+siguen sin empezar.
 
 ### Fase 7 — Operación y plataforma de producción
 

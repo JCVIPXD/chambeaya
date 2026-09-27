@@ -167,25 +167,69 @@ describe('business CRUD routes', () => {
     expect((await request(app).delete('/api/business/workers/worker-1').set('Authorization', authorization)).status).toBe(204);
   });
 
-  it('supports conversations, messages and payment CRUD operations', async () => {
+  it('supports conversations and messages CRUD operations', async () => {
     const createConversation = vi.fn(async (_session, input) => ({ id: 'conversation-1', ...input }));
     const createMessage = vi.fn(async (_session, conversationId, body) => ({ id: 'message-1', conversationId, body }));
     const updateMessage = vi.fn(async (_session, _conversationId, id, input) => ({ id, ...input }));
     const deleteMessage = vi.fn(async () => undefined);
-    const createPayment = vi.fn(async (_session, input) => ({ id: 'payment-1', ...input }));
-    const updatePayment = vi.fn(async (_session, id, input) => ({ id, ...input }));
-    const deletePayment = vi.fn(async () => undefined);
-    const { app, authorization } = await businessContext({ createConversation, createMessage, updateMessage, deleteMessage, createPayment, updatePayment, deletePayment });
+    const { app, authorization } = await businessContext({ createConversation, createMessage, updateMessage, deleteMessage });
 
     expect((await request(app).post('/api/business/conversations').set('Authorization', authorization).send({ workerId: 'worker-1', subject: 'Ingreso al turno' })).status).toBe(201);
     expect((await request(app).post('/api/business/conversations/conversation-1/messages').set('Authorization', authorization).send({ body: 'Preséntate 15 minutos antes.' })).status).toBe(201);
     expect((await request(app).patch('/api/business/conversations/conversation-1/messages/message-1').set('Authorization', authorization).send({ body: 'Preséntate 20 minutos antes.' })).status).toBe(200);
     expect((await request(app).delete('/api/business/conversations/conversation-1/messages/message-1').set('Authorization', authorization)).status).toBe(204);
+  });
 
-    const payment = { reference: 'CN-1001', description: 'Turnos validados', amountCents: 38000, workerCount: 4 };
-    expect((await request(app).post('/api/business/payments').set('Authorization', authorization).send(payment)).status).toBe(201);
-    expect((await request(app).patch('/api/business/payments/payment-1').set('Authorization', authorization).send({ status: 'PROCESSED' })).status).toBe(200);
-    expect((await request(app).delete('/api/business/payments/payment-1').set('Authorization', authorization)).status).toBe(204);
+  // Alcance D: el CRUD manual de pagos permitía a la empresa inventar
+  // pagos, alterar montos y saltarse la comisión (ver `docs/PROGRESO.md`).
+  // Las tres rutas de escritura quedan retiradas del router por completo
+  // (nunca registradas): Express responde su 404 genérico, no el
+  // `sendError` de esta app.
+  it('POST/PATCH/DELETE /payments no longer exist (404, the manual CRUD was removed)', async () => {
+    const { app, authorization } = await businessContext();
+
+    const created = await request(app).post('/api/business/payments').set('Authorization', authorization).send({ reference: 'REF-1', description: 'x', amountCents: 100 });
+    expect(created.status).toBe(404);
+    const patched = await request(app).patch('/api/business/payments/payment-1').set('Authorization', authorization).send({ status: 'PROCESSED' });
+    expect(patched.status).toBe(404);
+    const deleted = await request(app).delete('/api/business/payments/payment-1').set('Authorization', authorization);
+    expect(deleted.status).toBe(404);
+  });
+
+  it('GET /payments and GET /payments/:id still work (read-only)', async () => {
+    const listPayments = vi.fn(async () => [{ id: 'payment-1' }]);
+    const getPayment = vi.fn(async (_session, id) => ({ id }));
+    const { app, authorization } = await businessContext({ listPayments, getPayment });
+
+    const list = await request(app).get('/api/business/payments').set('Authorization', authorization);
+    expect(list.status).toBe(200);
+    expect(list.body).toEqual([{ id: 'payment-1' }]);
+
+    const detail = await request(app).get('/api/business/payments/payment-1').set('Authorization', authorization);
+    expect(detail.status).toBe(200);
+    expect(detail.body).toEqual({ id: 'payment-1' });
+  });
+
+  it('POST /payments/:id/mark-paid returns the updated payment on success and maps errors to 404/409', async () => {
+    const { BusinessRecordNotFoundError, PaymentNotPayableError } = await import('../src/modules/business/business.service.js');
+    const markPaymentPaid = vi.fn(async (_session, id) => {
+      if (id === 'payment-missing') throw new BusinessRecordNotFoundError('PAYMENT_NOT_FOUND');
+      if (id === 'payment-not-payable') throw new PaymentNotPayableError('PAYMENT_NOT_PAYABLE');
+      return { id, status: 'PROCESSED' };
+    });
+    const { app, authorization } = await businessContext({ markPaymentPaid });
+
+    const ok = await request(app).post('/api/business/payments/payment-1/mark-paid').set('Authorization', authorization);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ id: 'payment-1', status: 'PROCESSED' });
+
+    const notFound = await request(app).post('/api/business/payments/payment-missing/mark-paid').set('Authorization', authorization);
+    expect(notFound.status).toBe(404);
+    expect(notFound.body).toEqual({ error: 'PAYMENT_NOT_FOUND' });
+
+    const notPayable = await request(app).post('/api/business/payments/payment-not-payable/mark-paid').set('Authorization', authorization);
+    expect(notPayable.status).toBe(409);
+    expect(notPayable.body).toEqual({ error: 'PAYMENT_NOT_PAYABLE' });
   });
 
   // BAJO-4 de CN-20260926-012: si el panel envía los bps que mostró en la
@@ -214,25 +258,19 @@ describe('business CRUD routes', () => {
     expect(createShift.mock.calls[0]?.[1]).toMatchObject({ expectedCommissionBps: 1000, expectedTaxBps: 1800 });
   });
 
-  // BAJO-1 de CN-20260926-012: `amountCents` admitía hasta 10^10, por encima
+  // BAJO-1 de CN-20260926-012: `payCents` admitía hasta 10^10, por encima
   // del propio `Int` de Postgres (máx. 2.147.483.647), así que un monto
   // grande no respondía `400` en el borde válido: pasaba de la validación de
   // Zod y desbordaba más adelante en la base (`500 INTERNAL_ERROR`). Ahora
   // el tope (S/100.000) responde `400 INVALID_INPUT` con `issues`, y
   // `amount + commission + tax` nunca puede desbordar `Int` ni con el `bps`
-  // máximo. `payCents` (creación de turno) tiene el mismo tope.
-  it('rejects an amountCents/payCents above the money cap with 400 INVALID_INPUT, never a 500 from an Int overflow downstream', async () => {
-    const createPayment = vi.fn(async (_session, input) => ({ id: 'payment-1', ...input }));
+  // máximo. Ya no hay un `amountCents` de un pago que llegue por formulario
+  // (Alcance D retiró el CRUD manual: todo `Payment.amountCents` nace de
+  // `checkOut`/`resolveAssignment`, nunca de un body HTTP), así que este
+  // caso ya solo aplica a `payCents` al crear un turno.
+  it('rejects a payCents above the money cap with 400 INVALID_INPUT, never a 500 from an Int overflow downstream', async () => {
     const createShift = vi.fn(async (_session, input) => ({ id: 'shift-1', ...input }));
-    const { app, authorization } = await businessContext({ createPayment, createShift });
-
-    const tooLargePayment = await request(app)
-      .post('/api/business/payments')
-      .set('Authorization', authorization)
-      .send({ reference: 'CN-9999', description: 'Monto fuera de rango', amountCents: 100_000_01 });
-    expect(tooLargePayment.status).toBe(400);
-    expect(tooLargePayment.body.error).toBe('INVALID_INPUT');
-    expect(createPayment).not.toHaveBeenCalled();
+    const { app, authorization } = await businessContext({ createShift });
 
     const tooLargeShift = await request(app)
       .post('/api/business/shifts')

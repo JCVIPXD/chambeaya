@@ -182,6 +182,9 @@ model User {
   talentInvitationsCreated TalentInvitation[] @relation("TalentInvitationCreatedBy")
   platformSettingsUpdates PlatformSettings[] @relation("PlatformSettingsUpdatedBy")
   platformSettingChanges PlatformSettingChange[] @relation("PlatformSettingChangedBy")
+  /// Alcance D, corrección de MEDIO-1 de `CN-20260926-020`: quién cerró cada
+  /// `ShiftAssignment` sin pago (ver `ShiftAssignment.closedWithoutPaymentById`).
+  assignmentsClosedWithoutPayment ShiftAssignment[] @relation("AssignmentClosedWithoutPaymentBy")
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 }
@@ -299,12 +302,31 @@ model ShiftAssignment {
   completedAt       DateTime?
   payment           Payment?
   reviews           AssignmentReview[]
+  /// Alcance D, corrección de MEDIO-1 de `CN-20260926-020`: señal
+  /// estructurada de "la empresa cerró esta asignación sin pagar", sin
+  /// depender de ningún texto libre. `true` solo cuando la asignación
+  /// llegó a `NO_SHOW`/`ABANDONED` (el trabajador se presentó o no) y una
+  /// decisión de la empresa la cerró sin generar `Payment`: `resolveAssignment`
+  /// con `outcome: 'CANCELLED'`, o `cancelShift` arrastrando una asignación
+  /// `NO_SHOW` (nunca una `ASSIGNED` simple, que jamás llegó a "presentarse o
+  /// no": cancelar un turno futuro no es evasión). `cancelShift` nunca puede
+  /// arrastrar una asignación con `checkedInAt` no nulo (lo bloquea antes),
+  /// así que ese camino no existe hoy. Nunca se pone en `false` después de
+  /// `true`: una vez cerrada sin pago, queda así para siempre.
+  closedWithoutPayment   Boolean  @default(false)
+  /// Momento de esa decisión (no de la asignación ni del turno). Es el campo
+  /// que usa `GET /api/admin/commissions` para filtrar por período — nunca
+  /// `ShiftEvent.createdAt` ni ningún texto de `detail`.
+  closedWithoutPaymentAt DateTime?
+  closedWithoutPaymentById String?
+  closedWithoutPaymentBy   User?   @relation("AssignmentClosedWithoutPaymentBy", fields: [closedWithoutPaymentById], references: [id], onDelete: SetNull)
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
 
   @@unique([shiftId, workerId])
   @@index([workerId, status])
   @@index([shiftId, status])
+  @@index([closedWithoutPayment, closedWithoutPaymentAt])
 }
 
 model AssignmentReview {

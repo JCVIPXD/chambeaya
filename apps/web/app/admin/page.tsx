@@ -5,6 +5,7 @@ import {
   Building2,
   CheckCircle2,
   ChevronRight,
+  CircleDollarSign,
   ClipboardList,
   KeyRound,
   LogOut,
@@ -19,6 +20,8 @@ import {
 import {
   adminApi,
   adminLogin,
+  type AdminCommissionsReport,
+  type AdminCommissionsTotals,
   type AdminCompany,
   type AdminIncident,
   type AdminOverview,
@@ -29,6 +32,24 @@ import {
 import { ChangePasswordModal } from "../../components/change-password-modal";
 
 const key = "chambeaya_admin_session";
+
+// Corrección de ALTO-1 de CN-20260926-020: la fecha "de hoy" para el filtro
+// de Comisiones debe ser la fecha de calendario de LIMA, nunca la del
+// navegador/servidor donde corre este componente (que puede tener otro
+// huso horario, o ninguno configurado). `Intl.DateTimeFormat` con
+// `timeZone: 'America/Lima'` hace la conversión explícita una sola vez, en
+// vez de sumar/restar horas a mano en cada sitio que necesite "hoy".
+const limaDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Lima",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+/** La fecha de hoy en Lima, en formato `AAAA-MM-DD`. */
+function limaTodayIso(): string {
+  return limaDateFormatter.format(new Date());
+}
+
 export default function AdminPage() {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [restoringSession, setRestoringSession] = useState(true);
@@ -273,10 +294,15 @@ function AdminWorkspace({
   const [workers, setWorkers] = useState<AdminWorker[]>([]);
   const [incidents, setIncidents] = useState<AdminIncident[]>([]);
   const [settings, setSettings] = useState<AdminPlatformSettings | null>(null);
+  // Métrica del resumen: "por facturar" del mes en curso (con el IGV
+  // aparte), siempre ese rango fijo, independiente del filtro de la sección
+  // "Comisiones".
+  const [monthCommissions, setMonthCommissions] =
+    useState<AdminCommissionsTotals | null>(null);
   const [loading, setLoading] = useState(true);
   const [failedSections, setFailedSections] = useState<string[]>([]);
   const [section, setSection] = useState<
-    "overview" | "companies" | "workers" | "incidents" | "settings"
+    "overview" | "companies" | "workers" | "incidents" | "settings" | "commissions"
   >("overview");
   const [query, setQuery] = useState("");
   const [incidentFilter, setIncidentFilter] = useState<
@@ -293,6 +319,32 @@ function AdminWorkspace({
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState("");
+  // Rango del mes en curso, en fecha de calendario de LIMA (`limaTodayIso`,
+  // nunca la hora local del navegador): usado como valor inicial del filtro
+  // de "Comisiones" y como rango fijo de la métrica del resumen.
+  const monthRange = useMemo(() => {
+    const today = limaTodayIso();
+    const from = `${today.slice(0, 7)}-01`;
+    return { from, to: today };
+  }, []);
+  const [commissionsReport, setCommissionsReport] =
+    useState<AdminCommissionsReport | null>(null);
+  const [commissionsFrom, setCommissionsFrom] = useState(monthRange.from);
+  const [commissionsTo, setCommissionsTo] = useState(monthRange.to);
+  const [loadingCommissions, setLoadingCommissions] = useState(false);
+  const [commissionsError, setCommissionsError] = useState("");
+  const loadCommissionsReport = async (from: string, to: string) => {
+    setLoadingCommissions(true);
+    setCommissionsError("");
+    try {
+      const report = await adminApi.commissions(session.token, { from, to });
+      setCommissionsReport(report);
+    } catch {
+      setCommissionsError("No se pudo cargar el reporte de comisiones.");
+    } finally {
+      setLoadingCommissions(false);
+    }
+  };
   const load = async () => {
     setLoading(true);
     const results = await Promise.allSettled([
@@ -301,17 +353,19 @@ function AdminWorkspace({
       adminApi.workers(session.token),
       adminApi.incidents(session.token),
       adminApi.settings(session.token),
+      adminApi.commissions(session.token, monthRange),
     ]);
-    const labels = ["resumen", "empresas", "trabajadores", "incidencias", "configuración"];
+    const labels = ["resumen", "empresas", "trabajadores", "incidencias", "configuración", "comisiones"];
     const failures = results.flatMap((result, index) =>
       result.status === "rejected" ? [labels[index]] : [],
     );
-    const [summary, companyData, workerData, incidentData, settingsData] = results;
+    const [summary, companyData, workerData, incidentData, settingsData, commissionsData] = results;
     if (summary.status === "fulfilled") setOverview(summary.value);
     if (companyData.status === "fulfilled") setCompanies(companyData.value);
     if (workerData.status === "fulfilled") setWorkers(workerData.value);
     if (incidentData.status === "fulfilled") setIncidents(incidentData.value);
     if (settingsData.status === "fulfilled") setSettings(settingsData.value);
+    if (commissionsData.status === "fulfilled") setMonthCommissions(commissionsData.value.totals);
     setFailedSections(failures);
     setLoading(false);
   };
@@ -339,6 +393,8 @@ function AdminWorkspace({
   };
   useEffect(() => {
     void load();
+    void loadCommissionsReport(commissionsFrom, commissionsTo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const normalizedQuery = query.trim().toLowerCase();
   const filteredCompanies = useMemo(
@@ -479,6 +535,7 @@ function AdminWorkspace({
             ["companies", "Empresas"],
             ["workers", "Trabajadores"],
             ["incidents", "Incidencias"],
+            ["commissions", "Comisiones"],
             ["settings", "Configuración"],
           ] as const
         ).map(([value, label]) => (
@@ -495,7 +552,7 @@ function AdminWorkspace({
           </button>
         ))}
       </nav>
-      {section !== "overview" && section !== "settings" && (
+      {section !== "overview" && section !== "settings" && section !== "commissions" && (
         <div className="admin-toolbar">
           <label className="admin-search">
             <Search size={16} />
@@ -609,6 +666,44 @@ function AdminWorkspace({
                       </span>
                     </button>
                   ))}
+                </div>
+              </article>
+              <article className="admin-panel">
+                <div className="admin-panel-head">
+                  <div>
+                    <p className="eyebrow">Modo manual · sin pasarela</p>
+                    <h2>Comisión por facturar (mes en curso)</h2>
+                  </div>
+                  <CircleDollarSign size={18} />
+                </div>
+                <div className="admin-list">
+                  <div className="admin-list-row">
+                    <div>
+                      <strong>
+                        S/{" "}
+                        {monthCommissions
+                          ? (monthCommissions.toInvoiceCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })
+                          : "0.00"}
+                      </strong>
+                      <small>
+                        + IGV S/{" "}
+                        {monthCommissions
+                          ? (monthCommissions.toInvoiceTaxCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })
+                          : "0.00"}
+                      </small>
+                    </div>
+                  </div>
+                  <button
+                    className="admin-list-row"
+                    type="button"
+                    onClick={() => setSection("commissions")}
+                  >
+                    <div>
+                      <strong>Ver desglose por empresa</strong>
+                      <small>Incluye cerrados sin pago, para detectar evasión</small>
+                    </div>
+                    <ChevronRight size={15} />
+                  </button>
                 </div>
               </article>
             </section>
@@ -809,6 +904,144 @@ function AdminWorkspace({
                   </button>
                 </div>
               </form>
+            </section>
+          )}
+          {section === "commissions" && (
+            <section className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <p className="eyebrow">Facturación de comisión por empresa</p>
+                  <h2>Comisiones</h2>
+                </div>
+                <CircleDollarSign size={18} />
+              </div>
+              <form
+                className="admin-settings-form admin-commissions-filter"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void loadCommissionsReport(commissionsFrom, commissionsTo);
+                }}
+              >
+                <div className="field">
+                  <label htmlFor="commissions-from">Desde</label>
+                  <input
+                    id="commissions-from"
+                    type="date"
+                    value={commissionsFrom}
+                    onChange={(event) => setCommissionsFrom(event.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="commissions-to">Hasta</label>
+                  <input
+                    id="commissions-to"
+                    type="date"
+                    value={commissionsTo}
+                    onChange={(event) => setCommissionsTo(event.target.value)}
+                  />
+                </div>
+                <div className="admin-modal-actions">
+                  <button className="primary-button" type="submit" disabled={loadingCommissions}>
+                    {loadingCommissions ? "Cargando…" : "Aplicar filtro"}
+                  </button>
+                </div>
+              </form>
+              {commissionsError && <p className="admin-error">{commissionsError}</p>}
+              {commissionsReport && (
+                <>
+                  <div className="admin-list">
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>
+                          Por facturar (modo manual): S/{" "}
+                          {(commissionsReport.totals.toInvoiceCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </strong>
+                        <small>
+                          + IGV S/ {(commissionsReport.totals.toInvoiceTaxCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </small>
+                      </div>
+                    </div>
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>
+                          Cobrada (pasarela): S/{" "}
+                          {(commissionsReport.totals.collectedCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </strong>
+                        <small>Sin proveedor contratado todavía: siempre 0.</small>
+                      </div>
+                    </div>
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>
+                          Por cobrar (pasarela): S/{" "}
+                          {(commissionsReport.totals.pendingCollectionCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </strong>
+                        <small>{commissionsReport.totals.payments} pagos en el período</small>
+                      </div>
+                    </div>
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>{commissionsReport.totals.pendingResolution} pendientes de decisión</strong>
+                        <small>
+                          Asignaciones NO_SHOW o abandonadas que ninguna empresa resolvió todavía (no depende del período consultado)
+                        </small>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="admin-panel-head">
+                    <div>
+                      <p className="eyebrow">Desglose</p>
+                      <h2>Por empresa</h2>
+                    </div>
+                    <span className="admin-count">{commissionsReport.companies.length}</span>
+                  </div>
+                  <div className="admin-list">
+                    {commissionsReport.companies.map((row) => (
+                      // Todo el detalle numérico va DENTRO del único `div`
+                      // flexible (`flex:1; min-width:0`), como líneas
+                      // apiladas, en vez de repartirlo en varios `span`
+                      // hermanos con `white-space:nowrap`
+                      // (`.admin-status`): con textos largos, esos hermanos
+                      // no encogen y el `div` flexible termina en 0px de
+                      // ancho en una pantalla angosta, lo que deja el
+                      // nombre de la empresa técnicamente invisible (sin
+                      // caja) pese a seguir en el árbol de accesibilidad.
+                      <div className="admin-list-row" key={row.companyId}>
+                        <span className="admin-avatar">{row.name[0]}</span>
+                        <div>
+                          <strong>{row.name}</strong>
+                          <small>
+                            {row.ruc} · {row.payments} pagos
+                          </small>
+                          <small>
+                            Por facturar S/{" "}
+                            {(row.toInvoiceCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                            {" "}+ IGV S/{" "}
+                            {(row.toInvoiceTaxCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                          </small>
+                          <small>
+                            Cobrada S/ {(row.collectedCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })} · Por cobrar S/{" "}
+                            {(row.pendingCollectionCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                          </small>
+                        </div>
+                        <span className={row.closedWithoutPayment > 0 ? "admin-status admin-error" : "admin-status"}>
+                          {row.closedWithoutPayment} cerrados sin pago
+                        </span>
+                        <span className={row.pendingResolution > 0 ? "admin-status admin-error" : "admin-status"}>
+                          {row.pendingResolution} pendientes de decisión
+                        </span>
+                      </div>
+                    ))}
+                    {commissionsReport.companies.length === 0 && (
+                      <div className="empty-state compact-empty-state">
+                        <CheckCircle2 size={22} />
+                        <strong>Sin actividad en el período</strong>
+                        <span>Ninguna empresa tuvo pagos ni cierres sin pago en el rango seleccionado.</span>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </section>
           )}
           {selected &&

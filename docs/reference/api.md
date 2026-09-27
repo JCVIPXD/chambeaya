@@ -44,6 +44,46 @@ Ambos requieren sesión `ADMIN` (`403 ADMIN_ACCOUNT_REQUIRED` en cualquier otro 
 
 `PlatformSettings` es una fila única (`id: 'global'`), con valores iniciales `commissionBps: 1000` (10,00%) y `taxBps: 1800` (18,00%, el IGV sobre la comisión). **Cambiar este ajuste nunca altera un turno ya publicado**: la comisión y el IGV vigentes se copian a `Shift.commissionBps`/`taxBps` al publicarlo (`POST /api/business/shifts`) y quedan fijos ahí para siempre, incluida cualquier edición posterior del turno (`PATCH /api/business/shifts/:id` nunca los recalcula). Los dos puntos donde nace un `Payment` automático (el check-out del trabajador y el cierre manual de una asignación `NO_SHOW`/`ABANDONED`, ver "Pagos y movimientos" más abajo) copian esos valores del turno, no el ajuste global vigente en ese momento.
 
+### `GET /api/admin/commissions` (Alcance D: cuánto facturar a cada empresa)
+
+Sesión `ADMIN`. Query opcional `from`/`to`, **estrictamente `"AAAA-MM-DD"`** (`400 INVALID_INPUT` para cualquier otro formato, incluida una hora completa: la fecha con hora se prestaba a ambigüedad y se retiró en la corrección de `CN-20260926-020`). Sin ninguno de los dos, cubre todo el historial. `400 INVALID_INPUT` si `from` es posterior a `to`.
+
+**La fecha debe existir en el calendario** (corrección de BAJO-1 de `CN-20260926-022`): el formato `"AAAA-MM-DD"` por sí solo no bastaba — `"2026-02-30"` pasaba el regex y `Date` la corría en silencio al 2 de marzo (200 con el día equivocado), y `"2026-13-01"` llegaba como `Invalid Date` hasta Prisma (`500`, no `400`). `isRealCalendarDate` (`admin.routes.ts`) reconstruye la fecha en UTC a partir de año/mes/día y compara los tres componentes contra lo recibido; cualquier desborde de mes o de día (incluidos los años bisiestos: `"2024-02-29"` se acepta, `"2026-02-29"` no) responde `400 INVALID_INPUT` con `"INVALID_CALENDAR_DATE"` en `issues`.
+
+**`from`/`to` son fechas de calendario de Lima, nunca un instante UTC** (corrección de ALTO-1 de `CN-20260926-020`: la versión anterior interpretaba `"AAAA-MM-DD"` como medianoche UTC —05:00 de Lima— y usaba `to` como límite inclusivo (`lte`) de ese instante, así que un reporte mensual perdía todo lo ocurrido entre las 19:00 del penúltimo día y las 19:00 del último día hora Lima: comisión real que nunca se facturaba). Ahora:
+
+- `from` cubre desde las 00:00 de Lima de ese día (inclusivo).
+- `to` cubre el día completo: internamente se convierte a un límite **exclusivo** en las 00:00 de Lima del día siguiente (nunca `lte`, que redondearía hacia abajo).
+- Perú no observa horario de verano (`-05:00` todo el año), así que la conversión es una función pura y determinista (`limaDayStartUtc`/`limaNextDayStartUtc` en `admin.routes.ts`), nunca "restar 5 horas" repetido en varios sitios.
+
+Responde:
+
+```json
+{
+  "period": { "from": "2026-09-01", "to": null, "fromUtc": "2026-09-01T05:00:00.000Z", "toUtcExclusive": null },
+  "totals": { "toInvoiceCents": 0, "toInvoiceTaxCents": 0, "collectedCents": 0, "pendingCollectionCents": 0, "payments": 0, "pendingResolution": 0 },
+  "companies": [
+    { "companyId": "…", "name": "…", "ruc": "…", "toInvoiceCents": 0, "toInvoiceTaxCents": 0, "collectedCents": 0, "pendingCollectionCents": 0, "payments": 0, "closedWithoutPayment": 0, "pendingResolution": 0 }
+  ]
+}
+```
+
+`period` devuelve tanto las fechas de Lima recibidas (`from`/`to`, o `null` si no se pasaron) como los instantes UTC efectivos de la consulta (`fromUtc`, y `toUtcExclusive`: el límite es **exclusivo**, nombrado así a propósito para que no haya ambigüedad sobre si incluye o no ese instante).
+
+**Filtra por `Payment.createdAt`, nunca por `processedAt`**: en modo manual la comisión "por facturar" existe desde que se completa la asignación, esté o no marcada como pagada; filtrar por `processedAt` (`null` mientras siga `PENDING`) excluiría del período justo los pagos que todavía no se marcaron, que son los que más importa facturar.
+
+Reglas por bucket (los pagos `'legacy'` nunca aportan a ninguno: nacieron con comisión e IGV en 0):
+
+- **`toInvoiceCents`/`toInvoiceTaxCents` ("por facturar"):** suma de `commissionCents`/`taxCents` de todo pago `provider: 'manual'` que no esté `CANCELLED`, pagado o no. Es el modo vigente en producción (sin proveedor contratado): Chambeaya no cobra nada por la app, así que todo lo que corresponde facturar queda aquí.
+- **`collectedCents` ("cobrada"):** suma de `commissionCents + taxCents` de pagos con un proveedor de pasarela (Alcance E; cualquier `provider` que no sea `'manual'` ni `'legacy'`) que ya estén `PROCESSED`. Hoy siempre `0`: no existe ningún proveedor contratado.
+- **`pendingCollectionCents` ("por cobrar"):** lo mismo que arriba, para pagos de pasarela `PENDING`/`SCHEDULED`. Hoy siempre `0`.
+- **`payments`:** cantidad de pagos que aportaron a cualquiera de los tres buckets anteriores.
+- **`closedWithoutPayment`:** asignaciones que esa empresa cerró sin pagar dentro del período — ver "Asignaciones cerradas sin pago" más abajo. Sirve para detectar evasión de la comisión: una empresa que cierra trabajo hecho como "sin pago" en vez de completarlo nunca genera el `Payment` sobre el que se calcula la comisión. Filtra por `ShiftAssignment.closedWithoutPaymentAt`, nunca por ningún texto.
+- **`pendingResolution`:** asignaciones `NO_SHOW`/`ABANDONED` que esa empresa todavía no resolvió (ni `resolveAssignment` ni `cancelShift`), **sin filtrar por período**: es un estado actual, no un evento con fecha. Corrección de MEDIO-1 de `CN-20260926-020`: antes, dejar sin resolver una asignación la sacaba por completo del reporte (ni sumaba a `closedWithoutPayment` ni a ningún otro bucket); ahora queda visible mientras siga pendiente, para que no resolverla no sea una forma de esconderla.
+  - **No depende de que el estado ya esté persistido** (corrección de MEDIO-1 nuevo de `CN-20260926-022`): `NO_SHOW`/`ABANDONED` son perezosos (`resolveAssignmentLifecycle` los calcula la próxima vez que algo toca esa asignación puntual — check-in, check-out, o abrir el turno en el panel —, nunca un job de fondo), así que una asignación cuya ventana de check-in ya venció pero que nadie volvió a tocar sigue `ASSIGNED` en la base. Este reporte nunca escribe (es una ruta de solo lectura); en vez de persistir el ciclo de vida antes de contar, aplica la misma función pura `resolveAssignmentLifecycle` -sin guardar nada- sobre las `ASSIGNED` candidatas, junto con las `NO_SHOW`/`ABANDONED` ya persistidas. Prefiltro de rendimiento: solo trae `ASSIGNED` cuyo turno empezó hace más de `CHECK_IN_LATE_LIMIT_MS` (60 min), porque ninguna puede calificar antes de eso.
+
+`companies` incluye toda empresa con alguna actividad en el período (al menos un pago) **o** con `closedWithoutPayment`/`pendingResolution` mayor que cero (estos dos, sin filtro de período para `pendingResolution`); `totals` es la suma de esos mismos campos sobre todas las filas de `companies`.
+
 ## Empresa
 
 - `GET /api/business/company`: obtiene el perfil. Si la cuenta es anterior a esta implementación, crea el perfil empresarial automáticamente con el nombre y RUC registrados.
@@ -322,9 +362,10 @@ data: [{"id":"...","role":"Mozo de salón",...}]
   - `balanceCents` es la suma de los movimientos en estado `RELEASED`: **monto que la empresa ya confirmó como pagado/procesado**, no saldo que Chambeaya custodie o pueda transferir. Chambeaya no administra ni retiene ese dinero; el pago ocurre directamente entre empresa y trabajador, y este número es un registro de ese reporte.
   - `pendingBalanceCents` es la suma de los movimientos en estado `PENDING`: **monto reportado y aún pendiente de que la empresa lo confirme como procesado**, no dinero en tránsito dentro de Chambeaya.
   - `REVERSED` cubre pagos con incidencia (por ejemplo, un `Payment` cancelado) y no suma a ninguno de los dos totales.
-- `POST /api/workers/payments/:id/confirm`: el trabajador confirma que recibió un pago ya `PROCESSED` por la empresa (`workerConfirmedAt`); sobre un pago en cualquier otro estado responde `409 PAYMENT_NOT_REPORTABLE`. Responde `{ id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId }`, sin comisión, IGV ni total. Es una confirmación de recepción entre las partes, no una liberación de fondos retenidos por Chambeaya.
+  - **`canConfirmReceipt` (Alcance D), solo en los movimientos que vienen de un `Payment`:** booleano derivado por la API, `true` solo si `provider === 'manual'`, `status === 'PROCESSED'` y todavía no se confirmó la recepción (`workerConfirmedAt === null`). **Nunca se expone `provider` en crudo** — este booleano es la única forma en que el trabajador sabe que puede confirmar. La prueba de no fuga (`apps/api/tests/marketplace.no-commission-leak.test.ts`) sigue prohibiendo `commissionBps`/`commissionCents`/`taxBps`/`taxCents`/`totalCents`/`provider`/`needsReview` a cualquier profundidad; `canConfirmReceipt` no está en esa lista porque no revela ninguno de esos valores, solo una condición ya evaluada por el servidor.
+- `POST /api/workers/payments/:id/confirm`: el trabajador confirma que recibió un pago ya `PROCESSED` **y `provider: 'manual'`** (Alcance D: la misma condición que deriva `canConfirmReceipt`, para que un pago de pasarela del Alcance E, que se confirma por su propio webhook, nunca sea confirmable por este endpoint); sobre cualquier otro caso responde `409 PAYMENT_NOT_REPORTABLE`. Un pago `legacy` nunca llega aquí de todas formas: no tiene `assignmentId`, así que la búsqueda (filtrada por `assignment: { workerId }`) no lo encuentra. Responde `{ id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId }`, sin comisión, IGV, total ni `provider`. Es una confirmación de recepción entre las partes, no una liberación de fondos retenidos por Chambeaya.
 - En la práctica todos los movimientos provienen hoy de `Payment` (`PROCESSED → RELEASED`, `CANCELLED → REVERSED`, el resto `PENDING`): `recordWalletMovement` escribe `WalletMovement` directamente pero no está expuesto por ninguna ruta.
-- **No hay consumidor de este endpoint en la app enrutada.** La única pantalla de billetera que tuvo Flutter (`lib/features/marketplace/worker_pages.dart`) no estaba enrutada y se eliminó como código muerto en `CN-20260918-007`; el repositorio de Flutter conserva `walletMovements()`/`confirmPayment()` y el mapeo de estados (`'Liberado'`/`'Pendiente'`/`'Revertido'`) para cuando exista una pantalla de pagos enrutada. Los nombres internos que todavía suenan a custodia -el modelo `WalletMovement`, la ruta `/api/workers/wallet`, los estados `RELEASED`/`REVERSED`- se conservaron a propósito: renombrarlos o fusionar las tablas quedó explícitamente fuera de alcance, y esta sección es la mitigación acordada.
+- **Consumidor Flutter: "Mis pagos" (Alcance D), accesible desde Perfil** (`apps/mobile_flutter/lib/features/marketplace/worker_payments_page.dart`). De solo lectura: muestra el monto del trabajador, la empresa y el turno (la misma cadena `description`, `"${shift.title} · ${company.name}"`), la fecha y el estado -"Pendiente de pago" (`PENDING`), "Pagado" (`PROCESSED` sin confirmar) o "Recepción confirmada" (`receiptConfirmed`)-, derivado siempre de `status`/`receiptConfirmed`, nunca de `provider`. "Confirmar recepción" solo aparece si `canConfirmReceipt`. Antes de este alcance no había ninguna pantalla enrutada que mostrara pagos (la anterior se eliminó como código muerto en `CN-20260918-007`); el repositorio ya traía `walletMovements()`/`confirmPayment()` y el mapeo de estados (`'Liberado'`/`'Pendiente'`/`'Revertido'`) sin ningún consumidor. Los nombres internos que todavía suenan a custodia -el modelo `WalletMovement`, la ruta `/api/workers/wallet`, los estados `RELEASED`/`REVERSED`- se conservaron a propósito: renombrarlos o fusionar las tablas quedó explícitamente fuera de alcance, y esta sección es la mitigación acordada.
 
 ## Trabajadores del directorio
 
@@ -438,14 +479,22 @@ Una conversación pertenece a un trabajador del directorio y puede asociarse a u
 ## Pagos y movimientos
 
 - `GET /api/business/payments`
-- `POST /api/business/payments`
 - `GET /api/business/payments/:id`
-- `PATCH /api/business/payments/:id`
-- `DELETE /api/business/payments/:id`
+- `POST /api/business/payments/:id/mark-paid`
 
-Los montos se reciben en céntimos mediante `amountCents` para evitar errores de punto flotante. El máximo es `10000000` (S/ 100 000), igual que `payCents` de un turno; por encima responde `400 INVALID_INPUT`. Con la comisión máxima permitida el total sigue cabiendo en el `Int` de PostgreSQL.
+**Alcance D (registro confiable y modo manual): el CRUD manual (`POST`/`PATCH`/`DELETE /api/business/payments[/:id]`) se retiró por completo.** Permitía a la empresa inventar pagos, alterar montos y saltarse la comisión de Chambeaya; las tres rutas ya no están registradas (404 genérico de Express, no un `sendError` de esta app). Un `Payment` solo nace automáticamente al completarse una asignación (ver más abajo); el único escritor que le queda a la empresa es `mark-paid`.
 
-Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`.
+Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`. `SCHEDULED` está reservado para el Alcance E (checkout de pasarela en curso); sin proveedor contratado, ningún pago llega hoy a ese estado.
+
+### `POST /api/business/payments/:id/mark-paid`
+
+Único cambio de estado que le queda a la empresa. Transiciona `PENDING` → `PROCESSED` (con `processedAt`) sobre un pago **de esa empresa** cuyo `provider` sea `'manual'` (nacido de `checkOut`/`resolveAssignment`) o `'legacy'` (creado con el CRUD retirado, o backfill de un pago sin `assignmentId` anterior al Alcance C): en producción puede haber pagos `legacy` todavía `PENDING`, y marcarlos no altera ningún monto (comisión e IGV ya están en 0 desde que se crearon), así que sigue siendo seguro permitirlo. Nunca toca `amountCents`, `commissionCents`, `taxCents` ni `totalCents`.
+
+- Si el pago tiene `shiftId`, registra un `ShiftEvent` `PAYMENT_REPORTED` (mismo evento que dejaba el CRUD retirado al marcar `PROCESSED`).
+- Devuelve el `Payment` actualizado (mismos campos que `GET /api/business/payments/:id`).
+- **404 `PAYMENT_NOT_FOUND`**: el pago no existe o es de otra empresa.
+- **409 `PAYMENT_NOT_PAYABLE`**: el pago existe pero ya no es marcable — no está `PENDING` (ya se marcó antes, está `PROCESSED`/`CANCELLED`, o perdió una carrera contra otra llamada concurrente) o su `provider` no es `'manual'`/`'legacy'` (una pasarela del Alcance E se confirma solo por su propio webhook, nunca por este endpoint).
+- Atómico: un `updateMany` condicionado a `status: 'PENDING'` y al `provider`, dentro de una transacción. Dos llamadas concurrentes sobre el mismo pago dejan un solo `PROCESSED` y un solo `ShiftEvent`; la que pierde la carrera responde `409`.
 
 ### Comisión, IGV y total (Alcance C del plan de pagos)
 
@@ -454,14 +503,28 @@ Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`.
 - `commissionBps` / `commissionCents`: la comisión de Chambeaya, en puntos básicos y en céntimos.
 - `taxBps` / `taxCents`: el IGV **sobre la comisión** (no sobre `amountCents`), en puntos básicos y en céntimos.
 - `totalCents`: `amountCents + commissionCents + taxCents` — lo que paga la empresa. La comisión y el IGV van **encima** del pago al trabajador, nunca descontados de él.
-- `provider`: `'manual'` para un pago nacido de una asignación (reporte manual, sin pasarela) o `'legacy'` para uno creado con el CRUD manual de esta sección (retirado en el Alcance D) o para un pago sin `assignmentId` anterior a esta migración; en ambos casos con comisión e IGV en 0.
+- `provider`: `'manual'` para un pago nacido de una asignación (reporte manual, sin pasarela) o `'legacy'` para uno creado con el CRUD retirado o para un pago sin `assignmentId` anterior a la migración de comisión; en ambos casos con comisión e IGV en 0.
 - `needsReview`: reservado para el Alcance E (proveedor de pagos); no se usa todavía.
 
 Redondeo: enteros, "la mitad hacia arriba" — `commissionCents = floor((amountCents * commissionBps + 5000) / 10000)`, y el mismo cálculo para `taxCents` sobre `commissionCents`. Ejemplo con la comisión inicial (10% + 18% de IGV): un turno de **S/100** por persona da `amountCents: 10000`, `commissionCents: 1000` (S/10), `taxCents: 180` (S/1.80) y `totalCents: 11180` (**S/111.80** que paga la empresa por persona). La implementación de referencia es `apps/api/src/modules/payments/payment-amounts.ts#buildPaymentAmounts`.
 
 Los dos únicos puntos donde nace un `Payment` automático — el check-out del trabajador (`POST /api/shifts/:id/check-out`) y el cierre manual de una asignación `NO_SHOW`/`ABANDONED` (`POST /api/business/shifts/:id/assignments/:assignmentId/resolve` con `outcome: 'COMPLETED'`) — usan `Shift.commissionBps`/`taxBps` (fijados al publicar el turno, ver "Turnos"). Nunca leen el ajuste global: un turno anterior a la migración tiene `0`/`0` y genera pagos sin comisión. Ninguna respuesta de las rutas del trabajador (`/api/workers/*`, `/api/shifts*`, incluido el SSE `/api/shifts/events`) expone `commissionBps`, `commissionCents`, `taxBps`, `taxCents`, `totalCents`, `provider` ni `needsReview`: el trabajador solo ve su propio `amountCents`. La prueba de integración `payment-commission.integration.test.ts` recorre esas respuestas buscando esas claves.
 
-El CRUD manual de esta sección (`POST`/`PATCH`/`DELETE`, retirado en el Alcance D) sigue existiendo por compatibilidad: un pago creado así siempre queda `provider: 'legacy'`, con comisión e IGV en 0 y `totalCents === amountCents`. Un `PATCH` que cambie `amountCents` recalcula `commissionCents`/`taxCents`/`totalCents` con la comisión y el IGV **ya fijados** de ese pago (nunca los reinterpreta como los de un turno nuevo).
+### Asignaciones cerradas sin pago
+
+**Definición (corrección de MEDIO-1 de `CN-20260926-020`):** una asignación "cerrada sin pago" es una que llegó a `NO_SHOW` o `ABANDONED` -el trabajador se presentó (hizo check-in) o no se presentó- y que una decisión de la empresa cerró sin generar `Payment`. Nunca se detecta por texto libre: la versión anterior buscaba un prefijo fijo en `ShiftEvent.detail`, que se podía falsear (un motivo de `cancelShift` que empezara con ese mismo texto sumaba al conteo sin haber cerrado nada) y se podía ocultar (una `NO_SHOW`/`ABANDONED` nunca resuelta, o arrastrada por `cancelShift`, no contaba). Ahora es una señal estructurada en `ShiftAssignment`:
+
+- `closedWithoutPayment Boolean`, `closedWithoutPaymentAt DateTime?`, `closedWithoutPaymentById String?` (migración `20260927005242_assignment_closed_without_payment_signal`).
+- Se escriben en los dos únicos caminos que producen este cierre:
+  - `POST /api/business/shifts/:id/assignments/:assignmentId/resolve` con `outcome: 'CANCELLED'` sobre una asignación `NO_SHOW`/`ABANDONED`.
+  - `POST /api/business/shifts/:id/cancel` (`cancelShift`), cuando arrastra una asignación `NO_SHOW` sin resolver a `CANCELLED` junto con el resto del turno.
+- **Nunca** se escriben sobre una asignación `ASSIGNED` simple (nunca llegó a "presentarse o no": cancelar un turno futuro no es evasión de la comisión) ni sobre una ya `COMPLETED`/`CANCELLED`. `cancelShift` nunca puede arrastrar una asignación con `checkedInAt` no nulo -lo bloquea antes, con `409 SHIFT_NOT_CANCELLABLE`-, así que ese camino no existe hoy; si algún día se permitiera, debería marcar la señal igual.
+- Nunca se vuelve a `false`: una vez cerrada sin pago, queda así para siempre.
+- **`cancelShift` resuelve el ciclo de vida antes de decidir** (corrección de MEDIO-1 nuevo de `CN-20260926-022`): antes, una asignación que ya venció su ventana de check-in pero que nadie había vuelto a tocar seguía `ASSIGNED` en la base (`NO_SHOW`/`ABANDONED` son perezosos), así que `cancelShift` la cancelaba por la vía de `ASSIGNED` -sin la señal-. Ahora llama a la misma resolución de ciclo de vida que ya usan `resolveAssignment` y la lectura de postulaciones (`resolveShiftAssignmentsLifecycle`, en su propia transacción, antes de la transacción de `cancelShift`) para que una `NO_SHOW` vencida se trate como `NO_SHOW` y quede marcada.
+- **Revisado, no aplica:** la cancelación del trabajador (`marketplace.service.ts#cancelAssignment`) nunca marca la señal, a propósito (es una decisión del trabajador, no de la empresa, y nunca genera ni evita un `Payment`); la edición del turno (`updateShift`) y el estado "Rescate" (`rescueActive`) no tocan ninguna `ShiftAssignment`; `mark-paid` solo toca `Payment`. Ninguno de los tres puede esconder dinero por esta vía.
+- **Sin backfill histórico:** las filas creadas antes de la migración quedan con `closedWithoutPayment: false` y los otros dos campos en `NULL` — no hay forma de derivarlo de manera confiable sin depender del mismo texto libre que se está reemplazando.
+
+`GET /api/admin/commissions` filtra `closedWithoutPayment` por período usando `closedWithoutPaymentAt` (nunca `ShiftEvent.createdAt` ni ningún `detail`), y expone además `pendingResolution` (`NO_SHOW`/`ABANDONED` todavía sin resolver, sin filtro de período) para que dejar una asignación sin resolver no la esconda del reporte.
 
 ## Respuestas de error
 

@@ -42,6 +42,13 @@ describe('comisión de Chambeaya congelada al publicar, contra PostgreSQL real',
     authService: new DatabaseAuthService(prisma),
     businessService: new DatabaseBusinessService(prisma),
     marketplaceService: new DatabaseMarketplaceService(prisma),
+    // Este archivo registra muchos trabajadores a lo largo de todo su
+    // recorrido (un `registerWorker()` por caso); el límite de intentos de
+    // `/api/auth/*` (20 cada 15 min, pensado para proteger login/registro
+    // reales) no es lo que se está probando aquí, y con las pruebas nuevas
+    // de esta corrección ya lo supera. Mismo patrón que el resto de
+    // `apps/api/tests/integration` (p. ej. `worker-assignment-load`).
+    rateLimit: false,
   });
 
   let businessToken = '';
@@ -381,13 +388,19 @@ describe('comisión de Chambeaya congelada al publicar, contra PostgreSQL real',
     const payment = businessPayments.body.find((item: { assignmentId: string | null }) => item.assignmentId === assignmentId);
     expect(payment).toBeDefined();
     // El negocio SÍ ve la comisión (la paga): esto no es una fuga, es la
-    // regla contraria (la empresa siempre la ve). Se marca PROCESSED para
-    // poder ejercer `confirmPayment` como trabajador a continuación.
+    // regla contraria (la empresa siempre la ve). Se marca pagado (Alcance
+    // D: `mark-paid`, el CRUD manual con `PATCH` ya no existe) para poder
+    // ejercer `confirmPayment` como trabajador a continuación.
     const markProcessed = await request(app)
-      .patch(`/api/business/payments/${payment.id}`)
-      .set('Authorization', `Bearer ${businessToken}`)
-      .send({ status: 'PROCESSED' });
+      .post(`/api/business/payments/${payment.id}/mark-paid`)
+      .set('Authorization', `Bearer ${businessToken}`);
     expect(markProcessed.status).toBe(200);
+    expect(markProcessed.body.status).toBe('PROCESSED');
+
+    const walletBeforeConfirm = await request(app).get('/api/workers/wallet').set('Authorization', `Bearer ${workerToken}`);
+    expectNoLeak('GET /api/workers/wallet', walletBeforeConfirm.body);
+    const walletPayment = walletBeforeConfirm.body.movements.find((item: { id: string }) => item.id === payment.id);
+    expect(walletPayment).toMatchObject({ canConfirmReceipt: true, receiptConfirmed: false });
 
     const shiftsFeed = await request(app).get('/api/shifts');
     expectNoLeak('GET /api/shifts', shiftsFeed.body);
@@ -421,8 +434,428 @@ describe('comisión de Chambeaya congelada al publicar, contra PostgreSQL real',
 
     const wallet = await request(app).get('/api/workers/wallet').set('Authorization', `Bearer ${workerToken}`);
     expectNoLeak('GET /api/workers/wallet', wallet.body);
+    const confirmedWalletPayment = wallet.body.movements.find((item: { id: string }) => item.id === payment.id);
+    expect(confirmedWalletPayment).toMatchObject({ canConfirmReceipt: false, receiptConfirmed: true });
 
     const availability = await request(app).get('/api/workers/availability').set('Authorization', `Bearer ${workerToken}`);
     expectNoLeak('GET /api/workers/availability', availability.body);
+  });
+
+  // Alcance D: registro confiable y modo manual. El CRUD manual de pagos se
+  // retira (nunca vuelve a existir un `POST`/`PATCH`/`DELETE` en este
+  // router); el único escritor que le queda a la empresa es `mark-paid`.
+  describe('Alcance D: mark-paid y GET /api/admin/commissions', () => {
+    it('POST/PATCH/DELETE /api/business/payments[/:id] ya no existen (404)', async () => {
+      expect((await request(app).post('/api/business/payments').set('Authorization', `Bearer ${businessToken}`).send({})).status).toBe(404);
+      expect((await request(app).patch('/api/business/payments/x').set('Authorization', `Bearer ${businessToken}`).send({})).status).toBe(404);
+      expect((await request(app).delete('/api/business/payments/x').set('Authorization', `Bearer ${businessToken}`)).status).toBe(404);
+    });
+
+    it('mark-paid transiciona un pago manual PENDING a PROCESSED y registra un único PAYMENT_REPORTED', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno para mark-paid', startsAt: new Date(now + 10 * MINUTE), endsAt: new Date(now + 8 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId, credential } = await applyAndAccept(shiftId, workerToken);
+      expect((await confirm(shiftId, workerToken)).status).toBe(200);
+      expect((await checkIn(shiftId, workerToken, credential)).status).toBe(200);
+      expect((await checkOut(shiftId, workerToken)).status).toBe(200);
+      const payment = await verifier.payment.findUniqueOrThrow({ where: { assignmentId } });
+      expect(payment.status).toBe('PENDING');
+
+      const marked = await request(app).post(`/api/business/payments/${payment.id}/mark-paid`).set('Authorization', `Bearer ${businessToken}`);
+      expect(marked.status).toBe(200);
+      expect(marked.body).toMatchObject({ id: payment.id, status: 'PROCESSED' });
+      expect(marked.body.processedAt).toBeTruthy();
+
+      const events = await verifier.shiftEvent.findMany({ where: { shiftId, type: 'PAYMENT_REPORTED' } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ detail: payment.id, actorRole: 'BUSINESS' });
+
+      // Repetir la llamada (ya PROCESSED) responde 409 sin duplicar el evento.
+      const again = await request(app).post(`/api/business/payments/${payment.id}/mark-paid`).set('Authorization', `Bearer ${businessToken}`);
+      expect(again.status).toBe(409);
+      expect(again.body).toEqual({ error: 'PAYMENT_NOT_PAYABLE' });
+      expect(await verifier.shiftEvent.count({ where: { shiftId, type: 'PAYMENT_REPORTED' } })).toBe(1);
+    });
+
+    it('dos mark-paid concurrentes sobre el mismo pago producen un solo PROCESSED y un solo PAYMENT_REPORTED', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno para la carrera de mark-paid', startsAt: new Date(now + 10 * MINUTE), endsAt: new Date(now + 8 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId, credential } = await applyAndAccept(shiftId, workerToken);
+      expect((await confirm(shiftId, workerToken)).status).toBe(200);
+      expect((await checkIn(shiftId, workerToken, credential)).status).toBe(200);
+      expect((await checkOut(shiftId, workerToken)).status).toBe(200);
+      const payment = await verifier.payment.findUniqueOrThrow({ where: { assignmentId } });
+
+      const [first, second] = await Promise.all([
+        request(app).post(`/api/business/payments/${payment.id}/mark-paid`).set('Authorization', `Bearer ${businessToken}`),
+        request(app).post(`/api/business/payments/${payment.id}/mark-paid`).set('Authorization', `Bearer ${businessToken}`),
+      ]);
+      const statuses = [first.status, second.status].sort();
+      expect(statuses).toEqual([200, 409]);
+
+      const finalPayment = await verifier.payment.findUniqueOrThrow({ where: { id: payment.id } });
+      expect(finalPayment.status).toBe('PROCESSED');
+      expect(await verifier.shiftEvent.count({ where: { shiftId, type: 'PAYMENT_REPORTED' } })).toBe(1);
+    });
+
+    it('mark-paid acepta un pago legacy PENDING (backfill sin assignmentId) sin tocar ningún monto ni crear ShiftEvent', async () => {
+      const company = await verifier.company.findFirstOrThrow({ where: { owner: { email: 'empresa.comision@chambeaya.test' } } });
+      const legacy = await prisma.payment.create({
+        data: {
+          companyId: company.id, reference: `LEGACY-${Date.now()}`, description: 'Pago legacy de prueba',
+          amountCents: 5000, provider: 'legacy', commissionBps: 0, commissionCents: 0, taxBps: 0, taxCents: 0, totalCents: 5000,
+          status: 'PENDING',
+        },
+      });
+
+      const marked = await request(app).post(`/api/business/payments/${legacy.id}/mark-paid`).set('Authorization', `Bearer ${businessToken}`);
+      expect(marked.status).toBe(200);
+      expect(marked.body).toMatchObject({ id: legacy.id, status: 'PROCESSED', amountCents: 5000, commissionCents: 0, taxCents: 0 });
+      expect(await verifier.shiftEvent.count({ where: { detail: legacy.id } })).toBe(0);
+    });
+
+    it('mark-paid responde 404 para un pago de otra empresa y 409 para uno CANCELLED', async () => {
+      const otherCompanySalt = 'otra-empresa-salt';
+      await prisma.user.create({
+        data: {
+          email: 'otra.empresa.comision@chambeaya.test', passwordHash: hashPassword('OtraEmpresa123', otherCompanySalt), salt: otherCompanySalt,
+          role: 'BUSINESS', name: 'Otra empresa', identifier: '20777777777',
+        },
+      });
+      const otherLogin = await request(app).post('/api/auth/login').send({ email: 'otra.empresa.comision@chambeaya.test', password: 'OtraEmpresa123' });
+      const otherToken = otherLogin.body.token as string;
+
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno de la empresa dueña', startsAt: new Date(now + 10 * MINUTE), endsAt: new Date(now + 8 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId, credential } = await applyAndAccept(shiftId, workerToken);
+      expect((await confirm(shiftId, workerToken)).status).toBe(200);
+      expect((await checkIn(shiftId, workerToken, credential)).status).toBe(200);
+      expect((await checkOut(shiftId, workerToken)).status).toBe(200);
+      const payment = await verifier.payment.findUniqueOrThrow({ where: { assignmentId } });
+
+      const foreign = await request(app).post(`/api/business/payments/${payment.id}/mark-paid`).set('Authorization', `Bearer ${otherToken}`);
+      expect(foreign.status).toBe(404);
+      expect(foreign.body).toEqual({ error: 'PAYMENT_NOT_FOUND' });
+
+      await prisma.payment.update({ where: { id: payment.id }, data: { status: 'CANCELLED' } });
+      const cancelled = await request(app).post(`/api/business/payments/${payment.id}/mark-paid`).set('Authorization', `Bearer ${businessToken}`);
+      expect(cancelled.status).toBe(409);
+      expect(cancelled.body).toEqual({ error: 'PAYMENT_NOT_PAYABLE' });
+    });
+
+    // MEDIO-1 de CN-20260926-020: `closedWithoutPayment` es una señal
+    // estructurada en `ShiftAssignment` (`closedWithoutPayment`/`At`/`ById`),
+    // nunca un texto en `ShiftEvent.detail`. Los seis casos siguientes cubren
+    // exactamente los caminos pedidos por la auditoría.
+    it('resolveAssignment CANCELLED sobre NO_SHOW marca closedWithoutPayment con la fecha y el actor correctos', async () => {
+      const now = Date.now();
+      const noShowShiftId = await createShift({ title: 'Turno cerrado sin pago (no-show)', startsAt: new Date(now - 3 * HOUR), endsAt: new Date(now + 5 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId } = await applyAndAccept(noShowShiftId, workerToken);
+      await verifier.shiftAssignment.update({ where: { id: assignmentId }, data: { assignedAt: new Date(now - 4 * HOUR), workerConfirmedAt: new Date(now - 4 * HOUR) } });
+      const panel = await request(app).get(`/api/business/shifts/${noShowShiftId}/applications`).set('Authorization', `Bearer ${businessToken}`);
+      expect(panel.status).toBe(200);
+      expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } })).status).toBe('NO_SHOW');
+
+      const before = new Date();
+      const resolvedAsCancelled = await request(app)
+        .post(`/api/business/shifts/${noShowShiftId}/assignments/${assignmentId}/resolve`)
+        .set('Authorization', `Bearer ${businessToken}`)
+        .send({ outcome: 'CANCELLED', reason: 'No llegó y no hay evidencia de que trabajara' });
+      expect(resolvedAsCancelled.status).toBe(200);
+      expect(await verifier.payment.findFirst({ where: { assignmentId } })).toBeNull();
+
+      const closed = await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } });
+      expect(closed.closedWithoutPayment).toBe(true);
+      expect(closed.closedWithoutPaymentAt!.getTime()).toBeGreaterThanOrEqual(before.getTime());
+      const business = await verifier.company.findFirstOrThrow({ where: { owner: { email: 'empresa.comision@chambeaya.test' } } });
+      expect(closed.closedWithoutPaymentById).toBe(business.ownerId);
+    });
+
+    // La ventana de `ABANDONED` (60 min tras `endsAt`) se fuerza moviendo
+    // `endsAt` al pasado DESPUÉS de un check-in real, en vez de esperar una
+    // hora de reloj real.
+    it('resolveAssignment CANCELLED sobre ABANDONED también marca closedWithoutPayment', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno cerrado sin pago (abandonado)', startsAt: new Date(now - 10 * MINUTE), endsAt: new Date(now + 20 * MINUTE), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId, credential } = await applyAndAccept(shiftId, workerToken);
+      expect((await confirm(shiftId, workerToken)).status).toBe(200);
+      expect((await checkIn(shiftId, workerToken, credential)).status).toBe(200);
+
+      // Empuja `endsAt` bien al pasado (sin pasar por la API, que rechaza un
+      // `endsAt` ya vencido): `abandonedAt = endsAt + 60 min` queda en el
+      // pasado y el próximo refresco del panel marca ABANDONED.
+      await prisma.shift.update({ where: { id: shiftId }, data: { endsAt: new Date(now - 2 * HOUR) } });
+      const panel = await request(app).get(`/api/business/shifts/${shiftId}/applications`).set('Authorization', `Bearer ${businessToken}`);
+      expect(panel.status).toBe(200);
+      expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } })).status).toBe('ABANDONED');
+
+      const resolvedAsCancelled = await request(app)
+        .post(`/api/business/shifts/${shiftId}/assignments/${assignmentId}/resolve`)
+        .set('Authorization', `Bearer ${businessToken}`)
+        .send({ outcome: 'CANCELLED', reason: 'Hizo check-in y nunca volvió' });
+      expect(resolvedAsCancelled.status).toBe(200);
+
+      const closed = await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } });
+      expect(closed.closedWithoutPayment).toBe(true);
+      expect(closed.closedWithoutPaymentAt).not.toBeNull();
+    });
+
+    // "Ocultar, segunda vía" de la auditoría: antes, `cancelShift` arrastraba
+    // una `NO_SHOW` sin resolver a `CANCELLED` sin dejar ninguna señal.
+    it('cancelShift arrastrando una NO_SHOW sin resolver también la marca closedWithoutPayment', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno cancelado con NO_SHOW arrastrada', startsAt: new Date(now - 3 * HOUR), endsAt: new Date(now + 5 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId } = await applyAndAccept(shiftId, workerToken);
+      await verifier.shiftAssignment.update({ where: { id: assignmentId }, data: { assignedAt: new Date(now - 4 * HOUR), workerConfirmedAt: new Date(now - 4 * HOUR) } });
+      const panel = await request(app).get(`/api/business/shifts/${shiftId}/applications`).set('Authorization', `Bearer ${businessToken}`);
+      expect(panel.status).toBe(200);
+      expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } })).status).toBe('NO_SHOW');
+
+      const cancelled = await request(app)
+        .post(`/api/business/shifts/${shiftId}/cancel`)
+        .set('Authorization', `Bearer ${businessToken}`)
+        .send({ reason: 'Se cerró el local; de todas formas nadie llegó' });
+      expect(cancelled.status).toBe(200);
+
+      const closed = await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } });
+      expect(closed.status).toBe('CANCELLED');
+      expect(closed.closedWithoutPayment).toBe(true);
+      expect(closed.closedWithoutPaymentAt).not.toBeNull();
+    });
+
+    // Una `ASSIGNED` simple (nunca llegó a "presentarse o no") nunca cuenta,
+    // ni con un motivo que use textualmente el prefijo que usaba la versión
+    // anterior ("falsear, primera vía" de la auditoría): ya no se lee
+    // ningún texto, así que ese motivo no tiene ningún efecto.
+    it('cancelShift antes de que la asignación llegue a NO_SHOW nunca marca closedWithoutPayment, ni con un motivo que imite el prefijo retirado', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno cancelado antes de empezar', startsAt: new Date(now + HOUR), endsAt: new Date(now + 5 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId } = await applyAndAccept(shiftId, workerToken);
+      expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } })).status).toBe('ASSIGNED');
+
+      const cancelled = await request(app)
+        .post(`/api/business/shifts/${shiftId}/cancel`)
+        .set('Authorization', `Bearer ${businessToken}`)
+        .send({ reason: 'Cierre manual sin pago de una asignación: esto ya no debería alterar nada' });
+      expect(cancelled.status).toBe(200);
+
+      const closed = await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } });
+      expect(closed.status).toBe('CANCELLED');
+      expect(closed.closedWithoutPayment).toBe(false);
+      expect(closed.closedWithoutPaymentAt).toBeNull();
+    });
+
+    // "Ocultar, primera vía": una NO_SHOW/ABANDONED que la empresa nunca
+    // resuelve no debe poder desaparecer del reporte. `pendingResolution` la
+    // mantiene visible, sin necesitar ningún filtro de fecha.
+    it('una NO_SHOW nunca resuelta aparece como pendingResolution en el reporte, sin filtrar por fecha', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno con NO_SHOW pendiente de decisión', startsAt: new Date(now - 3 * HOUR), endsAt: new Date(now + 5 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      await applyAndAccept(shiftId, workerToken);
+      const application = await verifier.shiftApplication.findFirstOrThrow({ where: { shiftId } });
+      await verifier.shiftAssignment.update({
+        where: { applicationId: application.id },
+        data: { assignedAt: new Date(now - 4 * HOUR), workerConfirmedAt: new Date(now - 4 * HOUR) },
+      });
+      const panel = await request(app).get(`/api/business/shifts/${shiftId}/applications`).set('Authorization', `Bearer ${businessToken}`);
+      expect(panel.status).toBe(200);
+
+      const company = await verifier.company.findFirstOrThrow({ where: { owner: { email: 'empresa.comision@chambeaya.test' } } });
+      const oldPeriodReport = await request(app)
+        .get('/api/admin/commissions')
+        .query({ from: '2020-01-01', to: '2020-01-31' })
+        .set('Authorization', `Bearer ${adminToken}`);
+      expect(oldPeriodReport.status).toBe(200);
+      const companyRow = oldPeriodReport.body.companies.find((row: { companyId: string }) => row.companyId === company.id);
+      expect(companyRow).toBeDefined();
+      expect(companyRow.pendingResolution).toBeGreaterThanOrEqual(1);
+    });
+
+    // MEDIO-1 (nuevo) de CN-20260926-022, reproducido exactamente como lo
+    // hizo la auditoría: una asignación cuya ventana de check-in ya venció,
+    // pero que NADIE volvió a tocar (nunca se abrió el panel de
+    // postulaciones, nunca se llamó a `resolve`), sigue `ASSIGNED` en la
+    // base -`NO_SHOW`/`ABANDONED` son perezosos-. El reporte debe contarla
+    // igual, sin necesitar esa lectura previa.
+    it('una asignación ASSIGNED con la ventana de check-in ya vencida, que nadie resolvió todavía, cuenta como pendingResolution sin haberla tocado antes', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno ASSIGNED con ventana vencida, sin tocar', startsAt: new Date(now - 3 * HOUR), endsAt: new Date(now + 5 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId } = await applyAndAccept(shiftId, workerToken);
+      // Ventana de check-in vencida (`assignedAt` bien en el pasado), pero
+      // sin abrir el panel ni llamar a `resolve`: a propósito, para que
+      // ningún código intermedio persista el `NO_SHOW` antes del reporte.
+      await prisma.shiftAssignment.update({ where: { id: assignmentId }, data: { assignedAt: new Date(now - 4 * HOUR) } });
+      expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } })).status).toBe('ASSIGNED');
+
+      const company = await verifier.company.findFirstOrThrow({ where: { owner: { email: 'empresa.comision@chambeaya.test' } } });
+      const report = await request(app).get('/api/admin/commissions').set('Authorization', `Bearer ${adminToken}`);
+      expect(report.status).toBe(200);
+      const companyRow = report.body.companies.find((row: { companyId: string }) => row.companyId === company.id);
+      expect(companyRow?.pendingResolution).toBeGreaterThanOrEqual(1);
+
+      // El reporte es de solo lectura: no debe haber persistido nada.
+      expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } })).status).toBe('ASSIGNED');
+    });
+
+    // La misma asignación de arriba, pero la empresa cancela el turno
+    // completo (`cancelShift`) SIN haber abierto antes las postulaciones:
+    // debe quedar `closedWithoutPayment`, no solo `CANCELLED` a secas (era
+    // exactamente la vía que reprodujo la auditoría).
+    it('cancelShift sobre un turno cuya única asignación tiene la ventana vencida (sin resolver antes) la marca closedWithoutPayment', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno ASSIGNED con ventana vencida, cancelado sin resolver antes', startsAt: new Date(now - 3 * HOUR), endsAt: new Date(now + 5 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId } = await applyAndAccept(shiftId, workerToken);
+      await prisma.shiftAssignment.update({ where: { id: assignmentId }, data: { assignedAt: new Date(now - 4 * HOUR) } });
+      expect((await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } })).status).toBe('ASSIGNED');
+
+      const cancelled = await request(app)
+        .post(`/api/business/shifts/${shiftId}/cancel`)
+        .set('Authorization', `Bearer ${businessToken}`)
+        .send({ reason: 'Se cerró el local; nunca abrimos el panel de postulaciones' });
+      expect(cancelled.status).toBe(200);
+
+      const closed = await verifier.shiftAssignment.findUniqueOrThrow({ where: { id: assignmentId } });
+      expect(closed.status).toBe('CANCELLED');
+      expect(closed.closedWithoutPayment).toBe(true);
+      expect(closed.closedWithoutPaymentAt).not.toBeNull();
+
+      const company = await verifier.company.findFirstOrThrow({ where: { owner: { email: 'empresa.comision@chambeaya.test' } } });
+      const report = await request(app).get('/api/admin/commissions').set('Authorization', `Bearer ${adminToken}`);
+      const companyRow = report.body.companies.find((row: { companyId: string }) => row.companyId === company.id);
+      expect(companyRow?.closedWithoutPayment).toBeGreaterThanOrEqual(1);
+    });
+
+    it('GET /api/admin/commissions totaliza "por facturar" (manual) por empresa y período, y excluye legacy', async () => {
+      const uniqueSuffix = `${Date.now()}`;
+      const companyASalt = `salt-a-${uniqueSuffix}`;
+      await prisma.user.create({
+        data: {
+          email: `empresa.a.${uniqueSuffix}@chambeaya.test`, passwordHash: hashPassword('EmpresaA1234', companyASalt), salt: companyASalt,
+          role: 'BUSINESS', name: 'Empresa A del reporte', identifier: `2088${uniqueSuffix}`.slice(0, 11),
+        },
+      });
+      const loginA = await request(app).post('/api/auth/login').send({ email: `empresa.a.${uniqueSuffix}@chambeaya.test`, password: 'EmpresaA1234' });
+      const tokenA = loginA.body.token as string;
+
+      const settings = await verifier.platformSettings.findUniqueOrThrow({ where: { id: 'global' } });
+      // `Company` nace perezosamente (`companyFor`, un `upsert`) en la
+      // primera llamada autenticada que la necesita -aquí, crear el
+      // turno-, nunca en el registro/login: leerla antes de esa llamada
+      // encontraría 0 filas.
+      const shift = await request(app).post('/api/business/shifts').set('Authorization', `Bearer ${tokenA}`).send({
+        title: 'Turno del reporte de comisiones', location: 'San Isidro, Lima',
+        startsAt: new Date(Date.now() + 10 * MINUTE).toISOString(), endsAt: new Date(Date.now() + 8 * HOUR).toISOString(),
+        payCents: 20000, requiredWorkers: 1,
+        description: 'Turno de prueba de integración del reporte de comisiones.',
+        requirements: 'Disponibilidad completa para el horario indicado.',
+        expectedCommissionBps: settings.commissionBps, expectedTaxBps: settings.taxBps,
+      });
+      expect(shift.status).toBe(201);
+      const companyA = await verifier.company.findFirstOrThrow({ where: { owner: { email: `empresa.a.${uniqueSuffix}@chambeaya.test` } } });
+      const workerToken = await registerWorker();
+      const application = await request(app).post(`/api/shifts/${shift.body.id}/applications`).set('Authorization', `Bearer ${workerToken}`).send({ answers: [] });
+      const accepted = await request(app).patch(`/api/business/shifts/${shift.body.id}/applications/${application.body.id}`).set('Authorization', `Bearer ${tokenA}`).send({ decision: 'ACCEPTED' });
+      expect(accepted.status).toBe(200);
+      const mine = await request(app).get('/api/workers/applications').set('Authorization', `Bearer ${workerToken}`);
+      const assignment = mine.body.find((item: { shiftId: string }) => item.shiftId === shift.body.id).assignment as { id: string; checkInCredential: string };
+      expect((await confirm(shift.body.id, workerToken)).status).toBe(200);
+      expect((await checkIn(shift.body.id, workerToken, assignment.checkInCredential)).status).toBe(200);
+      expect((await checkOut(shift.body.id, workerToken)).status).toBe(200);
+      const payment = await verifier.payment.findUniqueOrThrow({ where: { assignmentId: assignment.id } });
+      expect(payment).toMatchObject({ amountCents: 20000, commissionCents: 2000, taxCents: 360 });
+
+      // Fuera del período consultado más abajo: no debe sumar a los totales.
+      const outOfRangeDate = new Date('2020-01-01T00:00:00.000Z');
+      await prisma.payment.update({ where: { id: payment.id }, data: { createdAt: outOfRangeDate } });
+
+      const outOfRange = await request(app).get('/api/admin/commissions').query({ from: '2026-01-01', to: '2026-12-31' }).set('Authorization', `Bearer ${adminToken}`);
+      expect(outOfRange.status).toBe(200);
+      expect(outOfRange.body.companies.find((row: { companyId: string }) => row.companyId === companyA.id)).toBeUndefined();
+
+      // Sin filtro de fecha, sí debe aparecer con la comisión/IGV correctos,
+      // marcado como "por facturar" aunque siga PENDING (no se ha marcado
+      // pagado): el modo manual no cobra nada por la app.
+      const allTime = await request(app).get('/api/admin/commissions').set('Authorization', `Bearer ${adminToken}`);
+      expect(allTime.status).toBe(200);
+      const companyRow = allTime.body.companies.find((row: { companyId: string }) => row.companyId === companyA.id);
+      expect(companyRow).toMatchObject({ name: 'Empresa A del reporte', toInvoiceCents: 2000, toInvoiceTaxCents: 360, collectedCents: 0, pendingCollectionCents: 0, payments: 1 });
+    });
+
+    // Corrección de ALTO-1 de CN-20260926-020, contra Postgres real: los
+    // límites son de calendario de LIMA, no de UTC. Antes, `to: '2026-08-31'`
+    // se interpretaba como `<= 2026-08-31T00:00:00.000Z` (medianoche UTC =
+    // 31/08 19:00 hora Lima) y perdía todo lo ocurrido después de esa hora,
+    // hora Lima, del último día.
+    it('los límites de from/to son de calendario de Lima: 31/08 23:59:59 Lima entra en agosto; el cambio de año también respeta ese límite', async () => {
+      const now = Date.now();
+      const shiftId = await createShift({ title: 'Turno para límites de fecha de Lima', startsAt: new Date(now + 10 * MINUTE), endsAt: new Date(now + 8 * HOUR), payCents: 10000 });
+      const workerToken = await registerWorker();
+      const { assignmentId, credential } = await applyAndAccept(shiftId, workerToken);
+      expect((await confirm(shiftId, workerToken)).status).toBe(200);
+      expect((await checkIn(shiftId, workerToken, credential)).status).toBe(200);
+      expect((await checkOut(shiftId, workerToken)).status).toBe(200);
+      const payment = await verifier.payment.findUniqueOrThrow({ where: { assignmentId } });
+
+      const companyId = payment.companyId;
+      expect(payment).toMatchObject({ commissionCents: 1000, taxCents: 180 });
+
+      // 31/08 23:59:59 hora Lima = 01/09 04:59:59 UTC: la versión anterior
+      // (medianoche UTC) ya lo daba por fuera de agosto; debe seguir DENTRO.
+      await prisma.payment.update({ where: { id: payment.id }, data: { createdAt: new Date('2026-08-31T23:59:59.000-05:00') } });
+      const august = await request(app).get('/api/admin/commissions').query({ from: '2026-08-01', to: '2026-08-31' }).set('Authorization', `Bearer ${adminToken}`);
+      expect(august.status).toBe(200);
+      expect(august.body.period).toMatchObject({ fromUtc: '2026-08-01T05:00:00.000Z', toUtcExclusive: '2026-09-01T05:00:00.000Z' });
+      const augustBefore = august.body.companies.find((row: { companyId: string }) => row.companyId === companyId);
+      expect(augustBefore?.payments).toBeGreaterThanOrEqual(1);
+
+      // 01/09 00:00:00 hora Lima = 01/09 05:00:00 UTC: un segundo después,
+      // ya debe quedar FUERA de agosto (comparación relativa: la comisión de
+      // ESTE pago, 1000, ya no está incluida) y DENTRO de setiembre.
+      await prisma.payment.update({ where: { id: payment.id }, data: { createdAt: new Date('2026-09-01T00:00:00.000-05:00') } });
+      const augustAfterMoving = await request(app).get('/api/admin/commissions').query({ from: '2026-08-01', to: '2026-08-31' }).set('Authorization', `Bearer ${adminToken}`);
+      const augustAfter = augustAfterMoving.body.companies.find((row: { companyId: string }) => row.companyId === companyId);
+      expect((augustAfter?.toInvoiceCents ?? 0)).toBeLessThanOrEqual((augustBefore?.toInvoiceCents ?? 0) - 1000);
+
+      const september = await request(app).get('/api/admin/commissions').query({ from: '2026-09-01', to: '2026-09-30' }).set('Authorization', `Bearer ${adminToken}`);
+      const septemberRow = september.body.companies.find((row: { companyId: string }) => row.companyId === companyId);
+      expect(septemberRow?.payments).toBeGreaterThanOrEqual(1);
+
+      // Cambio de año: 31/12 23:00 hora Lima cae en diciembre 2026, nunca en enero 2027.
+      await prisma.payment.update({ where: { id: payment.id }, data: { createdAt: new Date('2026-12-31T23:00:00.000-05:00') } });
+      const december = await request(app).get('/api/admin/commissions').query({ from: '2026-12-01', to: '2026-12-31' }).set('Authorization', `Bearer ${adminToken}`);
+      expect(december.body.companies.find((row: { companyId: string }) => row.companyId === companyId)?.payments).toBeGreaterThanOrEqual(1);
+      // `pendingResolution` nunca se filtra por período (a propósito, ver el
+      // test dedicado más arriba), así que esta empresa puede seguir
+      // apareciendo por asignaciones pendientes de otras pruebas de este
+      // mismo archivo: lo que debe dar 0 en enero es lo que SÍ depende del
+      // período (el pago movido a diciembre).
+      const nextJanuary = await request(app).get('/api/admin/commissions').query({ from: '2027-01-01', to: '2027-01-31' }).set('Authorization', `Bearer ${adminToken}`);
+      const nextJanuaryRow = nextJanuary.body.companies.find((row: { companyId: string }) => row.companyId === companyId);
+      expect(nextJanuaryRow?.toInvoiceCents ?? 0).toBe(0);
+      expect(nextJanuaryRow?.payments ?? 0).toBe(0);
+    });
+
+    it('GET /api/admin/commissions rechaza un from/to que no sea estrictamente AAAA-MM-DD (una fecha-hora completa ya no se acepta)', async () => {
+      const response = await request(app).get('/api/admin/commissions').query({ from: '2026-09-01T00:00:00.000Z' }).set('Authorization', `Bearer ${adminToken}`);
+      expect(response.status).toBe(400);
+    });
+
+    it('GET /api/admin/commissions requiere sesión ADMIN y valida el rango de fechas', async () => {
+      const forbidden = await request(app).get('/api/admin/commissions').set('Authorization', `Bearer ${businessToken}`);
+      expect(forbidden.status).toBe(403);
+
+      const invalidRange = await request(app).get('/api/admin/commissions').query({ from: '2026-12-31', to: '2026-01-01' }).set('Authorization', `Bearer ${adminToken}`);
+      expect(invalidRange.status).toBe(400);
+    });
   });
 });

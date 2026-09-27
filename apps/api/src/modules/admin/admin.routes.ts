@@ -9,6 +9,7 @@ import {
   type AuthService,
 } from "../auth/auth.service.js";
 import { PrivateDocumentStorage } from "../talent/private_document_storage.js";
+import { CHECK_IN_LATE_LIMIT_MS, resolveAssignmentLifecycle } from "../operations/shift-state.js";
 
 function bearerToken(value: string | undefined) {
   return value?.startsWith("Bearer ") ? value.slice(7).trim() : "";
@@ -38,6 +39,65 @@ const companyUpdateSchema = companyCreateSchema
 const platformSettingsUpdateSchema = z.object({
   commissionBps: z.number().int().min(0).max(5000),
 });
+
+// Corrección de ALTO-1 de CN-20260926-020: `from`/`to` son fechas de
+// CALENDARIO de Lima ("AAAA-MM-DD"), nunca un instante UTC. La versión
+// anterior aceptaba cualquier ISO-8601 y `z.coerce.date()` interpretaba
+// "AAAA-MM-DD" como medianoche UTC (05:00 de Lima), así que el `to` de un
+// mes completo excluía todo lo ocurrido entre las 19:00 del penúltimo día y
+// las 19:00 del último día hora Lima: comisión que nunca se facturaba.
+// Ahora solo se acepta el formato estricto "AAAA-MM-DD" (400 INVALID_INPUT
+// para cualquier otra cosa, incluida una hora completa: eliminar la
+// ambigüedad es más seguro que adivinarla) y se convierte con una única
+// función (`limaDayStartUtc`), nunca restando 5 horas a mano en varios
+// sitios.
+// BAJO-1 de CN-20260926-022: la sola forma "AAAA-MM-DD" no basta. El regex
+// admite "2026-02-30" (Prisma/`Date` lo corría en silencio al 02/03: 200 con
+// el día equivocado) y "2026-13-01" (mes fuera de rango: `new Date(...)`
+// devuelve `Invalid Date`, que Prisma no acepta -antes respondía `500`, no
+// `400`). `isRealCalendarDate` reconstruye la fecha en UTC y compara año, mes
+// y día contra lo recibido: cualquier desborde (mes >12, día que no existe
+// en ese mes, incluidos los bisiestos) deja de coincidir y se rechaza.
+function isRealCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12) return false;
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+const dayOnly = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "INVALID_DATE_FORMAT")
+  .refine(isRealCalendarDate, "INVALID_CALENDAR_DATE");
+const commissionsQuerySchema = z.object({
+  from: dayOnly.optional(),
+  to: dayOnly.optional(),
+}).refine((value) => !value.from || !value.to || value.from <= value.to, { message: "INVALID_RANGE", path: ["to"] });
+
+// Perú no observa horario de verano: `-05:00` es válido para cualquier
+// fecha, todo el año. Pasar el desfase explícito en el string ISO (en vez de
+// restar `5 * 60 * 60 * 1000` a mano) delega el cálculo al parser de `Date`,
+// que ya sabe manejar los saltos de mes y de año.
+const LIMA_UTC_OFFSET = "-05:00";
+/** El instante UTC de la medianoche de Lima de ese día (límite inicial, inclusivo). */
+function limaDayStartUtc(day: string): Date {
+  return new Date(`${day}T00:00:00.000${LIMA_UTC_OFFSET}`);
+}
+/** El instante UTC de la medianoche de Lima del día SIGUIENTE (límite final, exclusivo: `lt`, nunca `lte`). */
+function limaNextDayStartUtc(day: string): Date {
+  return new Date(limaDayStartUtc(day).getTime() + 24 * 60 * 60 * 1000);
+}
+
+// Proveedores que hoy pueden aparecer en `Payment.provider`. `'manual'` es
+// el único que genera comisión "por facturar" (el modo sin pasarela vigente
+// en producción); `'legacy'` (CRUD retirado o backfill sin `assignmentId`)
+// nunca tuvo comisión y queda fuera de los tres totales. Cualquier otro
+// valor es una pasarela del Alcance E (todavía ninguna contratada): hoy la
+// consulta de abajo nunca encuentra filas para "cobrada"/"por cobrar", pero
+// la estructura ya queda lista para cuando exista una.
+const GATEWAY_PROVIDER_FILTER = { notIn: ["manual", "legacy"] as string[] };
 
 export function createAdminRouter(
   authService: AuthService = new DatabaseAuthService(),
@@ -376,6 +436,191 @@ export function createAdminRouter(
         taxBps: updated.taxBps,
         updatedAt: updated.updatedAt,
         updatedBy: updated.updatedBy,
+      });
+    }),
+  );
+
+  // Alcance D: cuánto le debe facturar Chambeaya a cada empresa (modo
+  // manual, sin pasarela contratada todavía) y cuánto ya cobró/tiene por
+  // cobrar vía pasarela (Alcance E; hoy siempre 0, ver
+  // `GATEWAY_PROVIDER_FILTER`). Filtra por `Payment.createdAt` -nunca por
+  // `processedAt`-: "por facturar" debe incluir la comisión de un pago
+  // `manual` que la empresa TODAVÍA no marcó pagado (`processedAt` sigue
+  // `null`), porque en modo manual Chambeaya no cobra nada por la app y de
+  // todas formas le corresponde facturar esa comisión; filtrar por
+  // `processedAt` los excluiría del período por completo.
+  router.get("/commissions", (request, response) =>
+    guard(request, response, async () => {
+      const query = commissionsQuerySchema.parse({ from: request.query.from, to: request.query.to });
+      // Ventana en instantes UTC, pero calculada a partir de fechas de
+      // calendario de LIMA (corrección de ALTO-1 de CN-20260926-020): `gte`
+      // inclusivo desde la medianoche de Lima de `from`, `lt` EXCLUSIVO
+      // desde la medianoche de Lima del día siguiente a `to` (nunca `lte`,
+      // que redondearía hacia abajo y perdería las últimas horas de ese
+      // día). Se aplica igual a `Payment.createdAt` y a
+      // `ShiftAssignment.closedWithoutPaymentAt`: ambos son el mismo tipo de
+      // corte de período.
+      const fromUtc = query.from ? limaDayStartUtc(query.from) : undefined;
+      const toUtcExclusive = query.to ? limaNextDayStartUtc(query.to) : undefined;
+      const periodFilter = (fromUtc || toUtcExclusive)
+        ? { ...(fromUtc ? { gte: fromUtc } : {}), ...(toUtcExclusive ? { lt: toUtcExclusive } : {}) }
+        : undefined;
+
+      const [toInvoice, collected, pendingCollection, closedWithoutPaymentRows, pendingResolutionRows, companies] = await Promise.all([
+        prisma.payment.groupBy({
+          by: ["companyId"],
+          where: { provider: "manual", status: { not: "CANCELLED" }, ...(periodFilter ? { createdAt: periodFilter } : {}) },
+          _sum: { commissionCents: true, taxCents: true },
+          _count: { _all: true },
+        }),
+        prisma.payment.groupBy({
+          by: ["companyId"],
+          where: { provider: GATEWAY_PROVIDER_FILTER, status: "PROCESSED", ...(periodFilter ? { createdAt: periodFilter } : {}) },
+          _sum: { commissionCents: true, taxCents: true },
+          _count: { _all: true },
+        }),
+        prisma.payment.groupBy({
+          by: ["companyId"],
+          where: { provider: GATEWAY_PROVIDER_FILTER, status: { in: ["PENDING", "SCHEDULED"] }, ...(periodFilter ? { createdAt: periodFilter } : {}) },
+          _sum: { commissionCents: true, taxCents: true },
+          _count: { _all: true },
+        }),
+        // Señal estructurada (corrección de MEDIO-1 de CN-20260926-020, ver
+        // `business.service.ts`): nunca depende de `ShiftEvent.detail`. Sin
+        // columna `companyId` directa en `ShiftAssignment`, se agrega en JS
+        // a partir de `shift.companyId` (mismo patrón que ya usaba la
+        // versión anterior con `ShiftEvent`).
+        prisma.shiftAssignment.findMany({
+          where: { closedWithoutPayment: true, ...(periodFilter ? { closedWithoutPaymentAt: periodFilter } : {}) },
+          select: { shift: { select: { companyId: true } } },
+        }),
+        // "Pendientes de decisión": `NO_SHOW`/`ABANDONED` que la empresa
+        // TODAVÍA no resolvió. Nunca se filtra por período -es un estado
+        // actual, no un evento con fecha propia-, precisamente para que
+        // dejarlas sin resolver no las saque del reporte sin importar qué
+        // rango se consulte.
+        //
+        // Corrección de MEDIO-1 (nuevo) de CN-20260926-022: no basta con leer
+        // el estado PERSISTIDO. `NO_SHOW`/`ABANDONED` son perezosos (los
+        // calcula `resolveAssignmentLifecycle` la próxima vez que algo toca
+        // esa asignación puntual -check-in, check-out, o abrir el turno en
+        // el panel-, nunca un job de fondo), así que una asignación que ya
+        // venció su ventana pero que nadie volvió a tocar sigue `ASSIGNED`
+        // en la base. Este reporte NUNCA escribe (es una ruta de lectura,
+        // sin abrir ninguna transacción por turno: escribir aquí sería caro
+        // -una transacción Serializable por cada turno con candidatos- y
+        // competiría por las mismas filas que `resolveAssignment`/
+        // `cancelShift`); en vez de eso, trae también las `ASSIGNED` y
+        // aplica la MISMA función pura (`resolveAssignmentLifecycle`, sin
+        // persistir nada) para decidir su estado efectivo.
+        //
+        // Prefiltro de rendimiento: ninguna asignación puede volverse
+        // `NO_SHOW`/`ABANDONED` antes de que pasen `CHECK_IN_LATE_LIMIT_MS`
+        // (60 min) desde que su turno empezó (`checkInWindowViolation` nunca
+        // cierra la ventana antes de eso, y `ABANDONED` exige además que
+        // pase `endsAt`, siempre después de `startsAt`). Filtrar por
+        // `shift.startsAt <= ahora - 60min` a nivel de base evita traer
+        // todas las asignaciones `ASSIGNED` de turnos futuros o recién
+        // empezados, que nunca podrían calificar.
+        prisma.shiftAssignment.findMany({
+          where: {
+            OR: [
+              { status: { in: ["NO_SHOW", "ABANDONED"] } },
+              { status: "ASSIGNED", shift: { startsAt: { lte: new Date(Date.now() - CHECK_IN_LATE_LIMIT_MS) } } },
+            ],
+          },
+          select: {
+            status: true, assignedAt: true, checkedInAt: true, checkedOutAt: true,
+            shift: { select: { companyId: true, startsAt: true, endsAt: true } },
+          },
+        }),
+        prisma.company.findMany({ select: { id: true, name: true, ruc: true } }),
+      ]);
+
+      const countByCompany = (rows: { shift: { companyId: string } | null }[]) => {
+        const map = new Map<string, number>();
+        for (const row of rows) {
+          const companyId = row.shift?.companyId;
+          if (!companyId) continue;
+          map.set(companyId, (map.get(companyId) ?? 0) + 1);
+        }
+        return map;
+      };
+      const closedWithoutPaymentByCompany = countByCompany(closedWithoutPaymentRows);
+      const now = new Date();
+      const effectivelyPending = pendingResolutionRows.filter((row) => {
+        if (!row.shift) return false;
+        const lifecycle = resolveAssignmentLifecycle(row, row.shift, now);
+        return lifecycle.status === "NO_SHOW" || lifecycle.status === "ABANDONED";
+      });
+      const pendingResolutionByCompany = countByCompany(effectivelyPending);
+
+      type Row = {
+        companyId: string;
+        _sum: { commissionCents: number | null; taxCents: number | null };
+        _count: { _all: number };
+      };
+      const byCompany = <T extends Row>(rows: T[]) => new Map(rows.map((row) => [row.companyId, row]));
+      const toInvoiceByCompany = byCompany(toInvoice as unknown as Row[]);
+      const collectedByCompany = byCompany(collected as unknown as Row[]);
+      const pendingByCompany = byCompany(pendingCollection as unknown as Row[]);
+
+      // `pendingResolution` se incluye SIEMPRE, sin importar el período
+      // consultado: es justamente la métrica que evita que una empresa se
+      // esconda del reporte con solo dejar asignaciones sin resolver.
+      const relevantCompanyIds = new Set<string>([
+        ...toInvoiceByCompany.keys(),
+        ...collectedByCompany.keys(),
+        ...pendingByCompany.keys(),
+        ...closedWithoutPaymentByCompany.keys(),
+        ...pendingResolutionByCompany.keys(),
+      ]);
+
+      const companyRows = companies
+        .filter((company) => relevantCompanyIds.has(company.id))
+        .map((company) => {
+          const invoice = toInvoiceByCompany.get(company.id);
+          const gatewayCollected = collectedByCompany.get(company.id);
+          const gatewayPending = pendingByCompany.get(company.id);
+          return {
+            companyId: company.id,
+            name: company.name,
+            ruc: company.ruc,
+            toInvoiceCents: invoice?._sum.commissionCents ?? 0,
+            toInvoiceTaxCents: invoice?._sum.taxCents ?? 0,
+            collectedCents: (gatewayCollected?._sum.commissionCents ?? 0) + (gatewayCollected?._sum.taxCents ?? 0),
+            pendingCollectionCents: (gatewayPending?._sum.commissionCents ?? 0) + (gatewayPending?._sum.taxCents ?? 0),
+            payments: (invoice?._count._all ?? 0) + (gatewayCollected?._count._all ?? 0) + (gatewayPending?._count._all ?? 0),
+            closedWithoutPayment: closedWithoutPaymentByCompany.get(company.id) ?? 0,
+            pendingResolution: pendingResolutionByCompany.get(company.id) ?? 0,
+          };
+        })
+        .sort((a, b) => b.toInvoiceCents - a.toInvoiceCents);
+
+      const totals = companyRows.reduce(
+        (acc, row) => ({
+          toInvoiceCents: acc.toInvoiceCents + row.toInvoiceCents,
+          toInvoiceTaxCents: acc.toInvoiceTaxCents + row.toInvoiceTaxCents,
+          collectedCents: acc.collectedCents + row.collectedCents,
+          pendingCollectionCents: acc.pendingCollectionCents + row.pendingCollectionCents,
+          payments: acc.payments + row.payments,
+          pendingResolution: acc.pendingResolution + row.pendingResolution,
+        }),
+        { toInvoiceCents: 0, toInvoiceTaxCents: 0, collectedCents: 0, pendingCollectionCents: 0, payments: 0, pendingResolution: 0 },
+      );
+
+      response.json({
+        // Período efectivo tal como se aplicó, sin ambigüedad (corrección de
+        // ALTO-1): las fechas de Lima recibidas y los instantes UTC reales
+        // usados en la consulta (`toUtcExclusive` es el límite EXCLUSIVO).
+        period: {
+          from: query.from ?? null,
+          to: query.to ?? null,
+          fromUtc: fromUtc?.toISOString() ?? null,
+          toUtcExclusive: toUtcExclusive?.toISOString() ?? null,
+        },
+        totals,
+        companies: companyRows,
       });
     }),
   );

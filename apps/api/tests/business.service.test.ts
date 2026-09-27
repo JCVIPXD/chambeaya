@@ -1102,6 +1102,11 @@ describe('DatabaseBusinessService.cancelShift', () => {
     const prisma = {
       company: { upsert: companyUpsert() },
       shift: { findFirst: vi.fn(async () => expiredShift) },
+      // Resuelve el ciclo de vida antes de cancelar (corrección de MEDIO-1
+      // de CN-20260926-022): sin asignaciones, el `preview` de
+      // `resolveShiftAssignmentsLifecycle` no encuentra nada que cambiar y
+      // vuelve sin abrir ninguna transacción propia.
+      shiftAssignment: { findMany: vi.fn(async () => []) },
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
         shiftAssignment: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => undefined) },
         shiftApplication: { updateMany: vi.fn(async () => undefined) },
@@ -1126,7 +1131,13 @@ describe('DatabaseBusinessService.cancelShift', () => {
   // `ABANDONED` no puede coexistir con un turno cancelable (exige
   // `checkedInAt` no nulo, y el guard de `checkedIn > 0` ya bloquea la
   // cancelación en ese caso), así que basta con sumar `NO_SHOW` al filtro.
-  it('also cancels a lingering unresolved NO_SHOW assignment, so it stops being resolvable once the company cancels the whole shift', async () => {
+  //
+  // MEDIO-1 de CN-20260926-020 ("ocultar, segunda vía"): esa `NO_SHOW`
+  // arrastrada por `cancelShift` debe marcarse `closedWithoutPayment`, igual
+  // que si la empresa la hubiera cerrado con `resolveAssignment`. Por eso
+  // ahora son DOS `updateMany` (uno por `ASSIGNED`, sin la señal; otro por
+  // `NO_SHOW`, con ella), no uno solo con el mismo `data` para ambos.
+  it('also cancels a lingering unresolved NO_SHOW assignment, marking it closedWithoutPayment, so it stops being resolvable once the company cancels the whole shift', async () => {
     const shift = {
       id: 'shift-1',
       companyId: 'company-1',
@@ -1137,6 +1148,7 @@ describe('DatabaseBusinessService.cancelShift', () => {
     const prisma = {
       company: { upsert: companyUpsert() },
       shift: { findFirst: vi.fn(async () => shift) },
+      shiftAssignment: { findMany: vi.fn(async () => []) },
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
         shiftAssignment: { count: vi.fn(async () => 0), updateMany: assignmentUpdateMany },
         shiftApplication: { updateMany: vi.fn(async () => undefined) },
@@ -1150,8 +1162,17 @@ describe('DatabaseBusinessService.cancelShift', () => {
     await service.cancelShift(session, 'shift-1', 'La empresa ya no lo necesita');
 
     expect(assignmentUpdateMany).toHaveBeenCalledWith({
-      where: { shiftId: 'shift-1', status: { in: ['ASSIGNED', 'NO_SHOW'] } },
+      where: { shiftId: 'shift-1', status: 'ASSIGNED' },
       data: { status: 'CANCELLED' },
+    });
+    expect(assignmentUpdateMany).toHaveBeenCalledWith({
+      where: { shiftId: 'shift-1', status: 'NO_SHOW' },
+      data: {
+        status: 'CANCELLED',
+        closedWithoutPayment: true,
+        closedWithoutPaymentAt: expect.any(Date),
+        closedWithoutPaymentById: session.userId,
+      },
     });
   });
 });
@@ -1168,7 +1189,15 @@ describe('DatabaseBusinessService.cancelShift: aislamiento y lecturas dentro de 
   function attempts(txs: Record<string, unknown>[]) {
     let next = 0;
     const transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>, _options?: unknown) => callback(txs[Math.min(next++, txs.length - 1)]));
-    const prisma = { company: { upsert: companyUpsert() }, shift: { findFirst: vi.fn(async () => futureShift) }, $transaction: transaction };
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      shift: { findFirst: vi.fn(async () => futureShift) },
+      // Ídem: sin asignaciones que resolver, `resolveShiftAssignmentsLifecycle`
+      // (llamado antes de la transacción de `cancelShift`, corrección de
+      // MEDIO-1 de CN-20260926-022) no abre ninguna transacción propia.
+      shiftAssignment: { findMany: vi.fn(async () => []) },
+      $transaction: transaction,
+    };
     return { transaction, service: new DatabaseBusinessService(prisma as never) };
   }
   function tx(overrides: { status?: string; checkedIn?: number; failUpdateOnce?: boolean } = {}) {
@@ -1460,52 +1489,76 @@ describe('DatabaseBusinessService.listShiftApplications: indicador hasCv', () =>
   });
 });
 
-describe('DatabaseBusinessService.createPayment / updatePayment: legacy manual CRUD', () => {
-  it('creates a manual payment as provider legacy with zero commission and totalCents === amountCents', async () => {
-    const paymentCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'payment-1', ...data }));
-    const prisma = { company: { upsert: companyUpsert() }, payment: { create: paymentCreate } };
-    const service = new DatabaseBusinessService(prisma as never);
-
-    await service.createPayment(session, { reference: 'REF-1', description: 'Adelanto', amountCents: 5000 });
-
-    expect(paymentCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        amountCents: 5000, provider: 'legacy', commissionBps: 0, commissionCents: 0, taxBps: 0, taxCents: 0, totalCents: 5000,
-      }),
-    });
-  });
-
-  it('keeps totalCents consistent when updatePayment changes amountCents, using the payment\'s own frozen commission/tax bps', async () => {
-    const existing = { id: 'payment-1', status: 'PENDING', assignmentId: null, shiftId: null, amountCents: 10000, commissionBps: 1000, taxBps: 1800 };
-    const paymentUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...existing, ...data }));
+// Alcance D: el CRUD manual de pagos (`createPayment`/`updatePayment`/
+// `deletePayment`) se retira -permitía inventar pagos, alterar montos y
+// saltarse la comisión-. El único escritor que le queda a la empresa es
+// `markPaymentPaid` (`POST /business/payments/:id/mark-paid`), cubierto
+// abajo.
+describe('DatabaseBusinessService.markPaymentPaid', () => {
+  function txWith(payment: Record<string, unknown> | null, updateManyCount: number) {
+    const updateMany = vi.fn(async () => ({ count: updateManyCount }));
+    const findFirst = vi.fn(async () => (payment ? { id: payment.id } : null));
+    const findUniqueOrThrow = vi.fn(async () => payment as never);
+    const shiftEventCreate = vi.fn(async () => undefined);
+    const tx = { payment: { updateMany, findFirst, findUniqueOrThrow }, shiftEvent: { create: shiftEventCreate } };
     const prisma = {
       company: { upsert: companyUpsert() },
-      payment: { findFirst: vi.fn(async () => existing), update: paymentUpdate },
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(tx)),
     };
-    const service = new DatabaseBusinessService(prisma as never);
+    return { service: new DatabaseBusinessService(prisma as never), updateMany, findFirst, shiftEventCreate };
+  }
 
-    await service.updatePayment(session, 'payment-1', { amountCents: 20000 });
+  it('marks a PENDING manual payment as PROCESSED and records a PAYMENT_REPORTED event when it has a shift', async () => {
+    const payment = { id: 'payment-1', shiftId: 'shift-1', status: 'PROCESSED', provider: 'manual' };
+    const { service, updateMany, shiftEventCreate } = txWith(payment, 1);
 
-    expect(paymentUpdate).toHaveBeenCalledWith({
-      where: { id: 'payment-1' },
-      data: expect.objectContaining({ amountCents: 20000, commissionCents: 2000, taxCents: 360, totalCents: 22360 }),
+    const result = await service.markPaymentPaid(session, 'payment-1');
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: 'payment-1', companyId: 'company-1', status: 'PENDING', provider: { in: ['manual', 'legacy'] } },
+      data: { status: 'PROCESSED', processedAt: expect.any(Date) },
     });
+    expect(shiftEventCreate).toHaveBeenCalledWith({
+      data: { shiftId: 'shift-1', actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: 'payment-1' },
+    });
+    expect(result).toEqual(payment);
   });
 
-  it('does not touch commissionCents/taxCents/totalCents when updatePayment does not change amountCents', async () => {
-    const existing = { id: 'payment-1', status: 'PENDING', assignmentId: null, shiftId: null, amountCents: 10000, commissionBps: 0, taxBps: 0 };
-    const paymentUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...existing, ...data }));
-    const prisma = {
-      company: { upsert: companyUpsert() },
-      payment: { findFirst: vi.fn(async () => existing), update: paymentUpdate },
-    };
-    const service = new DatabaseBusinessService(prisma as never);
+  it('marks a PENDING legacy payment as PROCESSED without a shift, and never creates a ShiftEvent', async () => {
+    const payment = { id: 'payment-2', shiftId: null, status: 'PROCESSED', provider: 'legacy' };
+    const { service, shiftEventCreate } = txWith(payment, 1);
 
-    await service.updatePayment(session, 'payment-1', { description: 'Nueva referencia' });
+    const result = await service.markPaymentPaid(session, 'payment-2');
 
-    const data = paymentUpdate.mock.calls[0]?.[0]?.data as Record<string, unknown>;
-    expect(data.commissionCents).toBeUndefined();
-    expect(data.taxCents).toBeUndefined();
-    expect(data.totalCents).toBeUndefined();
+    expect(shiftEventCreate).not.toHaveBeenCalled();
+    expect(result).toEqual(payment);
+  });
+
+  it('responds 404 (BusinessRecordNotFoundError) when the payment does not exist or belongs to another company', async () => {
+    const { service } = txWith(null, 0);
+    const { BusinessRecordNotFoundError } = await import('../src/modules/business/business.service.js');
+
+    await expect(service.markPaymentPaid(session, 'payment-missing')).rejects.toThrow(BusinessRecordNotFoundError);
+    await expect(service.markPaymentPaid(session, 'payment-missing')).rejects.toMatchObject({ message: 'PAYMENT_NOT_FOUND' });
+  });
+
+  it('responds 409 (PaymentNotPayableError) when the payment exists but is no longer PENDING/manual-or-legacy', async () => {
+    const { service } = txWith({ id: 'payment-3' }, 0);
+    const { PaymentNotPayableError } = await import('../src/modules/business/business.service.js');
+
+    await expect(service.markPaymentPaid(session, 'payment-3')).rejects.toThrow(PaymentNotPayableError);
+    await expect(service.markPaymentPaid(session, 'payment-3')).rejects.toMatchObject({ message: 'PAYMENT_NOT_PAYABLE' });
+  });
+
+  it('the second of two concurrent mark-paid calls sees count 0 and gets 409, not a duplicate ShiftEvent', async () => {
+    // Simula la carrera: la primera llamada ya movió la fila a PROCESSED, así
+    // que el `updateMany` (condicionado a `status: PENDING`) de la segunda no
+    // afecta ninguna fila.
+    const payment = { id: 'payment-4', shiftId: 'shift-1' };
+    const { service, shiftEventCreate } = txWith(payment, 0);
+    const { PaymentNotPayableError } = await import('../src/modules/business/business.service.js');
+
+    await expect(service.markPaymentPaid(session, 'payment-4')).rejects.toThrow(PaymentNotPayableError);
+    expect(shiftEventCreate).not.toHaveBeenCalled();
   });
 });

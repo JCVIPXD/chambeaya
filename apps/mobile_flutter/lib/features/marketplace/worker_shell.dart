@@ -113,6 +113,7 @@ class _WorkerShellState extends State<WorkerShell> {
         authRepository: widget.authRepository,
         sessionToken: widget.sessionToken,
         googleOnlyAccount: widget.googleOnlyAccount,
+        marketplaceRepository: widget.repository,
       ),
       WorkerInvitationsPage(repository: widget.talentInvitationRepository),
     ];

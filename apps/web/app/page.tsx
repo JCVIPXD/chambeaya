@@ -164,8 +164,15 @@ type Transaction = {
   rawStatus: PaymentRecord["status"];
   reference: string;
   dueAt: string | null;
+  // Fecha en que la empresa lo marcó como pagado (`mark-paid`). `null`
+  // mientras siga `PENDING`/`SCHEDULED`/`CANCELLED`.
+  processedAt: string | null;
 };
-type ModalKind = "worker" | "payment" | "conversation" | "company" | null;
+// Alcance D: "payment" se retira de este modal genérico. El CRUD manual de
+// pagos (crear/editar/borrar) desaparece; el único cambio de estado que le
+// queda a la empresa es "Marcar como pagado" (`markPaymentProcessed`, una
+// confirmación aparte, no un formulario).
+type ModalKind = "worker" | "conversation" | "company" | null;
 
 const navigation: {
   label: ViewName;
@@ -317,7 +324,15 @@ function mapPayment(record: PaymentRecord): Transaction {
     reference: record.reference,
     description: record.description,
     workerName: record.assignment?.worker.name ?? null,
-    date: dateFormat.format(new Date(record.dueAt ?? record.createdAt)),
+    // Un pago ya pagado (`PROCESSED`) muestra la fecha en que se marcó como
+    // tal, no la fecha programada original.
+    date: dateFormat.format(
+      new Date(
+        record.status === "PROCESSED" && record.processedAt
+          ? record.processedAt
+          : record.dueAt ?? record.createdAt,
+      ),
+    ),
     workers: record.workerCount,
     amount: record.amountCents / 100,
     commission: record.commissionCents / 100,
@@ -326,6 +341,7 @@ function mapPayment(record: PaymentRecord): Transaction {
     status: labels[record.status],
     rawStatus: record.status,
     dueAt: record.dueAt?.slice(0, 10) ?? null,
+    processedAt: record.processedAt,
   };
 }
 
@@ -963,10 +979,7 @@ export default function HomePage() {
           }
           : null;
       })()
-      : modalKind === "payment"
-        ? ((paymentRecords.find((item) => item.id === editingId) as unknown as
-          Record<string, unknown> | undefined) ?? null)
-        : modalKind === "conversation"
+      : modalKind === "conversation"
           ? ((conversationRecords.find(
             (item) => item.id === editingId,
           ) as unknown as Record<string, unknown> | undefined) ?? null)
@@ -1458,27 +1471,6 @@ export default function HomePage() {
             : [...current, mapped],
         );
       }
-      if (modalKind === "payment") {
-        const input = {
-          reference: String(data.get("reference")),
-          description: String(data.get("description")),
-          amountCents: Math.round(Number(data.get("amount")) * 100),
-          workerCount: Number(data.get("workerCount") || 0),
-          status: String(data.get("status")),
-          dueAt: data.get("dueAt")
-            ? new Date(String(data.get("dueAt"))).toISOString()
-            : null,
-        };
-        const saved = editingId
-          ? await businessApi.payments.update(session.token, editingId, input)
-          : await businessApi.payments.create(session.token, input);
-        const mapped = mapPayment(saved);
-        setPaymentRecords((current) =>
-          editingId
-            ? current.map((item) => (item.id === mapped.id ? mapped : item))
-            : [mapped, ...current],
-        );
-      }
       if (modalKind === "conversation") {
         const input = editingId
           ? {
@@ -1543,37 +1535,55 @@ export default function HomePage() {
       showToast("No se pudo eliminar el trabajador.");
     }
   }
-  async function removePayment(id: string) {
-    if (!session || !window.confirm("¿Eliminar este movimiento?")) return;
-    try {
-      await businessApi.payments.remove(session.token, id);
-      setPaymentRecords((current) => current.filter((item) => item.id !== id));
-      showToast("Movimiento eliminado.");
-    } catch {
-      showToast("No se pudo eliminar el movimiento.");
-    }
-  }
+  // Alcance D: "Marcar como pagado" (`POST /business/payments/:id/mark-paid`)
+  // es el único escritor que le queda a la empresa sobre un `Payment` — el
+  // CRUD manual (crear/editar/borrar) se retiró porque permitía inventar
+  // pagos y saltarse la comisión. La confirmación muestra el desglose
+  // completo (trabajador/comisión/IGV/total) y aclara que el pago al
+  // trabajador ya se hizo por fuera de la app, para que quede claro que este
+  // botón no mueve dinero, solo reporta que ya se movió por fuera.
   async function markPaymentProcessed(id: string) {
     if (!session) return;
     const payment = paymentRecords.find((item) => item.id === id);
-    if (!payment || payment.rawStatus === "PROCESSED") return;
-    if (
-      !window.confirm(
-        `Confirma que ya pagaste S/ ${payment.amount.toLocaleString("es-PE", { minimumFractionDigits: 2 })} al trabajador.`,
-      )
-    )
-      return;
+    if (!payment || payment.rawStatus !== "PENDING") return;
+    const money = (value: number) =>
+      value.toLocaleString("es-PE", { minimumFractionDigits: 2 });
+    const confirmed = window.confirm(
+      [
+        `¿Confirmas que ya le pagaste a ${payment.workerName ?? "el trabajador"} por fuera de la app?`,
+        "",
+        `Trabajador (100%): S/ ${money(payment.amount)}`,
+        `Comisión Chambeaya: S/ ${money(payment.commission)}`,
+        `IGV sobre la comisión: S/ ${money(payment.tax)}`,
+        `Total que le corresponde pagar a tu empresa: S/ ${money(payment.total)}`,
+        "",
+        "El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte.",
+        "Esta acción no se puede deshacer.",
+      ].join("\n"),
+    );
+    if (!confirmed) return;
     try {
-      const saved = await businessApi.payments.update(session.token, id, {
-        status: "PROCESSED",
-      });
+      const saved = await businessApi.payments.markPaid(session.token, id);
       const mapped = mapPayment(saved);
       setPaymentRecords((current) =>
         current.map((item) => (item.id === mapped.id ? mapped : item)),
       );
-      showToast("Pago reportado. El trabajador ya puede confirmar la recepción.");
-    } catch {
-      showToast("No pudimos reportar el pago.");
+      showToast("Pago marcado como pagado. El trabajador ya puede confirmar la recepción.");
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "PAYMENT_NOT_PAYABLE") {
+        showToast(
+          "Este pago ya no se puede marcar (puede que ya esté pagado o cancelado). Actualizamos la lista.",
+        );
+        try {
+          const records = await businessApi.payments.list(session.token);
+          setPaymentRecords(records.map(mapPayment));
+        } catch {
+          // La lista quedará desactualizada hasta el próximo refresco manual;
+          // no es peor que el estado previo a este intento.
+        }
+        return;
+      }
+      showToast("No pudimos marcar el pago como pagado.");
     }
   }
   async function removeConversation() {
@@ -2686,7 +2696,7 @@ export default function HomePage() {
             <ViewHeader
               eyebrow="Seguimiento operativo"
               title="Pagos"
-              description="Registra los pagos directos a tus trabajadores y conserva sus referencias."
+              description="Marca como pagados los pagos que ya hiciste directamente a tus trabajadores."
             >
               <button
                 className="secondary-button"
@@ -2696,13 +2706,6 @@ export default function HomePage() {
                 }
               >
                 <Download size={17} /> Exportar
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => openCrud("payment")}
-              >
-                <Plus size={17} /> Registrar pago
               </button>
             </ViewHeader>
             <section className="finance-overview">
@@ -2823,8 +2826,6 @@ export default function HomePage() {
                     <TransactionRow
                       key={transaction.id}
                       transaction={transaction}
-                      onEdit={() => openCrud("payment", transaction.id)}
-                      onDelete={() => void removePayment(transaction.id)}
                       onMarkProcessed={() => void markPaymentProcessed(transaction.id)}
                     />
                   ))}
@@ -4155,13 +4156,9 @@ function WorkerDirectoryCard({
 
 function TransactionRow({
   transaction,
-  onEdit,
-  onDelete,
   onMarkProcessed,
 }: {
   transaction: Transaction;
-  onEdit: () => void;
-  onDelete: () => void;
   onMarkProcessed: () => void;
 }) {
   return (
@@ -4193,7 +4190,7 @@ function TransactionRow({
             type="button"
             onClick={onMarkProcessed}
           >
-            <Check size={12} /> Marcar pagado
+            <Check size={12} /> Marcar como pagado
           </button>
         )}
       </span>
@@ -4209,24 +4206,10 @@ function TransactionRow({
       <span className="transaction-amount">
         S/ {transaction.total.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
       </span>
-      <span className="inline-actions">
-        <button
-          className="row-action"
-          type="button"
-          aria-label={`Editar ${transaction.reference}`}
-          onClick={onEdit}
-        >
-          <Pencil size={15} />
-        </button>
-        <button
-          className="row-action danger"
-          type="button"
-          aria-label={`Eliminar ${transaction.reference}`}
-          onClick={onDelete}
-        >
-          <Trash2 size={15} />
-        </button>
-      </span>
+      {/* Alcance D: sin editar ni eliminar (CRUD retirado). Se conserva la
+          celda vacía para no romper el `grid-template-columns` de
+          `.transaction-head`/`.transaction-row` (ver `globals.css`). */}
+      <span className="inline-actions" />
     </div>
   );
 }

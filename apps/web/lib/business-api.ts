@@ -189,8 +189,9 @@ export type PaymentRecord = {
   // Chambeaya se cobra ENCIMA, a la empresa; nunca se descuenta de aquí.
   amountCents: number;
   // Puntos básicos (1000 = 10,00%) y céntimos fijados al crear el pago. Un
-  // pago `provider: 'legacy'` (CRUD manual, hasta el Alcance D) siempre
-  // trae comisión e IGV en 0 y `totalCents === amountCents`.
+  // pago `provider: 'legacy'` (backfill de un pago sin `assignmentId` de
+  // antes del Alcance C, o del CRUD manual que existió hasta el Alcance D)
+  // siempre trae comisión e IGV en 0 y `totalCents === amountCents`.
   commissionBps: number;
   commissionCents: number;
   taxBps: number;
@@ -344,5 +345,12 @@ export const businessApi = {
     updateMessage: (token: string, conversationId: string, messageId: string, input: unknown) => request<MessageRecord>(`/business/conversations/${conversationId}/messages/${messageId}`, { method: 'PATCH', token, body: JSON.stringify(input) }),
     removeMessage: (token: string, conversationId: string, messageId: string) => request<void>(`/business/conversations/${conversationId}/messages/${messageId}`, { method: 'DELETE', token }),
   },
-  payments: resource<PaymentRecord>('/business/payments'),
+  // Alcance D: se retira el CRUD manual (`create`/`update`/`remove`) — permitía
+  // a la empresa inventar pagos, alterar montos y saltarse la comisión. Solo
+  // queda la lectura y `markPaid`, el único cambio de estado permitido.
+  payments: {
+    list: (token: string) => request<PaymentRecord[]>('/business/payments', { token }),
+    get: (token: string, id: string) => request<PaymentRecord>(`/business/payments/${id}`, { token }),
+    markPaid: (token: string, id: string) => request<PaymentRecord>(`/business/payments/${id}/mark-paid`, { method: 'POST', token }),
+  },
 };

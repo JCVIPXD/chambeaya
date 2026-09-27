@@ -730,6 +730,14 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       }
       if (application.assignment?.checkedInAt) throw new MarketplaceError('CANCELLATION_NOT_ALLOWED', 409);
       const assignmentId = application.assignment?.id;
+      // Revisado en la corrección de MEDIO-1 (nuevo) de CN-20260926-020/-022:
+      // esta ruta nunca marca `closedWithoutPayment`, ni siquiera si la
+      // asignación ya venció su ventana de check-in (lógicamente NO_SHOW sin
+      // persistir). A propósito: es una decisión del TRABAJADOR, no de la
+      // empresa (la señal solo existe para detectar que la empresa evada
+      // pagar un trabajo hecho), y de por sí nunca genera ni evita un
+      // `Payment` -`NO_SHOW`/`ABANDONED` nunca crean uno automáticamente-,
+      // así que no hay dinero que este camino pueda esconder.
       if (assignmentId) {
         await tx.shiftAssignment.update({ where: { id: assignmentId }, data: { status: 'CANCELLED' } });
       }
@@ -820,6 +828,13 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       reference: payment.reference,
       createdAt: payment.createdAt,
       receiptConfirmed: payment.workerConfirmedAt !== null,
+      // Alcance D: nunca se expone `provider` en crudo (ver
+      // `marketplace.no-commission-leak.test.ts`), pero el trabajador sí
+      // necesita saber cuándo puede confirmar la recepción. Deriva un
+      // booleano seguro: solo un pago manual, ya `PROCESSED` y todavía sin
+      // confirmar admite `POST /workers/payments/:id/confirm` (misma regla
+      // que aplica ese endpoint, ver `confirmPayment` más abajo).
+      canConfirmReceipt: payment.provider === 'manual' && payment.status === 'PROCESSED' && payment.workerConfirmedAt === null,
       source: 'PAYMENT',
     }));
     const allMovements = [...paymentMovements, ...movements].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
@@ -834,7 +849,14 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       include: { assignment: true },
     });
     if (!payment) throw new MarketplaceError('PAYMENT_NOT_FOUND', 404);
-    if (payment.status !== 'PROCESSED') throw new MarketplaceError('PAYMENT_NOT_REPORTABLE', 409);
+    // Alcance D: solo un pago manual PROCESSED es confirmable por el
+    // trabajador (misma regla que deriva `canConfirmReceipt` en `wallet()`).
+    // Un pago de pasarela (Alcance E, todavía ninguna contratada) nunca es
+    // `'manual'`: se confirma por su propio webhook, nunca por este
+    // endpoint. `'legacy'` tampoco aplica, pero ya queda excluido antes: no
+    // tiene `assignmentId`, así que el `findFirst` de arriba (filtrado por
+    // `assignment: { workerId }`) nunca lo encuentra.
+    if (payment.status !== 'PROCESSED' || payment.provider !== 'manual') throw new MarketplaceError('PAYMENT_NOT_REPORTABLE', 409);
     // Nunca se devuelve la fila `Payment` cruda: expondría `commissionCents`/
     // `taxCents`/`totalCents`/`provider` al trabajador (ALTO-1 de
     // CN-20260926-012). `toWorkerPayment` es la única forma permitida de

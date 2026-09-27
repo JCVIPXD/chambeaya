@@ -1,5 +1,5 @@
 import { test as base, expect } from '@playwright/test';
-import type { BusinessSession, CompanyRecord, PaymentSettingsRecord, SubscriptionRecord } from '../../lib/business-api';
+import type { BusinessSession, CompanyRecord, PaymentRecord, PaymentSettingsRecord, SubscriptionRecord } from '../../lib/business-api';
 import { DAY_MS, isoFromNow } from './dates';
 
 // Synthetic identities only. These credentials do not belong to an API account.
@@ -69,15 +69,46 @@ export const proSubscription: SubscriptionRecord = {
   trialEndsAt: null,
 };
 
+// Alcance D: un pago `PENDING` de ejemplo (nacido de `checkOut`/
+// `resolveAssignment`, nunca del CRUD manual retirado) para los specs de
+// "Marcar como pagado". Un test puede sobreescribirlo con
+// `test.use({ payments: [...] })`, igual que `subscription`.
+export const pendingPayment: PaymentRecord = {
+  id: 'browser-test-payment-pending',
+  reference: 'CN-TEST-0001',
+  description: 'Mozo de salón · Empresa de pruebas UI',
+  amountCents: 10000,
+  commissionBps: 1000,
+  commissionCents: 1000,
+  taxBps: 1800,
+  taxCents: 180,
+  totalCents: 11180,
+  provider: 'manual',
+  workerCount: 1,
+  status: 'PENDING',
+  dueAt: isoFromNow(-1 * DAY_MS),
+  processedAt: null,
+  createdAt: isoFromNow(-1 * DAY_MS),
+  shift: { id: 'browser-test-shift', title: 'Mozo de salón', startsAt: isoFromNow(-2 * DAY_MS), endsAt: isoFromNow(-1 * DAY_MS) },
+  assignment: { id: 'browser-test-assignment', status: 'COMPLETED', worker: { id: 'browser-test-worker', name: 'Trabajador de pruebas', email: 'trabajador@example.test' } },
+  workerConfirmedAt: null,
+};
+
 type ApiCall ={ method: string; path: string; authorization: string | undefined };
 type BrowserApi = { calls: ApiCall[] };
 
-export const test = base.extend<{ browserApi: BrowserApi; subscription: SubscriptionRecord; paymentSettings: PaymentSettingsRecord }>({
+export const test = base.extend<{ browserApi: BrowserApi; subscription: SubscriptionRecord; paymentSettings: PaymentSettingsRecord; payments: PaymentRecord[] }>({
   // Override per file/describe with `test.use({ subscription: ... })`.
   subscription: [activeSubscription, { option: true }],
   paymentSettings: [defaultPaymentSettings, { option: true }],
-  browserApi: [async ({ context, baseURL, subscription, paymentSettings }, use) => {
+  payments: [[], { option: true }],
+  browserApi: [async ({ context, baseURL, subscription, paymentSettings, payments }, use) => {
     const calls: ApiCall[] = [];
+    // Estado propio de este test (nunca compartido entre tests): el
+    // servidor simulado aplica `mark-paid` igual que la API real
+    // (`updateMany` condicionado a `status: 'PENDING'`), sobre una copia
+    // para no mutar el fixture importado.
+    let paymentRecords: PaymentRecord[] = payments.map((payment) => ({ ...payment }));
     const unexpected: string[] = [];
     const pageErrors: string[] = [];
     let authenticated = false;
@@ -143,6 +174,27 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
         return;
       }
 
+      // Alcance D: único escritor que le queda a la empresa sobre un pago.
+      // Misma regla que la API real (`markPaymentPaid`): solo transiciona
+      // `PENDING` -> `PROCESSED`; cualquier otro estado responde 409.
+      const markPaidMatch = /^\/api\/business\/payments\/([^/]+)\/mark-paid$/.exec(path);
+      if (method === 'POST' && markPaidMatch) {
+        const id = markPaidMatch[1];
+        const target = paymentRecords.find((item) => item.id === id);
+        if (!target) {
+          await route.fulfill({ status: 404, json: { error: 'PAYMENT_NOT_FOUND' } });
+          return;
+        }
+        if (target.status !== 'PENDING') {
+          await route.fulfill({ status: 409, json: { error: 'PAYMENT_NOT_PAYABLE' } });
+          return;
+        }
+        const updated: PaymentRecord = { ...target, status: 'PROCESSED', processedAt: new Date().toISOString() };
+        paymentRecords = paymentRecords.map((item) => (item.id === id ? updated : item));
+        await route.fulfill({ json: updated });
+        return;
+      }
+
       const data: Record<string, unknown> = {
         '/api/business/company': company,
         '/api/business/subscription': subscription,
@@ -150,7 +202,7 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
         '/api/business/shifts': [],
         '/api/business/workers': [],
         '/api/business/conversations': [],
-        '/api/business/payments': [],
+        '/api/business/payments': paymentRecords,
         '/api/business/applications/pending': { count: 0, shiftIds: [] },
         '/api/business/talent-invitations': [],
       };

@@ -1,5 +1,6 @@
 import type { APIRequestContext, Page } from '@playwright/test';
 import { businessAccount, expect, test } from './fixtures/business-real';
+import { adminAccount } from './fixtures/admin-real';
 
 /**
  * Cierre manual de una asignación `NO_SHOW` desde el panel de la empresa,
@@ -42,10 +43,17 @@ async function get<T>(api: APIRequestContext, token: string, path: string): Prom
   return (await response.json()) as T;
 }
 
-type PaymentRow = { description: string; status: string; amountCents: number; assignment: { status: string } | null };
+type PaymentRow = {
+  id: string; description: string; status: string; amountCents: number;
+  commissionCents: number; taxCents: number; companyId: string;
+  assignment: { status: string } | null;
+};
 type ApplicationRow = { assignment: { status: string } | null };
 type EventRow = { type: string; actorRole: string; detail: string | null };
 type ShiftRow = { status: string };
+type CommissionsReport = {
+  companies: { companyId: string; toInvoiceCents: number; toInvoiceTaxCents: number; payments: number; closedWithoutPayment: number; pendingResolution: number }[];
+};
 
 test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda un pago pendiente', async ({ page, api, strandedShift }) => {
   await waitUntil(strandedShift.endsAtMs);
@@ -92,6 +100,42 @@ test('la empresa confirma que el trabajador sí trabajó tras un NO_SHOW y queda
   await page.getByRole('button', { name: 'Pagos', exact: true }).click();
   await expect(page.getByText(`${strandedShift.title} ·`)).toBeVisible();
   await expect(page.locator('.payment-status.pendiente').first()).toBeVisible();
+
+  // Alcance D: "Marcar como pagado" (CRUD manual retirado) contra la API
+  // real, y la comisión resultante aparece en el reporte del superadmin.
+  const paymentRow = page.locator('.transaction-row').filter({ hasText: strandedShift.title });
+  page.once('dialog', (dialog) => void dialog.accept());
+  const markPaid = page.waitForResponse((response) =>
+    response.request().method() === 'POST' && /\/payments\/[^/]+\/mark-paid$/.test(response.url()));
+  await paymentRow.getByRole('button', { name: 'Marcar como pagado', exact: true }).click();
+  const markPaidResponse = await markPaid;
+  expect(markPaidResponse.status()).toBe(200);
+  await expect(paymentRow.locator('.payment-status.procesado')).toBeVisible();
+
+  const [paidPayment] = (await get<PaymentRow[]>(api, strandedShift.businessToken, '/api/business/payments'))
+    .filter((payment) => payment.description.startsWith(strandedShift.title));
+  expect(paidPayment).toMatchObject({ status: 'PROCESSED' });
+
+  const adminLogin = await api.post('/api/auth/login', { data: adminAccount });
+  expect(adminLogin.ok(), `Login del admin sembrado → ${adminLogin.status()}`).toBe(true);
+  const admin = (await adminLogin.json()) as { token: string };
+  const report = await get<CommissionsReport>(api, admin.token, '/api/admin/commissions');
+  const companyRow = report.companies.find((company) => company.companyId === paidPayment.companyId);
+  expect(companyRow).toBeDefined();
+  // "Por facturar" no depende de si ya se marcó pagado (modo manual: la
+  // comisión de ESTE pago siempre suma), así que basta con que sea al menos
+  // la de este pago -otros pagos de la misma empresa sembrada pueden sumar
+  // más si la suite corrió antes en la misma base.
+  expect(companyRow!.toInvoiceCents).toBeGreaterThanOrEqual(paidPayment.commissionCents);
+  expect(companyRow!.toInvoiceTaxCents).toBeGreaterThanOrEqual(paidPayment.taxCents);
+  expect(companyRow!.payments).toBeGreaterThanOrEqual(1);
+
+  // Segundo intento sobre el mismo pago: ya no es marcable.
+  const secondMarkPaid = await api.post(`/api/business/payments/${paidPayment.id}/mark-paid`, {
+    headers: { Authorization: `Bearer ${strandedShift.businessToken}` },
+  });
+  expect(secondMarkPaid.status()).toBe(409);
+  expect(await secondMarkPaid.json()).toEqual({ error: 'PAYMENT_NOT_PAYABLE' });
 });
 
 test('la empresa cierra sin pago un NO_SHOW con motivo y no se genera ningún pago', async ({ page, api, strandedShift }) => {
@@ -119,7 +163,21 @@ test('la empresa cierra sin pago un NO_SHOW con motivo y no se genera ningún pa
   const payments = (await get<PaymentRow[]>(api, strandedShift.businessToken, '/api/business/payments')).filter((payment) => payment.description.startsWith(strandedShift.title));
   expect(payments).toEqual([]);
   const events = await get<EventRow[]>(api, strandedShift.businessToken, `/api/business/shifts/${strandedShift.shiftId}/events`);
-  expect(events.some((event) => event.actorRole === 'BUSINESS' && event.type === 'CANCELLED' && event.detail === 'Nunca llegó y no avisó')).toBe(true);
+  // El `detail` es el motivo tal cual lo escribió la empresa: `closedWithoutPayment`
+  // (corrección de MEDIO-1 de CN-20260926-020) ya no depende de ningún
+  // texto, así que este `detail` no necesita ningún prefijo fijo.
+  expect(events.some((event) =>
+    event.actorRole === 'BUSINESS' && event.type === 'CANCELLED' && event.detail === 'Nunca llegó y no avisó')).toBe(true);
+
+  // La señal estructurada (nunca el texto): esta empresa debe aparecer con
+  // al menos un `closedWithoutPayment` en el reporte de comisiones.
+  const company = await get<{ id: string }>(api, strandedShift.businessToken, '/api/business/company');
+  const adminLoginForClosed = await api.post('/api/auth/login', { data: adminAccount });
+  expect(adminLoginForClosed.ok(), `Login del admin sembrado → ${adminLoginForClosed.status()}`).toBe(true);
+  const adminForClosed = (await adminLoginForClosed.json()) as { token: string };
+  const closedReport = await get<CommissionsReport>(api, adminForClosed.token, '/api/admin/commissions');
+  const closedCompanyRow = closedReport.companies.find((row) => row.companyId === company.id);
+  expect(closedCompanyRow?.closedWithoutPayment).toBeGreaterThanOrEqual(1);
 
   // Un segundo intento sobre la misma asignación ya no es válido.
   const assignment = applications[0].assignment as unknown as { id: string };

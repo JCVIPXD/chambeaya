@@ -8,6 +8,7 @@ import {
   BusinessForbiddenError,
   BusinessValidationError,
   CommissionChangedError,
+  PaymentNotPayableError,
   DatabaseBusinessService,
   type BusinessOperations,
   type ShiftInput,
@@ -120,17 +121,6 @@ const messageUpdateSchema = z.object({
   readAt: z.coerce.date().nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
 
-const paymentFields = {
-  reference: z.string().trim().min(2).max(80),
-  description: z.string().trim().min(2).max(240),
-  amountCents: z.number().int().positive().max(MAX_MONEY_AMOUNT_CENTS),
-  workerCount: z.number().int().min(0).max(100_000).optional(),
-  status: z.enum(['PENDING', 'SCHEDULED', 'PROCESSED', 'CANCELLED']).optional(),
-  dueAt: z.coerce.date().nullable().optional(),
-  processedAt: z.coerce.date().nullable().optional(),
-};
-const paymentSchema = z.object(paymentFields);
-const paymentUpdateSchema = paymentSchema.partial().refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
 const applicationDecisionSchema = z.object({
   decision: z.enum(['ACCEPTED', 'REJECTED']),
   reason: z.string().trim().min(3).max(500).optional(),
@@ -196,6 +186,10 @@ function sendError(response: Response, error: unknown) {
   }
   if (error instanceof CommissionChangedError) {
     response.status(409).json({ error: error.message, commissionBps: error.commissionBps, taxBps: error.taxBps });
+    return;
+  }
+  if (error instanceof PaymentNotPayableError) {
+    response.status(409).json({ error: error.message });
     return;
   }
   if (error instanceof AuthError) {
@@ -285,11 +279,12 @@ export function createBusinessRouter(
   router.patch('/conversations/:id/messages/:messageId', route(authService, async (request, response, session) => { response.json(await operations.updateMessage(session, param(request, 'id'), param(request, 'messageId'), messageUpdateSchema.parse(request.body))); }));
   router.delete('/conversations/:id/messages/:messageId', route(authService, async (request, response, session) => { await operations.deleteMessage(session, param(request, 'id'), param(request, 'messageId')); response.status(204).send(); }));
 
+  // Alcance D: se retira el CRUD manual (`POST`/`PATCH`/`DELETE`) — permitía
+  // a la empresa inventar pagos, alterar montos y saltarse la comisión. La
+  // lectura se conserva; el único escritor que queda es `mark-paid`.
   router.get('/payments', route(authService, async (_request, response, session) => { response.json(await operations.listPayments(session)); }));
-  router.post('/payments', route(authService, async (request, response, session) => { response.status(201).json(await operations.createPayment(session, paymentSchema.parse(request.body))); }));
   router.get('/payments/:id', route(authService, async (request, response, session) => { response.json(await operations.getPayment(session, param(request, 'id'))); }));
-  router.patch('/payments/:id', route(authService, async (request, response, session) => { response.json(await operations.updatePayment(session, param(request, 'id'), paymentUpdateSchema.parse(request.body))); }));
-  router.delete('/payments/:id', route(authService, async (request, response, session) => { await operations.deletePayment(session, param(request, 'id')); response.status(204).send(); }));
+  router.post('/payments/:id/mark-paid', route(authService, async (request, response, session) => { response.json(await operations.markPaymentPaid(session, param(request, 'id'))); }));
 
   return router;
 }
