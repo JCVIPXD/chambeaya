@@ -106,6 +106,32 @@ curl http://127.0.0.1:4000/api/health
 curl http://127.0.0.1:3000
 ```
 
+### Pagos: modo simulado (Alcance E del plan de pagos)
+
+`docker-compose.yml` arranca la API con `PAYMENT_PROVIDER=simulated` y un
+`PAYMENT_WEBHOOK_SECRET` de desarrollo fijo (nunca lo uses en producción; el
+instalador genera uno propio por servidor, ver
+[Despliegue con Docker](deployment.md)). En este modo:
+
+- `GET /api/business/payment-settings` devuelve `mode: 'simulated'`.
+- Al completar una asignación (check-out del trabajador, o el cierre manual
+  de un `NO_SHOW`/`ABANDONED` con `outcome: 'COMPLETED'`), el `Payment` nace
+  con `provider: 'simulated'` en vez de `'manual'`.
+- `POST /api/business/payments/:id/checkout` funciona de verdad: crea un
+  `PaymentAttempt` y devuelve un `redirectUrl` hacia
+  `${PANEL_PUBLIC_URL}/pago-simulado/<checkoutId>` (la página del Alcance F;
+  mientras no exista, usa directamente los dos endpoints de abajo).
+- `POST /api/payments/simulated/:checkoutId/approve` (o `.../reject`), con la
+  sesión de la empresa dueña del pago, recorre el mismo camino que un
+  webhook real firmado — sin mover dinero — y deja el pago `PROCESSED` o de
+  vuelta en `PENDING`.
+
+Para volver al modo sin pasarela en el mismo entorno local, exporta
+`PAYMENT_PROVIDER=manual` antes de `docker compose up` (o edítalo en tu
+propio `.env`, si usas uno junto a `docker-compose.yml`); con `manual`,
+`checkout` responde `409 PROVIDER_MANUAL` y el flujo vuelve a ser el de
+"marcar como pagado" descrito en [API y reglas operativas](../reference/api.md).
+
 ### Trabajo diario en terminales separadas
 
 Cuando necesites ver los logs de cada componente por separado, usa tres

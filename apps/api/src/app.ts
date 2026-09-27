@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import cors, { type CorsOptions } from 'cors';
 import express, { type Express } from 'express';
 
@@ -13,6 +14,7 @@ import { createTalentRouter } from './modules/talent/talent.routes.js';
 import type { TalentOperations } from './modules/talent/talent.service.js';
 import type { TalentInvitationOperations } from './modules/talent/talent_invitation.service.js';
 import { createRateLimitMiddleware, type RateLimitOptions } from './middleware/rate_limit.js';
+import { createPaymentsWebhookRouter, createSimulatedPaymentsRouter } from './modules/payments/payments.routes.js';
 
 const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_AUTH_RATE_LIMIT_MAX = 20;
@@ -83,10 +85,18 @@ export function createApp(options: {
    * defecto de `createMarketplaceRouter`.
    */
   marketplaceFeedRefreshIntervalMs?: number;
+  /**
+   * `PrismaClient` compartido por el webhook (`/api/payments/webhooks/:provider`)
+   * y el checkout simulado (`/api/payments/simulated/:checkoutId/...`),
+   * Alcance E. Las pruebas lo inyectan para apuntar a la base de pruebas;
+   * sin esto, cada router abriría su propio `PrismaClient` por defecto.
+   */
+  paymentsPrisma?: PrismaClient;
 } = {}): Express {
   const app = express();
   const authService = options.authService ?? new DatabaseAuthService();
   const shiftEvents = options.marketplaceEvents ?? marketplaceShiftEvents;
+  const paymentsPrisma = options.paymentsPrisma ?? new PrismaClient();
 
   const authRateLimiter =
     options.rateLimit === false
@@ -114,6 +124,12 @@ export function createApp(options: {
   }
 
   app.use(cors(resolveCorsOptions()));
+  // Webhook de pagos (Alcance E): ANTES de `express.json()` global. La firma
+  // (`webhook-signature.ts`) se calcula sobre el `rawBody` exacto que llegó
+  // por la red; `express.json()` lo consumiría y lo dejaría irrecuperable.
+  // Sin sesión: la única defensa es la firma HMAC + su propio rate limit
+  // (`createPaymentsWebhookRouter`).
+  app.use('/api/payments', createPaymentsWebhookRouter(paymentsPrisma));
   app.use(express.json());
   app.get('/', (_request, response) => {
     response.json({
@@ -132,6 +148,9 @@ export function createApp(options: {
   app.use('/api/auth', createAuthRouter(authService, { rateLimiter: authRateLimiter }));
   app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish()));
   app.use('/api/admin', createAdminRouter(authService));
+  // Checkout simulado (Alcance E): sesión BUSINESS normal, después de
+  // `express.json()` global, a diferencia del webhook de arriba.
+  app.use('/api/payments', createSimulatedPaymentsRouter(authService, paymentsPrisma));
 
   return app;
 }

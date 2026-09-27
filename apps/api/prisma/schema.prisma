@@ -688,10 +688,85 @@ model Payment {
   workerConfirmedAt DateTime?
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
+  /// Intentos de checkout de una pasarela (Alcance E). Un pago `manual`
+  /// nunca tiene ninguno (`checkoutPayment` responde `409 PROVIDER_MANUAL`
+  /// antes de crear uno). Puede haber más de uno en el tiempo (un intento
+  /// vencido más otro nuevo tras un reintento), pero solo uno vigente
+  /// (`CREATED`) a la vez, garantizado por la transición `PENDING`->
+  /// `SCHEDULED` del propio `Payment`.
+  attempts    PaymentAttempt[]
 
   @@unique([companyId, reference])
   @@index([companyId, status])
   @@index([shiftId])
+}
+
+/// Estado de un intento de checkout de pasarela (Alcance E). `CREATED`: recién
+/// creado, esperando la decisión del proveedor (o que expire). `APPROVED`/
+/// `REJECTED`: el webhook (o el simulado) ya decidió. `EXPIRED`: nadie decidió
+/// antes de `expiresAt` (expiración perezosa: se marca al leer o reintentar,
+/// nunca con un cron).
+enum PaymentAttemptStatus {
+  CREATED
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+/// Un intento de checkout con una pasarela (`Payment.provider`, Alcance E:
+/// capa de adaptadores + proveedor simulado, sin mover dinero todavía). Nace
+/// junto con la transición `Payment` `PENDING`->`SCHEDULED`
+/// (`payments.service.ts#checkoutPayment`), en la misma transacción; el
+/// proveedor se llama DESPUÉS, fuera de esa transacción. `checkoutId` es lo
+/// que el proveedor (o el simulado) usa para referenciar este intento en su
+/// webhook; `totalCents`/`currency` son una copia congelada de
+/// `Payment.totalCents` al momento del checkout, para que el webhook pueda
+/// verificar que el monto que el proveedor confirma coincide (si no,
+/// `422 AMOUNT_MISMATCH` y `Payment.needsReview`).
+model PaymentAttempt {
+  id            String               @id @default(cuid())
+  paymentId     String
+  payment       Payment              @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  provider      String
+  checkoutId    String               @unique
+  status        PaymentAttemptStatus @default(CREATED)
+  totalCents    Int
+  currency      String               @default("PEN")
+  /// URL de retorno que el proveedor (o el simulado) entregó al crear el
+  /// checkout. Se guarda para que un doble clic (idempotencia de
+  /// `checkoutPayment` mientras el intento siga `CREATED` y vigente) devuelva
+  /// exactamente la misma URL sin volver a llamar al proveedor.
+  redirectUrl   String?
+  expiresAt     DateTime
+  failureReason String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  events        PaymentProviderEvent[]
+
+  @@index([paymentId])
+}
+
+/// Cada notificación recibida en `POST /api/payments/webhooks/:provider` (o
+/// generada por el checkout simulado, que pasa por la misma función de
+/// procesamiento). `@@unique([provider, eventId])` es la defensa contra
+/// duplicados: un `eventId` repetido del mismo proveedor (reintento de red
+/// del lado del proveedor, o el mismo clic dos veces en el simulado) viola
+/// esta restricción (`P2002`) y la petición responde `200` sin ningún efecto
+/// adicional, en vez de aplicar la transición dos veces. `payload` guarda el
+/// cuerpo verificado tal cual, para poder auditar cualquier discrepancia
+/// futura sin depender de los logs del proveedor.
+model PaymentProviderEvent {
+  id         String          @id @default(cuid())
+  provider   String
+  eventId    String
+  attemptId  String?
+  attempt    PaymentAttempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  payload    Json
+  receivedAt DateTime        @default(now())
+
+  @@unique([provider, eventId])
+  @@index([attemptId])
 }
 
 /// Fila única (`id = 'global'`) con el % de comisión y el IGV vigentes. Un

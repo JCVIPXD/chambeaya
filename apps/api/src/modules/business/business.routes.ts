@@ -9,6 +9,9 @@ import {
   BusinessValidationError,
   CommissionChangedError,
   PaymentNotPayableError,
+  PaymentNotFoundError,
+  ProviderManualError,
+  ProviderUnavailableError,
   DatabaseBusinessService,
   type BusinessOperations,
   type ShiftInput,
@@ -192,6 +195,18 @@ function sendError(response: Response, error: unknown) {
     response.status(409).json({ error: error.message });
     return;
   }
+  if (error instanceof PaymentNotFoundError) {
+    response.status(404).json({ error: 'PAYMENT_NOT_FOUND' });
+    return;
+  }
+  if (error instanceof ProviderManualError) {
+    response.status(409).json({ error: 'PROVIDER_MANUAL' });
+    return;
+  }
+  if (error instanceof ProviderUnavailableError) {
+    response.status(502).json({ error: 'PROVIDER_UNAVAILABLE' });
+    return;
+  }
   if (error instanceof AuthError) {
     response.status(401).json({ error: error.code });
     return;
@@ -285,6 +300,7 @@ export function createBusinessRouter(
   router.get('/payments', route(authService, async (_request, response, session) => { response.json(await operations.listPayments(session)); }));
   router.get('/payments/:id', route(authService, async (request, response, session) => { response.json(await operations.getPayment(session, param(request, 'id'))); }));
   router.post('/payments/:id/mark-paid', route(authService, async (request, response, session) => { response.json(await operations.markPaymentPaid(session, param(request, 'id'))); }));
+  router.post('/payments/:id/checkout', route(authService, async (request, response, session) => { response.json(await operations.checkoutPayment(session, param(request, 'id'))); }));
 
   return router;
 }

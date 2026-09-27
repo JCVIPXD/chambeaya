@@ -434,6 +434,61 @@ aunque estén bien configuradas en `.env.production`.
   `NEXT_PUBLIC_API_URL`. Cambiarla exige reconstruir esa imagen;
   `scripts/deploy-hosting.sh` ya lo hace en cada ejecución sin `--no-build`.
 
+### Pagos: variables y cómo cambiar de proveedor (Alcance E del plan de pagos)
+
+Sin proveedor real contratado todavía. `docker-compose.production.yml`
+reenvía al contenedor `api` cuatro variables nuevas
+(`PAYMENT_PROVIDER`, `PAYMENT_WEBHOOK_SECRET`, `PAYMENT_CHECKOUT_TTL_MINUTES`,
+`PAYMENT_SIMULATION_ALLOWED`) y `PANEL_PUBLIC_URL`; sin reenviarlas la API
+simplemente arranca con los valores por defecto (`manual`, sin secreto, 30
+minutos), que son los correctos para producción hoy.
+
+- `PAYMENT_PROVIDER` (`manual` por defecto y el **único** modo soportado en
+  producción hoy): elige el adaptador de `apps/api/src/modules/payments/`
+  (`manual.provider.ts`/`simulated.provider.ts`), igual que
+  `GOOGLE_OAUTH_WEB_CLIENT_ID` habilita el login con Google o
+  `DOCUMENT_STORAGE_ROOT` elige dónde viven los documentos. `manual`: la
+  empresa marca el pago como hecho fuera de la app (`mark-paid`); Chambeaya
+  factura la comisión aparte (ver [API y reglas operativas](../reference/api.md)).
+  `simulated`: recorre el flujo completo checkout → webhook firmado →
+  pagado **sin mover dinero real**, pensado para desarrollo o una demo
+  controlada, nunca para cobrar de verdad.
+- `PAYMENT_WEBHOOK_SECRET`: `scripts/instalar-produccion.sh` lo genera solo
+  (64 caracteres aleatorios) en una instalación nueva, y lo añade a un
+  `.env.production` existente que no lo tuviera, sin tocar ninguna otra
+  variable — igual trato que le da a `POSTGRES_PASSWORD`. Solo importa si
+  `PAYMENT_PROVIDER` no es `manual`: firma (`HMAC-SHA256`) el webhook de
+  pagos. **Nunca lo compartas ni lo reutilices entre entornos.**
+- `PAYMENT_CHECKOUT_TTL_MINUTES` (`30` por defecto): minutos que un checkout
+  queda vigente antes de expirar perezosamente (sin cron) y devolver el
+  pago a `PENDING`.
+- `PAYMENT_SIMULATION_ALLOWED`: debe quedar **vacío** en producción real. La
+  API se niega a arrancar con `PAYMENT_PROVIDER=simulated` en
+  `NODE_ENV=production` a menos que esta variable sea exactamente `true`
+  (`server.ts#assertPaymentConfig`); `scripts/deploy-hosting.sh` valida lo
+  mismo antes de levantar contenedores y avisa del modo activo en cada
+  ejecución.
+- `PANEL_PUBLIC_URL`: la URL pública del panel (`https://tudominio.com/empresas`
+  en este esquema de un solo dominio), usada por el adaptador `simulated`
+  para construir el `redirectUrl` del checkout (`.../pago-simulado/<id>`,
+  la página del Alcance F). Sin ella, se deriva de `NEXT_PUBLIC_API_URL` y
+  `NEXT_BASE_PATH`; en producción con `PAYMENT_PROVIDER=manual` no hace
+  ninguna falta.
+
+**Cuando se elija un proveedor real** (Mercado Pago, Culqi, Niubiz o
+Izipay): se agrega un nuevo `*.provider.ts` que implemente la interfaz
+`PaymentProvider` (`apps/api/src/modules/payments/provider.ts`), se suma su
+nombre a los valores válidos de `PAYMENT_PROVIDER`
+(`payments.service.ts#KNOWN_PAYMENT_PROVIDERS`) y se cambia esa variable en
+`.env.production`, sin tocar ningún otro adaptador ni el resto de la API. El
+webhook de ese proveedor seguirá su propio esquema de firma (documentado por
+el proveedor), verificado dentro de su propio `verifyWebhook`; el resto del
+flujo (`checkoutPayment`/`processProviderEvent`) no cambia. Con un proveedor
+real se usará pago dividido (split): el proveedor paga al trabajador y
+entrega la comisión de Chambeaya en la misma operación, así que Chambeaya
+nunca custodia la paga del trabajador — el destino de pago del trabajador
+queda por definir junto con esa integración.
+
 ## Actualizar una versión
 
 ```bash

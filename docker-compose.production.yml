@@ -35,6 +35,19 @@ services:
       API_TRUST_PROXY: ${API_TRUST_PROXY:-false}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-20}
+      # Alcance E del plan de pagos (ver docs/guides/deployment.md): sin
+      # reenviar estas cuatro, la API arranca con PAYMENT_PROVIDER=manual por
+      # defecto (correcto para producción hoy, sin proveedor contratado). Si
+      # `.env.production` llegara a fijar PAYMENT_PROVIDER=simulated,
+      # `assertPaymentConfig` exige además PAYMENT_SIMULATION_ALLOWED=true
+      # explícito, y cualquier proveedor distinto de "manual" exige
+      # PAYMENT_WEBHOOK_SECRET de al menos 32 caracteres (server.ts falla al
+      # arrancar si no se cumple).
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-manual}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-}
+      PAYMENT_CHECKOUT_TTL_MINUTES: ${PAYMENT_CHECKOUT_TTL_MINUTES:-30}
+      PAYMENT_SIMULATION_ALLOWED: ${PAYMENT_SIMULATION_ALLOWED:-}
+      PANEL_PUBLIC_URL: ${PANEL_PUBLIC_URL:-}
     ports:
       # Solo loopback: Docker publica puertos saltándose ufw, así que sin
       # "127.0.0.1:" la API quedaría expuesta sin TLS en todas las interfaces.

@@ -11,6 +11,7 @@ import {
 } from '../operations/shift-state.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
 import { buildPaymentAmounts } from '../payments/payment-amounts.js';
+import { resolvePaymentProvider } from '../payments/payments.service.js';
 
 export type DemoShiftStatus = 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
 
@@ -700,7 +701,9 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
           taxBps: amounts.taxBps,
           taxCents: amounts.taxCents,
           totalCents: amounts.totalCents,
-          provider: 'manual',
+          // Alcance E: proveedor ACTIVO en este instante, no fijo en
+          // 'manual' (ver el mismo cambio en `business.service.ts#resolveAssignment`).
+          provider: resolvePaymentProvider().name,
           workerCount: 1,
           status: 'PENDING',
           dueAt: checkedOutAt,

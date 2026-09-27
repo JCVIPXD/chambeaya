@@ -533,6 +533,18 @@ if [[ ! -f "$ENV_FILE" ]]; then
     exit 1
   fi
 
+  # Alcance E del plan de pagos: secreto del webhook (HMAC-SHA256 de
+  # payments.service.ts), 64 caracteres aleatorios (bien por encima del
+  # mínimo de 32 que exige assertPaymentConfig). Se genera siempre, aunque
+  # PAYMENT_PROVIDER quede en "manual" (que no lo usa): así ya está listo el
+  # día que se active un proveedor real, sin depender de que el operador
+  # recuerde generarlo a mano.
+  payment_webhook_secret="$(random_password)$(random_password)"
+  if [[ -z "$payment_webhook_secret" || ${#payment_webhook_secret} -lt 32 ]]; then
+    err "No se pudo generar el secreto aleatorio de PAYMENT_WEBHOOK_SECRET."
+    exit 1
+  fi
+
   api_port="$(find_free_port 4100)"
   web_port="$(find_free_port 3100 "$api_port")"
   app_port="$(find_free_port 8100 "$api_port" "$web_port")"
@@ -584,6 +596,16 @@ GOOGLE_OAUTH_IOS_CLIENT_ID=
 DOCUMENT_STORAGE_DRIVER=
 DOCUMENT_STORAGE_BUCKET=
 DOCUMENT_STORAGE_ROOT=
+
+# Alcance E del plan de pagos: capa de adaptadores + proveedor simulado, sin
+# proveedor real contratado. "manual" es el único modo soportado en
+# producción hoy (deploy-hosting.sh y assertPaymentConfig lo exigen salvo
+# PAYMENT_SIMULATION_ALLOWED=true explícito). El secreto se generó aleatorio
+# arriba y ya queda listo para cuando se active un proveedor real.
+PAYMENT_PROVIDER=manual
+PAYMENT_WEBHOOK_SECRET=${payment_webhook_secret}
+PAYMENT_CHECKOUT_TTL_MINUTES=30
+PAYMENT_SIMULATION_ALLOWED=
 EOF
   log "Creado $ENV_FILE. Puertos elegidos: API=${api_port}, panel=${web_port}, app=${app_port}."
 else
@@ -600,6 +622,30 @@ else
   set_env_var_if_missing API_BASE_URL "https://${DOMAIN}/api" "$ENV_FILE"
   set_env_var_if_missing NEXT_BASE_PATH "$NEXT_BASE_PATH_VALUE" "$ENV_FILE"
   set_env_var_if_missing API_TRUST_PROXY "1" "$ENV_FILE"
+
+  # Alcance E del plan de pagos: compatibilidad con un .env.production
+  # creado antes de que existieran estas variables. "manual" y las otras dos
+  # vacías/por defecto son un no-op en la API (mismo comportamiento que sin
+  # ellas); el secreto se genera solo si falta, nunca se sobrescribe uno
+  # existente (mismo patrón que POSTGRES_PASSWORD: es un secreto ligado a lo
+  # que ya esté configurado, no algo que este instalador deba regenerar en
+  # cada ejecución).
+  set_env_var_if_missing PAYMENT_PROVIDER "manual" "$ENV_FILE"
+  if ! grep -Eq '^PAYMENT_WEBHOOK_SECRET=[^[:space:]]+' "$ENV_FILE"; then
+    generated_webhook_secret="$(random_password)$(random_password)"
+    if [[ -z "$generated_webhook_secret" || ${#generated_webhook_secret} -lt 32 ]]; then
+      err "No se pudo generar el secreto aleatorio de PAYMENT_WEBHOOK_SECRET."
+      exit 1
+    fi
+    if grep -Eq '^PAYMENT_WEBHOOK_SECRET=' "$ENV_FILE"; then
+      update_env_var PAYMENT_WEBHOOK_SECRET "$generated_webhook_secret" "$ENV_FILE"
+    else
+      set_env_var_if_missing PAYMENT_WEBHOOK_SECRET "$generated_webhook_secret" "$ENV_FILE"
+    fi
+    log "Generado PAYMENT_WEBHOOK_SECRET en $ENV_FILE (faltaba o estaba vacío)."
+  fi
+  set_env_var_if_missing PAYMENT_CHECKOUT_TTL_MINUTES "30" "$ENV_FILE"
+  set_env_var_if_missing PAYMENT_SIMULATION_ALLOWED "" "$ENV_FILE"
 
   existing_trust_proxy="$(get_env_var API_TRUST_PROXY "$ENV_FILE")"
   if [[ "$existing_trust_proxy" == "true" ]]; then

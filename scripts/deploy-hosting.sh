@@ -130,6 +130,37 @@ if [[ -z "$google_client_id" ]]; then
   echo >&2
 fi
 
+# Alcance E del plan de pagos: mismas guardas que assertPaymentConfig
+# (server.ts), pero ANTES de levantar contenedores, para no dejar la API
+# reiniciándose en bucle por una variable de pagos mal puesta. Ninguna de
+# las tres exige nada si PAYMENT_PROVIDER sigue en "manual" (el valor por
+# defecto y el único soportado en producción hoy).
+payment_provider="$(sed -n 's/^PAYMENT_PROVIDER=//p' "$ENV_FILE" | head -n 1)"
+payment_provider="${payment_provider:-manual}"
+if [[ "$payment_provider" != "manual" && "$payment_provider" != "simulated" ]]; then
+  echo "PAYMENT_PROVIDER debe ser 'manual' o 'simulated' en $ENV_FILE (valor actual: '${payment_provider}')." >&2
+  exit 1
+fi
+if [[ "$payment_provider" != "manual" ]]; then
+  payment_webhook_secret="$(sed -n 's/^PAYMENT_WEBHOOK_SECRET=//p' "$ENV_FILE" | head -n 1)"
+  if [[ ${#payment_webhook_secret} -lt 32 ]]; then
+    echo "PAYMENT_WEBHOOK_SECRET debe tener al menos 32 caracteres en $ENV_FILE cuando PAYMENT_PROVIDER='${payment_provider}'." >&2
+    exit 1
+  fi
+fi
+if [[ "$payment_provider" == "simulated" ]]; then
+  payment_simulation_allowed="$(sed -n 's/^PAYMENT_SIMULATION_ALLOWED=//p' "$ENV_FILE" | head -n 1)"
+  if [[ "$payment_simulation_allowed" != "true" ]]; then
+    echo >&2
+    echo "AVISO: PAYMENT_PROVIDER=simulated en un despliegue de PRODUCCIÓN simula el" >&2
+    echo "cobro sin mover dinero real. Si esto es intencional (una demo controlada)," >&2
+    echo "pon PAYMENT_SIMULATION_ALLOWED=true en $ENV_FILE; si no, la API se negará a" >&2
+    echo "arrancar (assertPaymentConfig, ver docs/guides/deployment.md)." >&2
+    echo >&2
+  fi
+fi
+echo "Modo de pagos activo: ${payment_provider}."
+
 api_port="$(sed -n 's/^API_HOST_PORT=//p' "$ENV_FILE" | head -n 1)"
 web_port="$(sed -n 's/^WEB_HOST_PORT=//p' "$ENV_FILE" | head -n 1)"
 app_port="$(sed -n 's/^APP_HOST_PORT=//p' "$ENV_FILE" | head -n 1)"

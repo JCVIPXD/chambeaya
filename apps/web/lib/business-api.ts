@@ -73,12 +73,17 @@ export type ShiftRecord = {
 };
 
 // `GET /business/payment-settings`: ajuste global vigente que se congelaría
-// en un turno nuevo. `mode` queda fijo en `'manual'` hasta el Alcance E.
+// en un turno nuevo. Desde el Alcance E, `mode` es el nombre del proveedor de
+// pago ACTIVO (`PAYMENT_PROVIDER` en la API: `'manual'` en producción hoy,
+// `'simulated'` en desarrollo o mientras no haya proveedor real contratado).
+// El botón "Pagar" y la página de checkout simulado que lean este campo son
+// trabajo del Alcance F; aquí solo se amplía el tipo para no mentir sobre el
+// contrato real de la API.
 export type PaymentSettingsRecord = {
   commissionBps: number;
   taxBps: number;
   currency: 'PEN';
-  mode: 'manual';
+  mode: string;
 };
 
 // Estado persistido de una asignación. `NO_SHOW` (confirmó y nunca hizo

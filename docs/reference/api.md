@@ -92,7 +92,7 @@ Reglas por bucket (los pagos `'legacy'` nunca aportan a ninguno: nacieron con co
   - `INACTIVE` **no es un valor del enum `SubscriptionStatus` de Prisma** (que solo admite `TRIAL`/`ACTIVE`/`PAUSED`/`EXPIRED`/`CANCELLED`): existe únicamente en la respuesta sintética y nunca puede persistirse. Un cliente que mapee `status` debe tratarlo como un sexto caso; el panel de empresa (`apps/web`) lo muestra como "Sin plan activo" en la insignia de Membresías, "Sin plan activado" en el titular de esa sección y en la barra lateral, y no marca ninguna tarjeta como "Actual"; mientras no haya respuesta de la API la barra lateral dice "Plan sin confirmar" en vez de afirmar un plan. Los botones "Quiero conocerlo" avisan que los planes todavía no se activan desde el panel.
   - Como todos los endpoints de empresa, este `GET` sigue resolviendo la `Company` de la sesión con un `upsert` (`business.service.ts#companyFor`), así que puede crear la fila `Company` si la cuenta es anterior a esa implementación. Lo que dejó de crear es la suscripción.
   - **Filas fantasma previas al cambio (limitación conocida, sin limpieza).** Cualquier base donde corrió la versión anterior conserva las filas `PILOT/TRIAL` que ese `upsert` creó sin activación explícita. No se borran solas, y **tampoco existe un criterio seguro para borrarlas con un script**: el `upsert` antiguo escribía exactamente lo mismo que `demo.seed.ts` (`plan: PILOT`, `status: TRIAL`, `trialEndsAt` = ahora + 30 días, `endsAt` nulo) y que una fila creada a mano con los valores por defecto del esquema; en las tres, `startsAt` y `createdAt` coinciden y `updatedAt` es igual a `createdAt`, y no hay ninguna columna que registre quién ni por qué se creó la fila (verificado en una transacción con rollback sobre `chambeaya_test`, ver `CN-20260918-009`). Como la activación de un plan es manual (`docs/product/memberships.md`), una fila real hecha a mano es indistinguible de una fantasma, y borrarla por suposición quitaría un plan que alguien sí activó. Por eso esas empresas seguirán viendo "Piloto activo" y una fecha de fin de prueba hasta que un operador las revise. Punto de partida para esa revisión manual, de solo lectura (una fila que cumple esto es *candidata*, no fantasma confirmada): `SELECT c."name", s."companyId", s."createdAt", s."trialEndsAt" FROM "CompanySubscription" s JOIN "Company" c ON c."id" = s."companyId" WHERE s."plan" = 'PILOT' AND s."status" = 'TRIAL' AND s."endsAt" IS NULL AND s."updatedAt" = s."createdAt" ORDER BY s."createdAt";`. Decidir empresa por empresa; ninguna migración ni script del repositorio borra estas filas.
-- `GET /api/business/payment-settings` → `{ commissionBps, taxBps, currency: 'PEN', mode: 'manual' }`: el ajuste global vigente que se congelaría en un turno nuevo (`GET /api/admin/settings` sin el detalle de auditoría). El panel lo usa para la vista previa en vivo del formulario de publicación. `mode` queda fijo en `'manual'` en este alcance; a partir del Alcance E se lee de `PAYMENT_PROVIDER` (ver [Despliegue con Docker](../guides/deployment.md)).
+- `GET /api/business/payment-settings` → `{ commissionBps, taxBps, currency: 'PEN', mode }`: el ajuste global vigente que se congelaría en un turno nuevo (`GET /api/admin/settings` sin el detalle de auditoría). El panel lo usa para la vista previa en vivo del formulario de publicación. Desde el Alcance E, `mode` es el nombre del proveedor de pago **activo** (`PAYMENT_PROVIDER`, ver [Despliegue con Docker](../guides/deployment.md)): `'manual'` en producción hoy (sin proveedor contratado), o `'simulated'` en desarrollo/QA.
 
 ## Turnos
 
@@ -484,7 +484,7 @@ Una conversación pertenece a un trabajador del directorio y puede asociarse a u
 
 **Alcance D (registro confiable y modo manual): el CRUD manual (`POST`/`PATCH`/`DELETE /api/business/payments[/:id]`) se retiró por completo.** Permitía a la empresa inventar pagos, alterar montos y saltarse la comisión de Chambeaya; las tres rutas ya no están registradas (404 genérico de Express, no un `sendError` de esta app). Un `Payment` solo nace automáticamente al completarse una asignación (ver más abajo); el único escritor que le queda a la empresa es `mark-paid`.
 
-Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`. `SCHEDULED` está reservado para el Alcance E (checkout de pasarela en curso); sin proveedor contratado, ningún pago llega hoy a ese estado.
+Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`. `SCHEDULED` es el checkout de pasarela en curso (Alcance E); con `PAYMENT_PROVIDER=manual` (producción hoy, sin proveedor contratado) ningún pago llega a ese estado, porque `checkout` responde `409 PROVIDER_MANUAL` para ese modo.
 
 ### `POST /api/business/payments/:id/mark-paid`
 
@@ -503,8 +503,8 @@ Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`. `SCHEDULED` está res
 - `commissionBps` / `commissionCents`: la comisión de Chambeaya, en puntos básicos y en céntimos.
 - `taxBps` / `taxCents`: el IGV **sobre la comisión** (no sobre `amountCents`), en puntos básicos y en céntimos.
 - `totalCents`: `amountCents + commissionCents + taxCents` — lo que paga la empresa. La comisión y el IGV van **encima** del pago al trabajador, nunca descontados de él.
-- `provider`: `'manual'` para un pago nacido de una asignación (reporte manual, sin pasarela) o `'legacy'` para uno creado con el CRUD retirado o para un pago sin `assignmentId` anterior a la migración de comisión; en ambos casos con comisión e IGV en 0.
-- `needsReview`: reservado para el Alcance E (proveedor de pagos); no se usa todavía.
+- `provider`: el proveedor de pago **activo** (`PAYMENT_PROVIDER`) en el instante exacto en que el pago nació (`checkOut`/`resolveAssignment`; ver Alcance E abajo), o `'legacy'` para uno creado con el CRUD retirado o para un pago sin `assignmentId` anterior a la migración de comisión (siempre con comisión e IGV en 0). Fijo desde ese momento: cambiar `PAYMENT_PROVIDER` después nunca migra los pagos ya creados.
+- `needsReview`: Alcance E. `true` cuando un webhook llega con un monto o moneda que no coincide con el intento, o cuando se recibe una aprobación sobre un pago que ya estaba `PROCESSED` (doble cobro). Un humano debe revisarlo; ningún endpoint lo limpia todavía (fuera de alcance).
 
 Redondeo: enteros, "la mitad hacia arriba" — `commissionCents = floor((amountCents * commissionBps + 5000) / 10000)`, y el mismo cálculo para `taxCents` sobre `commissionCents`. Ejemplo con la comisión inicial (10% + 18% de IGV): un turno de **S/100** por persona da `amountCents: 10000`, `commissionCents: 1000` (S/10), `taxCents: 180` (S/1.80) y `totalCents: 11180` (**S/111.80** que paga la empresa por persona). La implementación de referencia es `apps/api/src/modules/payments/payment-amounts.ts#buildPaymentAmounts`.
 
@@ -525,6 +525,52 @@ Los dos únicos puntos donde nace un `Payment` automático — el check-out del 
 - **Sin backfill histórico:** las filas creadas antes de la migración quedan con `closedWithoutPayment: false` y los otros dos campos en `NULL` — no hay forma de derivarlo de manera confiable sin depender del mismo texto libre que se está reemplazando.
 
 `GET /api/admin/commissions` filtra `closedWithoutPayment` por período usando `closedWithoutPaymentAt` (nunca `ShiftEvent.createdAt` ni ningún `detail`), y expone además `pendingResolution` (`NO_SHOW`/`ABANDONED` todavía sin resolver, sin filtro de período) para que dejar una asignación sin resolver no la esconda del reporte.
+
+### Capa de adaptadores, proveedor simulado y webhook (Alcance E del plan de pagos)
+
+Sin proveedor real contratado todavía (Mercado Pago, Culqi, Niubiz o Izipay, sin decidir). Este alcance construye la capa de adaptadores (`apps/api/src/modules/payments/provider.ts`) y un **proveedor simulado** que recorre el flujo completo checkout → proveedor → webhook firmado → pagado, **sin mover dinero real**. El adaptador activo se elige con `PAYMENT_PROVIDER` (`manual` por defecto; ver [Despliegue con Docker](../guides/deployment.md)), siguiendo el mismo patrón de selección por variable de entorno que `google_identity.ts` y `private_document_storage.ts`.
+
+**Supuesto de diseño para un proveedor real (decisión del usuario, todavía sin implementar):** pago dividido (split). El proveedor cobra a la empresa, paga al trabajador y entrega la comisión de Chambeaya en la misma operación; Chambeaya nunca custodia la paga del trabajador. El destino de pago del trabajador y la consulta activa de estado al proveedor quedan fuera de este alcance, exigidos explícitamente al elegir proveedor.
+
+Nuevas tablas: `PaymentAttempt` (`id`, `paymentId`, `provider`, `checkoutId` único, `status` `CREATED`/`APPROVED`/`REJECTED`/`EXPIRED`, `totalCents`, `currency`, `redirectUrl`, `expiresAt`, `failureReason`) y `PaymentProviderEvent` (`id`, `provider`, `eventId`, `attemptId?`, `payload`, `receivedAt`, `@@unique([provider, eventId])`: la defensa contra duplicados).
+
+#### `POST /api/business/payments/:id/checkout` (sesión de empresa)
+
+Solo aplica a un pago **propio**, `PENDING`, cuyo `provider` es el proveedor activo.
+
+- Con el proveedor activo `manual`, o si `payment.provider` no coincide con el proveedor activo: `409 { "error": "PROVIDER_MANUAL" }`.
+- Con el pago en cualquier otro estado que no sea `PENDING`/`SCHEDULED` (con un intento vigente): `409 { "error": "PAYMENT_NOT_PAYABLE" }`.
+- Éxito: `200 { attemptId, redirectUrl, expiresAt }`.
+- **Atómico:** en una transacción, `updateMany` `PENDING`→`SCHEDULED` y creación del `PaymentAttempt` (`expiresAt = ahora + PAYMENT_CHECKOUT_TTL_MINUTES`, 30 por defecto). La llamada a `provider.createCheckout` va **fuera** de esa transacción, con `idempotencyKey = attempt.id`. Si el proveedor falla, el intento queda `REJECTED` (`failureReason: 'PROVIDER_UNAVAILABLE'`), el pago vuelve a `PENDING` y responde `502 { "error": "PROVIDER_UNAVAILABLE" }`.
+- **Idempotente:** un doble clic (o varias llamadas concurrentes) sobre el mismo pago `PENDING` deja un único `PaymentAttempt` vigente; todas las llamadas devuelven el mismo `{attemptId, redirectUrl, expiresAt}`. Las llamadas que pierden la carrera del `updateMany` esperan (sondeo acotado, sin cron ni lock) a que la ganadora termine de escribir `redirectUrl`, en vez de responder `409` por haber llegado unos milisegundos antes.
+- **Expiración perezosa:** si `expiresAt` de un intento vigente ya pasó, el pago vuelve a `PENDING` (y el intento a `EXPIRED`) al leer (`GET /business/payments[/:id]`) o al reintentar el checkout. No hay ningún cron.
+
+#### `POST /api/payments/webhooks/:provider`
+
+Sin autenticación (el proveedor no tiene ningún token de Chambeaya); montado en `app.ts` **antes** de `express.json()` global, con `express.raw` **solo** sobre esta ruta, para conservar el `rawBody` exacto que la firma necesita. Con rate limit propio (`PAYMENT_WEBHOOK_RATE_LIMIT_WINDOW_MS`/`MAX`, 60 s / 60 solicitudes por defecto).
+
+- `404` si `:provider` no es el proveedor activo.
+- **Firma:** `HMAC-SHA256` sobre `${timestamp}.${rawBody}` con `PAYMENT_WEBHOOK_SECRET`, en la cabecera `x-payment-signature: t=<epoch_ms>,v1=<hex>`. Comparación con `timingSafeEqual`, tolerancia de 5 minutos. Firma ausente, mal formada, vencida o que no coincide con el `rawBody` (alterado en tránsito): `401 { "error": "INVALID_SIGNATURE" }`. Es el esquema propio de los adaptadores que Chambeaya controla (`simulated`); un proveedor real tendrá el suyo, documentado por ese proveedor.
+- **Procesamiento, en una sola transacción** (`payments.service.ts#processProviderEvent`, la MISMA función que usa el checkout simulado):
+  1. Inserta `PaymentProviderEvent`. Un duplicado (mismo `provider` + `eventId`, `P2002`) responde `200` sin ningún efecto adicional.
+  2. Busca el `PaymentAttempt` por `checkoutId`. Si no existe, el evento igual queda registrado (auditoría) y responde `404 { "error": "ATTEMPT_NOT_FOUND" }`.
+  3. Si `amountCents`/`currency` no coinciden con `attempt.totalCents`/`attempt.currency`: `422 { "error": "AMOUNT_MISMATCH" }`, marca `Payment.needsReview = true` y **no** transiciona nada más (el pago nunca pasa a `PROCESSED` por esta vía).
+  4. `APPROVED` sobre un pago `PENDING`/`SCHEDULED` (incluida una aprobación **tardía** de un intento ya `EXPIRED`, mientras el pago siga sin resolver): intento `APPROVED`, pago `PROCESSED` + `processedAt`, y `ShiftEvent` `PAYMENT_REPORTED` con actor `SYSTEM` si el pago tiene `shiftId`.
+  5. `APPROVED` sobre un pago ya `PROCESSED` (**doble cobro**) o `CANCELLED`: marca `needsReview = true`, sin ningún otro efecto. El reembolso queda fuera de alcance (trabajo futuro).
+  6. `REJECTED`: intento `REJECTED` con `failureReason`; el pago vuelve a `PENDING` **solo si no está ya `PROCESSED`** — un rechazo nunca revierte una aprobación ya asentada.
+- Respuestas: `200` (procesado o duplicado), `401`, `404`, `422`.
+
+#### `POST /api/payments/simulated/:checkoutId/approve` y `.../reject`
+
+Solo con proveedor activo `simulated` (`404` en cualquier otro modo, incluido `manual`). Exige la sesión BUSINESS **dueña** del pago (`404` para cualquier otra empresa, sin distinguir de "no existe"). Construye y firma un evento con el **mismo formato** que recibiría el webhook (`simulated.provider.ts#buildSimulatedEvent`), lo pasa por `provider.verifyWebhook` (la misma verificación de firma, nunca se salta) y lo procesa con la **misma** `processProviderEvent` que el webhook — sin ningún atajo. `redirectUrl` del checkout simulado apunta a `${PANEL_PUBLIC_URL}/pago-simulado/<checkoutId>` (la página del Alcance F).
+
+#### Guardas de arranque (`server.ts`, antes de escuchar en el puerto)
+
+La API se niega a arrancar si:
+
+- `PAYMENT_PROVIDER` tiene un valor desconocido (hoy: distinto de `manual`/`simulated`).
+- El proveedor activo no es `manual` y `PAYMENT_WEBHOOK_SECRET` tiene menos de 32 caracteres.
+- `NODE_ENV=production`, el proveedor activo es `simulated` y no está `PAYMENT_SIMULATION_ALLOWED=true` explícito.
 
 ## Respuestas de error
 

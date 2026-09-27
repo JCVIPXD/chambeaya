@@ -13,6 +13,21 @@ import { companyCanViewApplicantCv } from '../talent/cv_access.js';
 import { deriveShiftStatus, isTerminalShift, nextOperationalAction, resolveAssignmentLifecycle } from '../operations/shift-state.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
 import { buildPaymentAmounts, getPlatformSettings } from '../payments/payment-amounts.js';
+import {
+  checkoutPayment as checkoutPaymentWithProvider,
+  expireStaleScheduledPayments,
+  PaymentNotFoundError,
+  PaymentNotPayableError as PaymentGatewayNotPayableError,
+  ProviderManualError,
+  ProviderUnavailableError,
+  resolvePaymentProvider,
+  type CheckoutResponse,
+} from '../payments/payments.service.js';
+
+// Se reexportan para que `business.routes.ts` pueda distinguirlos en
+// `sendError` sin importar directamente del módulo `payments` (mismo
+// patrón que el resto de errores de dominio de este archivo).
+export { PaymentNotFoundError, ProviderManualError, ProviderUnavailableError };
 
 // Se reexporta para no romper a quien ya lo importaba desde este módulo.
 export { withSerializableRetry };
@@ -175,6 +190,12 @@ export interface BusinessOperations {
    * monto.
    */
   markPaymentPaid(session: AuthSession, id: string): Promise<unknown>;
+  /**
+   * `POST /business/payments/:id/checkout` (Alcance E). Delega en
+   * `payments.service.ts#checkoutPayment` tras resolver la empresa dueña de
+   * la sesión; solo aplica si el proveedor activo no es `'manual'`.
+   */
+  checkoutPayment(session: AuthSession, id: string): Promise<CheckoutResponse>;
 }
 
 export class DatabaseBusinessService implements BusinessOperations {
@@ -197,7 +218,9 @@ export class DatabaseBusinessService implements BusinessOperations {
   async paymentSettings(session: AuthSession) {
     void session; // No depende de la empresa: el ajuste es global.
     const { commissionBps, taxBps } = await getPlatformSettings(this.prisma);
-    return { commissionBps, taxBps, currency: 'PEN', mode: 'manual' as const };
+    // Alcance E: `mode` ya no queda fijo en `'manual'`; es el nombre del
+    // adaptador activo (`PAYMENT_PROVIDER`, ver `payments.service.ts`).
+    return { commissionBps, taxBps, currency: 'PEN', mode: resolvePaymentProvider().name };
   }
 
   async listShifts(session: AuthSession) {
@@ -589,7 +612,11 @@ export class DatabaseBusinessService implements BusinessOperations {
             taxBps: amounts.taxBps,
             taxCents: amounts.taxCents,
             totalCents: amounts.totalCents,
-            provider: 'manual',
+            // Alcance E: el pago nace con el proveedor ACTIVO en este
+            // instante (no fijo en `'manual'`), para que el reporte de
+            // comisiones (`GET /api/admin/commissions`) lo clasifique bien
+            // como "por facturar" (manual) o de pasarela.
+            provider: resolvePaymentProvider().name,
             workerCount: 1,
             status: 'PENDING',
             dueAt: completedAt,
@@ -766,6 +793,10 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async listPayments(session: AuthSession) {
     const company = await this.companyFor(session);
+    // Expiración perezosa (Alcance E): antes de listar, cualquier pago
+    // `SCHEDULED` de esta empresa cuyo intento vigente ya venció vuelve a
+    // `PENDING`. Nunca hay un cron: se resuelve al leer.
+    await expireStaleScheduledPayments(this.prisma, { companyId: company.id });
     return this.prisma.payment.findMany({
       where: { companyId: company.id },
       include: { shift: { select: { id: true, title: true, startsAt: true, endsAt: true } }, assignment: { include: { worker: { select: { id: true, name: true, email: true } } } } },
@@ -775,6 +806,7 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async getPayment(session: AuthSession, id: string) {
     const company = await this.companyFor(session);
+    await expireStaleScheduledPayments(this.prisma, { id, companyId: company.id });
     const payment = await this.prisma.payment.findFirst({ where: { id, companyId: company.id } });
     if (!payment) throw new BusinessRecordNotFoundError('PAYMENT_NOT_FOUND');
     return payment;
@@ -825,6 +857,25 @@ export class DatabaseBusinessService implements BusinessOperations {
       }
       return payment;
     });
+  }
+
+  /**
+   * Traduce los errores del módulo `payments` (genéricos, sin depender de
+   * `business.service.ts`) a los propios de este archivo cuando aplica
+   * (`PaymentNotFoundError`/`PaymentNotPayableError` ya existían aquí para
+   * `mark-paid`); `ProviderManualError`/`ProviderUnavailableError` se
+   * reexportan tal cual (ver arriba) porque son nuevos en este alcance.
+   */
+  async checkoutPayment(session: AuthSession, id: string) {
+    const company = await this.companyFor(session);
+    try {
+      return await checkoutPaymentWithProvider(this.prisma, company.id, id);
+    } catch (error) {
+      if (error instanceof PaymentGatewayNotPayableError) {
+        throw new PaymentNotPayableError(error.message);
+      }
+      throw error;
+    }
   }
 
   private async companyFor(session: AuthSession) {

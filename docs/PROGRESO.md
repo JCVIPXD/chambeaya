@@ -54,6 +54,45 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260926-025 — Alcance E: capa de adaptadores, proveedor simulado y webhook de pagos (solo API y configuración)
+
+- Fecha: 2026-09-27 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-024` (auditoría, cierre del Alcance D). Sobre HEAD `53b14cc`, árbol limpio antes de empezar. Sigue `dynamic-prancing-bear.md`; implementa solo el Alcance E (la UI de pago es el Alcance F).
+- Alcance:
+  - **Migración `20260927052735_payment_attempts`**: `PaymentAttempt` (`paymentId`, `provider`, `checkoutId` único, `status CREATED/APPROVED/REJECTED/EXPIRED`, `totalCents`, `currency`, `redirectUrl`, `expiresAt`, `failureReason`) y `PaymentProviderEvent` (`provider`, `eventId`, `attemptId?`, `payload Json`, `@@unique([provider, eventId])`). Aditiva, sin `NOT NULL` nuevo sobre `Payment`; `Payment.attempts PaymentAttempt[]`.
+  - **`apps/api/src/modules/payments/`**: `provider.ts` (interfaz `PaymentProvider`, documenta el supuesto de pago dividido/split para un proveedor real), `webhook-signature.ts` (HMAC-SHA256 sobre `timestamp.rawBody`, `timingSafeEqual`, tolerancia 5 min), `manual.provider.ts` (sin checkout, lanza si se invoca), `simulated.provider.ts` (`createCheckout` sin red real; `verifyWebhook`; `buildSimulatedEvent` para los endpoints de aprobar/rechazar), `payments.service.ts` (`resolvePaymentProvider`/`activePaymentProviderName` por `PAYMENT_PROVIDER`, `assertPaymentConfig` con las tres guardas de arranque, `checkoutPayment`, `processProviderEvent` compartida por webhook y simulado, `expireStaleScheduledPayments`), `payments.routes.ts` (webhook + simulado).
+  - **`app.ts`**: el router del webhook se monta con `express.raw` ANTES de `express.json()` global; el del checkout simulado, después (sesión BUSINESS normal). Nuevo `paymentsPrisma` inyectable en `createApp`.
+  - **`checkOut` (marketplace) y `resolveAssignment` (business)**: el `Payment` nuevo copia `provider: resolvePaymentProvider().name` en vez de `'manual'` fijo. `paymentSettings` expone `mode` del proveedor activo.
+  - **Checkout** `POST /api/business/payments/:id/checkout`: transacción `PENDING`→`SCHEDULED` + creación del intento; llamada al proveedor fuera de la transacción; idempotente (doble clic y 10 llamadas concurrentes dejan un solo intento, con sondeo acotado para las perdedoras de la carrera del `updateMany`, en vez de un `409` espurio); expiración perezosa al leer/reintentar; `409 PROVIDER_MANUAL`/`PAYMENT_NOT_PAYABLE`, `502 PROVIDER_UNAVAILABLE` con reversión.
+  - **Webhook** `POST /api/payments/webhooks/:provider`: sin sesión, con rate limit propio; `404` si `:provider` no es el activo; firma verificada antes de tocar la base; deduplicación por `P2002`; monto/moneda distintos → `422` + `needsReview`, sin `PROCESSED`; aprobación tardía de un intento expirado aceptada si el pago sigue `PENDING`; doble cobro → `needsReview` sin más efecto; rechazo nunca revierte una aprobación.
+  - **Simulado** `POST /api/payments/simulated/:checkoutId/(approve|reject)`: exige sesión BUSINESS dueña, `404` si el proveedor activo no es `simulated`; firma y procesa con la MISMA `processProviderEvent` que el webhook.
+  - **Guardas de arranque** (`server.ts`, antes de escuchar): proveedor desconocido, secreto corto con proveedor no manual, `simulated` en producción sin `PAYMENT_SIMULATION_ALLOWED=true`.
+  - **Configuración**: `docker-compose.yml` (dev: `simulated` + secreto de desarrollo), `docker-compose.production.yml` (reenvía las 4 variables + `PANEL_PUBLIC_URL`), `.env.production.example`, `scripts/instalar-produccion.sh` (genera `PAYMENT_WEBHOOK_SECRET` de 64 caracteres en instalación nueva, lo añade si falta en una existente sin tocar otras variables, `PAYMENT_PROVIDER=manual`, `PAYMENT_CHECKOUT_TTL_MINUTES=30`), `scripts/deploy-hosting.sh` (valida lo mismo que `assertPaymentConfig` y avisa del modo activo).
+  - **Docs**: `docs/reference/api.md` (endpoints, firma, estados, errores), `docs/guides/deployment.md` (variables y cómo cambiar de proveedor), `docs/guides/local-development.md` (modo simulado).
+- Archivos: los listados arriba, más `apps/web/lib/business-api.ts` (tipo `PaymentSettingsRecord.mode` de `'manual'` literal a `string`, sin cambios de UI: la UI de pago es el Alcance F).
+- Decisiones:
+  - `redirectUrl` se agregó a `PaymentAttempt` (no estaba en la lista literal del encargo) para que un doble clic devuelva la misma URL sin volver a llamar al proveedor.
+  - `PANEL_PUBLIC_URL` es una variable explícita nueva (no derivada en silencio de otra existente), con una derivación defensiva de `NEXT_PUBLIC_API_URL`/`NEXT_BASE_PATH` si falta.
+  - Las llamadas de checkout que pierden la carrera del `updateMany` (10 concurrentes) esperan con sondeo acotado (hasta 3 s) el intento de la ganadora, en vez de responder `409`: es la única forma de que TODAS devuelvan el mismo `{attemptId, redirectUrl}`, tal como exige la idempotencia del plan.
+- Validaciones (reales; contenedor propio `cn-e-pg` Postgres 16-alpine en el puerto 5901, eliminado al terminar; nunca se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 26 archivos, **507/507** (incluye 9 casos de firma y 15 de guardas/`resolvePaymentProvider`, nuevos).
+  - Integración (`chambeaya_test`, `CHAMBEAYA_INTEGRATION_TESTS=true`): **15 archivos, 134/134** (23 nuevos de `payments.integration.test.ts`: firma inválida/sin firma/reloj desfasado/body alterado, duplicados, rechazo tras aprobación, aprobación tardía de un intento expirado, doble cobro, monto/moneda distintos, 404 del simulado en modo manual, checkout idempotente con 409+reversión en el caso `PROVIDER_MANUAL`, 10 checkouts concurrentes con un solo intento, 5 webhooks idénticos concurrentes con una sola transición, aprobación/rechazo concurrentes, y el flujo completo turno→checkout→aprobar simulado→`PROCESSED`→contado como "cobrada" en `/admin/commissions`).
+  - Migración: `prisma migrate deploy` sobre una base vacía y sobre `chambeaya_test` con datos (turnos, pagos, intentos reales de las pruebas de integración); `prisma migrate diff` sin divergencia contra ambas.
+  - Scripts: `bash -n` sobre los dos modificados, sin errores; `shellcheck` (contenedor `koalaman/shellcheck:stable`) sin hallazgos.
+  - Imagen de producción de la API (`apps/api/Dockerfile.production`, build real, contra `cn-e-pg`): (1) `PAYMENT_PROVIDER=manual`, `NODE_ENV=production`, sin ninguna otra variable de pago → arranca (`Chambeaya API listening on port 4000`); (2) `simulated` + `NODE_ENV=production` + secreto válido (40 caracteres) sin `PAYMENT_SIMULATION_ALLOWED` → falla, exit 1, mensaje `PAYMENT_PROVIDER=simulated en producción exige PAYMENT_SIMULATION_ALLOWED=true explícito`; (3) `simulated` sin `PAYMENT_WEBHOOK_SECRET` → falla, exit 1, mensaje del secreto corto; (4) `PAYMENT_PROVIDER=mercadopago` (desconocido) → falla, exit 1, mensaje `PAYMENT_PROVIDER desconocido`; (5) `simulated` + `PAYMENT_SIMULATION_ALLOWED=true` + secreto válido en `NODE_ENV=production` → arranca. Los cinco casos con el exit code verificado vía `docker inspect`.
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo (ambos proyectos): **147/147** (1 omitida, preexistente) — sin cambios de comportamiento esperados (Alcance E es solo API).
+  - Limpieza: contenedor, red e imagen Docker propios de esta validación eliminados; `apps/web/next-env.d.ts` revertido dos veces (tras `tsc` y tras Playwright); no quedó ningún proceso propio corriendo.
+- Riesgos:
+  - El sondeo de checkout concurrente (hasta 3 s) es una espera activa en el proceso Node, no una notificación (`LISTEN/NOTIFY`); con un proveedor real cuya llamada de red tardara varios segundos, una ráfaga de checkouts concurrentes sobre el mismo pago podría agotar el sondeo y responder `409` a alguna llamada perdedora en vez de esperar indefinidamente. Aceptable para `manual`/`simulated` (sin red real); revisar el bound al integrar un proveedor real.
+  - `GET /api/business/payments`/`:id` ejecutan `expireStaleScheduledPayments` por cada lectura (una consulta adicional, y una transacción solo si algo venció); aceptable al volumen del piloto.
+  - No se implementó `fetchCheckoutStatus` en ningún adaptador (opcional en la interfaz; ningún proveedor de este alcance lo necesita).
+  - La UI de pago (botón "Pagar", página `/pago-simulado/:checkoutId`) es el Alcance F; no se tocó ningún archivo de `apps/web/app` ni `apps/mobile_flutter` más allá del tipo de `PaymentSettingsRecord.mode`.
+  - `e2e-real` no se re-ejecutó en esta entrega (el Alcance E no cambia ningún flujo que esa suite recorra; ver Alcance F para el recorrido de punta a punta con `PAYMENT_PROVIDER=simulated`).
+- Siguiente paso: auditoría de `auditor-opus` sobre este ID.
+
 ### CN-20260926-024 — Reauditoría de `CN-20260926-023` y cierre del Alcance D (`019`, `021`, `023`)
 
 - Fecha: 2026-09-27 (America/Lima)

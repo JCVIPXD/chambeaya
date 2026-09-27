@@ -31,6 +31,18 @@ services:
       API_TRUST_PROXY: ${API_TRUST_PROXY:-false}
       AUTH_RATE_LIMIT_WINDOW_MS: ${AUTH_RATE_LIMIT_WINDOW_MS:-900000}
       AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-20}
+      # Alcance E del plan de pagos: en desarrollo, sin proveedor contratado,
+      # se usa el adaptador simulado (recorre checkout -> webhook firmado ->
+      # pagado sin mover dinero real). `PAYMENT_WEBHOOK_SECRET` es un valor
+      # de desarrollo fijo (nunca usar este valor en producción, ver
+      # .env.production.example y scripts/instalar-produccion.sh, que
+      # generan uno propio). `PANEL_PUBLIC_URL` apunta al panel de este mismo
+      # docker-compose (sin NEXT_BASE_PATH: el panel de desarrollo está en la
+      # raíz), para que el `redirectUrl` del checkout simulado sea navegable.
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-simulated}
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-dev-only-payment-webhook-secret-do-not-use-in-prod}
+      PAYMENT_CHECKOUT_TTL_MINUTES: ${PAYMENT_CHECKOUT_TTL_MINUTES:-30}
+      PANEL_PUBLIC_URL: ${PANEL_PUBLIC_URL:-http://127.0.0.1:3000}
     ports:
       - "127.0.0.1:${API_HOST_PORT:-4000}:4000"
     volumes:
