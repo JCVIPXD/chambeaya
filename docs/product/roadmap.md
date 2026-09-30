@@ -296,16 +296,15 @@ Esta fase requiere validación legal, laboral y tributaria previa.
 
 Chambeaya no custodiará fondos directamente salvo que una evaluación regulatoria posterior lo autorice y justifique.
 
-**Estado real:** todavía no empieza. El Alcance D del plan de pagos deja
-producción operando en **modo manual** (`provider: 'manual'`): la empresa
-paga al trabajador por fuera de la app y lo marca como pagado; Chambeaya
-factura la comisión aparte, sin mover el dinero del trabajador en ningún
-momento. El Alcance E (siguiente, todavía no implementado) solo agrega la
-capa de adaptadores de proveedor y un proveedor **simulado** para desarrollo
--nunca un proveedor real ni producción-, y el Alcance F conecta ese
-checkout simulado al panel. Elegir un proveedor de pagos regulado, la
-validación legal/laboral/tributaria previa y todo lo demás de esta lista
-siguen sin empezar.
+**Estado real:** producción sigue operando en **modo manual**
+(`provider: 'manual'`): la empresa paga al trabajador por fuera de la app y
+lo marca como pagado; Chambeaya factura la comisión aparte, sin mover el dinero
+del trabajador. Para desarrollo y QA existe `provider: 'simulated'`, con capa
+de adaptadores, checkout, webhook firmado y la pantalla
+`/pago-simulado/:checkoutId`; permite recorrer aprobación o rechazo sin mover
+dinero real. No habilita una pasarela en producción ni sustituye elegir un
+proveedor regulado, la validación legal/laboral/tributaria, conciliación,
+reembolsos, payout real o disputas: todo ello sigue pendiente.
 
 ### Fase 7 — Operación y plataforma de producción
 

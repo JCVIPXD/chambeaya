@@ -54,6 +54,201 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20260930-031 — Reauditoría de `CN-20260930-030` y cierre de los Alcances E y F (pagos simulados)
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260930-030` (corrección), contra `CN-20260930-029` (reauditoría de `028`), `CN-20260930-028`, `CN-20260930-027`, `CN-20260926-025` (Alcance E, commit `b8dd587`) y `CN-20260930-026` (Alcance F, sin comitear).
+- Alcance: contraste de lo declarado en `030` con el `git diff` del árbol de trabajo (`business.service.ts#markPaymentPaid`, `payments.service.ts#processProviderEvent`, `page.tsx`, pruebas y `docs/`), ejecución de la integración real que `030` dejó `NO_EJECUTADA` y sondas propias.
+- Archivos: revisados los listados en `030`. Esta reauditoría solo modificó este registro: `docs/reference/api.md`, `docs/guides/deployment.md`, `docs/guides/local-development.md` y `docs/product/roadmap.md` ya describen el comportamiento actual. No se tocó código de producto.
+- Estado de los hallazgos de `029`:
+  - **MEDIO-A — resuelto (opción a).** `markPaymentPaid` admite `PENDING|SCHEDULED` de un proveedor distinto del activo. Tras ganar el `updateMany`, expira en la misma transacción los intentos `CREATED` con `PROVIDER_DEACTIVATED`. La prueba de integración espera `200` en el checkout y pasa. El panel muestra "Marcar como pagado" en modo `manual` para un pago `simulated` `PENDING` o `SCHEDULED`.
+  - **BAJO-6 — resuelto.** La rama `REJECTED` es un único `UPDATE ... WHERE status IN (...) AND NOT EXISTS (otro intento CREATED)`; se verificó en el log de SQL de PostgreSQL. Un rechazo de un checkout antiguo termina en `noop` y deja `SCHEDULED`/`CREATED` el checkout vigente, con prueba de integración.
+- Hallazgos: sin críticos, altos ni medios.
+  - **BAJO-7 (no bloqueante).** Falta cobertura automatizada de la invariante de seguridad de `mark-paid`: con el proveedor `simulated` activo, un pago `simulated` `PENDING` o `SCHEDULED` debe responder `409` y conservar el intento `CREATED`. Tampoco se prueba en e2e el botón del panel para un checkout inactivo. La sonda de esta auditoría confirmó el comportamiento correcto; conviene incorporarla a `payments.integration.test.ts` en el próximo cambio de pagos.
+  - **BAJO-8 (no bloqueante, documentación en código).** El JSDoc de `processProviderEvent` (`payments.service.ts`, reglas, viñeta `REJECTED`) no menciona la nueva condición de "sin otro intento `CREATED`". `docs/reference/api.md` sí la describe.
+- Validaciones (reales en este equipo):
+  - Base de datos: clúster PostgreSQL 18 desechable (`initdb` en el scratchpad, puerto 5913, `trust`), eliminado al terminar; no se tocó el servidor de 5432. `prisma migrate deploy`: correcto.
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`): 15 archivos, **142/142**. Cierra el `NO_EJECUTADA` de `030`.
+  - Concurrencia y transición (`payments.integration.test.ts`, filtro `concurrent|racing|repeating|rejection|approval after|old checkout|mark-paid`): 11/11 en cada una de 5 ejecuciones.
+  - Sondas temporales, eliminadas: (1) `mark-paid` con `simulated` activo responde `409` en `PENDING` y en `SCHEDULED`, y el intento sigue `CREATED`. (2) Cinco `mark-paid` concurrentes sobre un `SCHEDULED` inactivo dan un `200`, cuatro `409`, un solo `PAYMENT_REPORTED` e intento `EXPIRED/PROVIDER_DEACTIVATED`; el simulador responde `404` en modo `manual`. Al volver a `simulated`, una aprobación tardía deja el pago `PROCESSED` con `needsReview=true` y sin segundo evento. (3) Rechazar el intento vigente sigue devolviendo el pago a `PENDING`. Resultado: 3/3.
+  - API: `npm --workspace @chambeaya/api run build` (`tsc --noEmit`), sin errores; `npm --workspace @chambeaya/api test`, 26 archivos, **509/509**.
+  - Web: `npm --workspace @chambeaya/web run build`, correcto (`ƒ /pago-simulado/[checkoutId]`). `e2e/simulated-payment.spec.ts`: **6/6** en escritorio y móvil.
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check`: sin errores.
+- Riesgos residuales:
+  - `NO_EJECUTADA`: `e2e-real`, imagen Docker de producción (sin Docker en este equipo), `shellcheck`, recorrido de navegador contra API y PostgreSQL reales en modo `simulated` y la suite rápida completa de Playwright. En esta reauditoría solo se ejecutó `simulated-payment.spec.ts`; la suite completa pasó en `029`, y `030` solo cambió la condición del botón.
+  - Teórico, solo en modo simulado: bajo `READ COMMITTED`, un rechazo de un intento antiguo que coincida con la creación de un checkout nuevo podría evaluar el `NOT EXISTS` con la instantánea previa. No mueve dinero; revisar al integrar un proveedor real.
+  - Proceso: `028` y `030` los registró "Codex (corrección directa)", fuera del flujo de `CLAUDE.md`. Esta auditoría es la revisión independiente.
+- Cierre: con esta auditoría quedan **cerrados los Alcances E (`025`) y F (`026`)**, con sus correcciones `028` y `030`. Producción sigue en `PAYMENT_PROVIDER=manual`.
+- Siguiente paso: comitear el árbol de trabajo de la rama `alcance-e-pendiente-auditoria` e integrarlo en `main`. BAJO-7 y BAJO-8 quedan como mejoras opcionales para el próximo cambio de pagos.
+
+### CN-20260930-030 — Corrección de la salida de checkout inactivo y rechazo tardío
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: Codex (corrección directa)
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260930-028` y reauditoría `CN-20260930-029`.
+- Alcance: corrige `MEDIO-A`: al volver de `simulated` a `manual`, `mark-paid` también resuelve un pago `SCHEDULED` del proveedor inactivo, expira su `PaymentAttempt CREATED` con `PROVIDER_DEACTIVATED` y procesa el pago de forma atómica. El panel ofrece la misma acción para ese checkout inactivo. Corrige también `BAJO-6`: un `REJECTED` de un checkout antiguo no puede devolver a `PENDING` un pago cuyo checkout más reciente sigue `CREATED`.
+- Archivos: `apps/api/src/modules/business/business.service.ts`, `apps/api/src/modules/payments/payments.service.ts`, `apps/web/app/page.tsx`, `apps/api/tests/business.service.test.ts`, `apps/api/tests/integration/payments.integration.test.ts`, `docs/reference/api.md`, `docs/guides/deployment.md` y este registro.
+- Decisiones:
+  - La transición manual de proveedor inactivo admite únicamente `PENDING|SCHEDULED`; nunca admite el proveedor de pasarela activo. Tras ganar el `updateMany` del pago, expira cualquier intento `CREATED` relacionado antes de registrar el evento de empresa.
+  - La rama `REJECTED` exige que no haya otro intento `CREATED` para ese pago; así un webhook tardío se vuelve `noop` y deja intacto el checkout vigente.
+- Validaciones:
+  - `npm --workspace @chambeaya/api run build` — correcto.
+  - `npm --workspace @chambeaya/api test` — 26 archivos, **509/509**.
+  - `npm --workspace @chambeaya/web run build` — correcto; incluye `ƒ /pago-simulado/[checkoutId]`.
+  - `npm --workspace @chambeaya/web test -- e2e/simulated-payment.spec.ts` — **6/6** en escritorio y móvil.
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check` — correctos.
+- Riesgos: `NO_EJECUTADA` en esta corrección: la suite de integración real debe confirmar `MEDIO-A` y el rechazo de checkout antiguo contra PostgreSQL. La reauditoría `029` dejó el entorno temporal y la suite listos, pero detectó el fallo anterior antes de esta modificación. Permanecen pendientes `e2e-real`, imagen Docker de producción y `shellcheck`.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260930-030` y ejecuta la integración real; no fusionar a `main` antes de `APROBADO`.
+
+### CN-20260930-029 — Reauditoría de `CN-20260930-028` (corrección de pagos simulados, Alcances E y F)
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260930-028` (corrección), contra los hallazgos de `CN-20260930-027` sobre `CN-20260926-025` (commit `b8dd587`) y `CN-20260930-026` (sin comitear).
+- Alcance: comparación de lo declarado en `028` con el `git diff` del árbol de trabajo (`payments.service.ts`, `payments.routes.ts`, `simulated.provider.ts`, `business.service.ts`, pruebas, `deploy-hosting.sh`, `page.tsx`) y ejecución de la suite de integración que `028` dejó `NO_EJECUTADA`.
+- Archivos: revisados los listados en `028`. Esta reauditoría modificó solo documentación: `docs/reference/api.md` (`409` de `mark-paid`: ahora depende del proveedor activo y del caso `SCHEDULED`), `docs/guides/deployment.md` (un checkout `SCHEDULED` no se puede rechazar en modo `manual`; solo vence por TTL) y este registro. No se tocó código de producto; `git update-index --refresh` sobre `apps/web/next-env.d.ts` (solo metadatos del índice).
+- Estado de los hallazgos de `027`:
+  - **ALTO-1 — resuelto.** `processProviderEvent` decide con `updateMany` condicionado a `PENDING|SCHEDULED` y ramifica por `count`; solo la ganadora actualiza el intento y crea el `ShiftEvent`. La prueba con 5 aprobaciones concurrentes de `eventId` distintos pasó en 6 de 6 ejecuciones reales (1 `PAYMENT_REPORTED`, `needsReview=true`, 5 `PaymentProviderEvent`).
+  - **MEDIO-1 — resuelto.** Un rechazo tardío termina en `noop` sin tocar el intento `APPROVED`; aprobar tras rechazar limpia `failureReason`; `expireStaleScheduledPayments` libera primero el pago con guard y solo expira un intento `CREATED`. Hay pruebas de integración para los tres casos, incluida la carrera expiración/aprobación.
+  - **MEDIO-2 — parcialmente resuelto (sigue abierto; ver MEDIO-A).** `mark-paid` acepta un pago `PENDING` de un proveedor inactivo y el panel muestra el botón. Un pago `SCHEDULED` (checkout abierto antes del cambio) sigue sin salida hasta que vence el TTL.
+  - **BAJO-1 — resuelto.** `eventId` determinista `simulated:<checkoutId>:<outcome>`; el segundo clic responde `duplicate` sin `needsReview`, con prueba.
+  - **BAJO-2 — resuelto.** El `GET` distingue `500 INTERNAL_ERROR` de `404` y usa `attempt.currency`.
+  - **BAJO-3 — resuelto.** `deploy-hosting.sh` hace `exit 1`; `bash -n` correcto.
+  - **BAJO-4 — resuelto.** La prueba approve+reject exige `PROCESSED`, intento `APPROVED` y un solo `ShiftEvent`; hay prueba de aprobaciones concurrentes con `eventId` distintos.
+  - **BAJO-5 — resuelto.** `apps/web/next-env.d.ts` no tiene diferencias de contenido con `HEAD`; figura `M` solo por fin de línea o metadatos.
+- Hallazgos nuevos:
+  - **MEDIO-A** — `apps/api/tests/integration/payments.integration.test.ts:582-595` (`a pending simulated payment can be resolved through mark-paid after switching to manual mode`) **falla**. Con este fallo la suite de integración queda en rojo (140/141).
+    - Primera causa: exige `checkout.status === 201`, pero el checkout responde `200`.
+    - Segunda causa, con esa aserción corregida en una copia temporal: `mark-paid` responde `409`, porque el checkout dejó el pago `SCHEDULED` y `markPaymentPaid` solo acepta `PENDING`. La prueba afirma cubrir MEDIO-2 justo en el caso que la corrección no resuelve.
+    - Con la misma copia, tras vencer el intento y listar pagos, `mark-paid` sí responde `200`. La salida existe, pero solo tras el TTL (30 min por defecto).
+    - Corrección sugerida, a elegir: (a) permitir en `markPaymentPaid` `SCHEDULED` de un proveedor inactivo, expirando el intento `CREATED` en la misma transacción; o (b) mantener el comportamiento y rehacer la prueba para que verifique `409` y luego la salida tras vencer y listar. En los dos casos el panel y la documentación deben reflejar la opción elegida. `docs/` ya describe el comportamiento actual (b).
+  - **BAJO-6 (no bloqueante, preexistente a `028`)** — `processProviderEvent`, rama `REJECTED`: el `updateMany` no comprueba que el intento rechazado sea el vigente del pago.
+    - Efecto: un rechazo tardío de un intento antiguo devuelve a `PENDING` un pago con otro checkout `SCHEDULED` en curso. Ese intento queda `CREATED` y huérfano, aunque aún puede aprobarse.
+    - En modo simulado se puede provocar al abrir la página de un checkout antiguo. No mueve dinero.
+    - Conviene condicionarlo al intento más reciente antes de integrar un proveedor real.
+  - Observación: la prueba unitaria `allows a pending payment from an inactive simulated provider…` solo comprueba la forma del `where` sobre un mock; la cobertura real depende de la de integración (MEDIO-A).
+- Validaciones (reales en este equipo):
+  - Base de datos: clúster PostgreSQL 18 desechable (`initdb` en el scratchpad, puerto 5912, `trust`), eliminado al terminar; no se tocó el servidor de 5432. `prisma migrate deploy` correcto.
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`, `chambeaya_test`): 15 archivos, **140/141**; falla solo MEDIO-A. Cierra el `NO_EJECUTADA` de `028` para el resto.
+  - Las 9 pruebas de concurrencia y transición de `payments.integration.test.ts` (filtro `concurrent|racing|repeating|rejection|approval after`) se repitieron 5 veces: 9/9 en cada ejecución.
+  - Sondas temporales (copias de la prueba de MEDIO-A, eliminadas): `409` inmediato y `200` tras vencer y listar.
+  - API: `npm --workspace @chambeaya/api run build` (`tsc --noEmit`), sin errores; `npm --workspace @chambeaya/api test`, 26 archivos, **508/508**.
+  - Web: `npm --workspace @chambeaya/web run build`, correcto (`ƒ /pago-simulado/[checkoutId]`). `e2e/simulated-payment.spec.ts`: 6/6. Suite rápida completa de Playwright: 153 aprobadas y 1 omitida (preexistente), sin regresiones por el cambio de visibilidad de "Marcar como pagado".
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check`: sin errores.
+- Riesgos:
+  - `NO_EJECUTADA`: `e2e-real`, la imagen Docker de producción (sin Docker en este equipo) y `shellcheck`.
+  - `NO_EJECUTADA`: recorrido de navegador contra API y PostgreSQL reales en modo `simulated`. La UI solo se probó con el fixture de Playwright.
+  - Proceso: `028` lo registró "Codex (corrección directa)", fuera del flujo de `CLAUDE.md`.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-A (opción a o b) y deja la suite de integración en verde en una entrada `CORRECCION` que referencie `028` y esta auditoría. BAJO-6 es opcional. Después, reauditoría de `auditor-opus`. Los Alcances E y F **no** quedan cerrados; no fusionar a `main`.
+
+### CN-20260930-028 — Corrección de los hallazgos de concurrencia y transición de pagos simulados
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: Codex (corrección directa)
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-025` (Alcance E), `CN-20260930-026` (Alcance F) y auditoría `CN-20260930-027`.
+- Alcance: corrige `ALTO-1`, `MEDIO-1`, `MEDIO-2` y `BAJO-1` a `BAJO-5` de la auditoría. Las aprobaciones de webhook usan una transición atómica de `Payment` y solo la ganadora escribe `ShiftEvent PAYMENT_REPORTED`; las decisiones tardías ya no cambian un intento `APPROVED` a `REJECTED`, y una aprobación posterior a un rechazo elimina el `failureReason`. La expiración perezosa tampoco sobrescribe un intento aprobado. El simulador identifica la misma decisión por checkout y resultado, por lo que un segundo clic es idempotente. Al volver de `simulated` a `manual`, un pago simulado `PENDING` puede resolverse por `mark-paid`; el panel muestra esa acción. El resumen de checkout conserva su moneda, diferencia `500` de `404`, y el script de despliegue termina con error si falta la habilitación explícita del simulador.
+- Archivos: `apps/api/src/modules/payments/payments.service.ts`, `apps/api/src/modules/payments/simulated.provider.ts`, `apps/api/src/modules/payments/payments.routes.ts`, `apps/api/src/modules/business/business.service.ts`, `scripts/deploy-hosting.sh`, `apps/api/tests/business.service.test.ts`, `apps/api/tests/integration/payments.integration.test.ts`, `apps/web/app/page.tsx`, `apps/web/next-env.d.ts`, `docs/reference/api.md`, `docs/guides/deployment.md` y este registro.
+- Decisiones:
+  - `processProviderEvent` usa `updateMany` condicionado a `PENDING|SCHEDULED`; bajo `READ COMMITTED`, la segunda escritura concurrente espera el lock de fila y luego afecta cero filas, marca `needsReview` y no puede crear otro evento del turno.
+  - El intento se actualiza solo después de ganar la transición de pago. Un rechazo solo modifica un intento que no es `APPROVED`; una aprobación limpia el motivo de un rechazo previo.
+  - `mark-paid` mantiene la prohibición para la pasarela activa y admite solo proveedores inactivos como vía de salida después de un cambio de configuración.
+- Validaciones:
+  - `npm --workspace @chambeaya/api run build` — correcto.
+  - `npm --workspace @chambeaya/api test` — 26 archivos, **508/508**.
+  - `npm --workspace @chambeaya/web run build` — correcto; incluye `ƒ /pago-simulado/[checkoutId]`.
+  - `npm --workspace @chambeaya/web test -- e2e/simulated-payment.spec.ts` — **6/6** en escritorio y móvil.
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check` — correctos.
+- Riesgos: `NO_EJECUTADA` en esta corrección: las nuevas pruebas de integración contra PostgreSQL real (incluidas las aprobaciones concurrentes con `eventId` distintos) requieren una `DATABASE_URL` de prueba. No había una configurada y la política local bloqueó crear y limpiar el clúster temporal; la auditoría `027` sí validó la suite de integración previa contra un clúster desechable. Quedan también sin ejecutar en esta corrección `e2e-real` y la imagen Docker de producción.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260930-028` junto con `025`, `026` y `027`; no fusionar a `main` antes de `APROBADO`.
+
+### CN-20260930-027 — Auditoría de `CN-20260926-025` (Alcance E) y `CN-20260930-026` (Alcance F): pagos simulados
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-025` (commit `b8dd587` en `alcance-e-pendiente-auditoria`) y `CN-20260930-026` (sin comitear sobre ese commit). Nota de proceso: `026` lo registró "Codex (implementación directa)", fuera del flujo de `CLAUDE.md`; se audita igual.
+- Alcance: comparación de ambos registros contra `git show b8dd587` y el árbol de trabajo. Se revisaron adaptadores, firma HMAC, checkout idempotente, `processProviderEvent`, rutas simuladas y webhook, guardas de arranque, scripts, migración, panel, página `/pago-simulado/[checkoutId]`, pruebas y documentación.
+- Archivos: revisados los de `025` y `026`. Esta auditoría modificó solo documentación: `docs/reference/api.md` (limitaciones conocidas del webhook y corrección de "deduplicación" en el simulado), `docs/guides/deployment.md` (aviso al volver de `simulated` a `manual`) y este registro. No se tocó código de producto.
+- Hallazgos:
+  - **ALTO-1** — `apps/api/src/modules/payments/payments.service.ts#processProviderEvent` (líneas ~311-369).
+    - Causa: lee `attempt.payment.status` sin bloqueo (Read Committed) y aplica `update` incondicionales.
+    - Efecto: dos aprobaciones concurrentes del mismo checkout con `eventId` distintos se aplican ambas. Quedan dos `ShiftEvent` `PAYMENT_REPORTED` `SYSTEM`, `processedAt` sobrescrito y `needsReview=false`. La garantía "doble cobro → `needsReview`" solo se cumple en secuencia.
+    - Evidencia: sonda temporal contra Postgres real, dos `POST /api/payments/simulated/:id/approve` en paralelo. En 3 de 4 rondas ambas respondieron `approved`, con `systemReported: 2` y `needsReview: false`; en la ronda restante, `approved` + `already_processed` con `needsReview: true`.
+    - Corrección sugerida: bloquear la fila del pago (`SELECT … FOR UPDATE`), usar `updateMany` condicionado a `status in (PENDING, SCHEDULED)` y ramificar por `count`, o `withSerializableRetry`. Añadir una prueba de integración concurrente con `eventId` distintos.
+  - **MEDIO-1** — mismo archivo: el estado del intento se sobrescribe sin condición.
+    - Un `REJECTED` tras la aprobación deja el intento en `REJECTED`/`PROVIDER_REJECTED_AFTER_APPROVAL` con el pago `PROCESSED`, y `GET /simulated/:id` devuelve `status: REJECTED`. Sonda C.
+    - Rechazar y luego aprobar deja `APPROVED` con el `failureReason: PROVIDER_REJECTED` anterior. Sonda E.
+    - `expireStaleScheduledPayments` hace `update` incondicional a `EXPIRED` y podría pisar un `APPROVED` concurrente.
+    - Corrección sugerida: tratar `APPROVED` como terminal del intento, con transiciones condicionadas al estado previo.
+  - **MEDIO-2** — cambio de `PAYMENT_PROVIDER` de `simulated` a `manual`: los pagos `simulated` `PENDING`/`SCHEDULED` quedan sin salida.
+    - `checkoutPayment` responde `409 PROVIDER_MANUAL`, `markPaymentPaid` solo acepta `manual|legacy` y `TransactionRow` no ofrece acción.
+    - Es relevante porque la guía de despliegue presenta `simulated` como modo de "demo controlada" en producción.
+    - Se documentó el aviso en `deployment.md`. Falta una solución funcional: reasignación, `mark-paid` para proveedores inactivos o bloquear el cambio.
+  - **BAJO-1** — `simulated.provider.ts#buildSimulatedEvent` genera un `eventId` nuevo por clic, así que una segunda aprobación secuencial (otra pestaña o un reintento) marca `needsReview=true` (sonda B). La empresa puede provocar falsos "doble cobro" en modo simulado. `api.md` afirmaba que la página ejercita la "deduplicación"; se corrigió.
+  - **BAJO-2** — `payments.routes.ts`, `GET /simulated/:checkoutId`:
+    - el `catch` genérico convierte cualquier error (por ejemplo, la base caída) en `404 PROVIDER_NOT_FOUND`, y la página muestra "no disponible" en vez de error;
+    - `currency` sale fija en `'PEN'` en vez de `attempt.currency`.
+  - **BAJO-3** — `scripts/deploy-hosting.sh`: con `simulated` sin `PAYMENT_SIMULATION_ALLOWED=true` solo avisa y continúa. La API luego sale con código 1 y el contenedor se reinicia en bucle, lo contrario de lo que dice el comentario del bloque. Debería terminar con `exit 1`, como las otras dos guardas.
+  - **BAJO-4** — pruebas:
+    - `concurrent approve+reject … settle consistently on APPROVED` acepta `PENDING` y no verifica el intento ni los `ShiftEvent`;
+    - no hay prueba de aprobaciones concurrentes con `eventId` distintos (ver ALTO-1).
+  - **BAJO-5** — `apps/web/next-env.d.ts` figura modificado en el árbol (archivo generado); revertirlo antes de comitear `026`.
+- Sin hallazgos en:
+  - Firma HMAC: `timingSafeEqual`, tolerancia, `rawBody` intacto (`express.raw` antes de `express.json`).
+  - Propiedad del checkout (`ownerId`, `404` sin distinguir si es ajeno o no existe).
+  - Guardas de arranque y valores por defecto de producción (`manual`, flag vacío).
+  - Generación del secreto en el instalador y migración aditiva.
+  - Idempotencia del checkout (10 concurrentes).
+  - Montos: el intento congela `totalCents` y el webhook compara monto y moneda.
+  - Visibilidad de botones en el panel (`mark-paid` solo `manual|legacy`) y página sin datos para sesiones ajenas.
+- Validaciones (reales en este equipo):
+  - Base de datos: sin Docker; se creó un clúster PostgreSQL 18 desechable (`initdb` en el scratchpad, puerto 5911, autenticación `trust`), eliminado al terminar. No se tocó el servidor local en 5432.
+  - `prisma migrate deploy` sobre una base vacía: correcto; `prisma migrate diff --exit-code` contra el esquema: sin divergencia.
+  - API: `npm --workspace @chambeaya/api run build` (`tsc --noEmit`), sin errores; `npm --workspace @chambeaya/api test`, 26 archivos, 507/507.
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`, `chambeaya_test`): 15 archivos, **135/135**, incluido el `GET` nuevo. Cierra el `NO_EJECUTADA` de `026`.
+  - Sonda temporal de concurrencia y estados (5 casos) para ALTO-1, MEDIO-1 y BAJO-1; archivo eliminado. El caso D (webhook crudo con `eventId` distintos) devolvió 401 por un error de armado de la propia sonda y no se usa como evidencia.
+  - Web: `npm --workspace @chambeaya/web run build`, correcto (ruta `ƒ /pago-simulado/[checkoutId]`). `e2e/simulated-payment.spec.ts`: 6/6. Suite rápida completa de Playwright: 153 aprobadas y 1 omitida (preexistente), sin regresiones.
+  - `git diff --check`: sin errores. `apps/web/next-env.d.ts` se restauró al estado previo a la auditoría.
+- Riesgos (validaciones no ejecutadas):
+  - `NO_EJECUTADA`: recorrido de navegador contra API y PostgreSQL reales en modo `simulated`. La UI solo se probó con el fixture de Playwright.
+  - `NO_EJECUTADA`: `e2e-real` y las pruebas de la imagen Docker de producción (sin Docker en este equipo). Se confía en la evidencia de `025` para las cinco variantes de arranque.
+  - `NO_EJECUTADA`: `shellcheck`. Solo se revisaron a mano los bloques nuevos de los scripts.
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1, MEDIO-1 y MEDIO-2 (idealmente también BAJO-1 a BAJO-5) en una entrada `CORRECCION` que referencie `025`, `026` y esta auditoría, con pruebas de integración concurrentes. Después, reauditoría de `auditor-opus`. No fusionar a `main` hasta tener un `APROBADO`.
+
+### CN-20260930-026 — Alcance F: checkout simulado desde el panel de empresa
+
+- Fecha: 2026-09-30 12:57 (America/Lima)
+- Agente: Codex (implementación directa)
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-025` (Alcance E: adaptadores, checkout y webhook simulados).
+- Alcance: el panel muestra **"Pagar en simulador"** para un pago pendiente con proveedor activo `simulated`; crea o recupera de forma idempotente el checkout y navega a `/pago-simulado/:checkoutId`. La nueva página exige y restaura la sesión BUSINESS, consulta un resumen mínimo del intento que pertenece a esa empresa y permite aprobarlo o rechazarlo. Ambas decisiones pasan por los endpoints existentes, que verifican la firma y comparten `processProviderEvent` con el webhook; no mueven dinero real.
+- Archivos: `apps/web/app/page.tsx`, `apps/web/app/pago-simulado/[checkoutId]/page.tsx`, `apps/web/app/globals.css`, `apps/web/lib/business-api.ts`, `apps/web/e2e/fixtures/business-api.ts`, `apps/web/e2e/simulated-payment.spec.ts`, `apps/api/src/modules/payments/payments.routes.ts`, `apps/api/tests/integration/payments.integration.test.ts`, `docs/guides/local-development.md`, `docs/reference/api.md`, `docs/product/roadmap.md` y este registro.
+- Decisiones:
+  - Se añadió `GET /api/payments/simulated/:checkoutId`, protegido por sesión BUSINESS y propiedad de la empresa, para que la pantalla lea datos persistidos y no confíe en `sessionStorage`, parámetros de URL ni el estado que tenía el panel antes de redirigir.
+  - El resumen expone solo referencia, descripción, total, moneda y estado del pago; un checkout inexistente, ajeno o con modo inactivo devuelve `404`.
+  - El botón manual sigue limitado a `provider: manual|legacy`; un pago `simulated` solo ofrece el checkout cuando `payment-settings.mode` es `simulated`. Un intento `SCHEDULED` muestra "Continuar pago" y reutiliza el checkout idempotente.
+- Validaciones:
+  - `npm --workspace @chambeaya/api run build` → `tsc --noEmit` correcto.
+  - `npm --workspace @chambeaya/api test` → 26 archivos, 507/507 pruebas aprobadas.
+  - `npm --workspace @chambeaya/web run build` → build de producción correcto; la ruta dinámica aparece como `/pago-simulado/[checkoutId]`.
+  - `npm --workspace @chambeaya/web test -- e2e/simulated-payment.spec.ts` → 6/6 aprobadas (escritorio y móvil): aprobar, rechazar y acceso sin sesión.
+  - `git diff --check` → sin errores.
+- Riesgos:
+  - `NO_EJECUTADA`: integración PostgreSQL de `payments.integration.test.ts` tras añadir el `GET`; Docker Desktop no está disponible en este equipo, por lo que no hay base `_test` ni daemon para levantarla.
+  - La interfaz usa un fixture Playwright para aislar el navegador; el recorrido completo contra API/PostgreSQL reales y la auditoría independiente de `CN-20260926-025`/este alcance siguen pendientes.
+- Siguiente paso: con Docker activo, ejecutar `npm --workspace @chambeaya/api run test:integration -- payments.integration.test.ts` y el recorrido de navegador contra API real en modo `PAYMENT_PROVIDER=simulated`; después, `auditor-opus` debe auditar `CN-20260926-025` y `CN-20260930-026` antes de fusionar.
+
 ### CN-20260926-025 — Alcance E: capa de adaptadores, proveedor simulado y webhook de pagos (solo API y configuración)
 
 - Fecha: 2026-09-27 (America/Lima)

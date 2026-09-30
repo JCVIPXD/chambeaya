@@ -119,8 +119,10 @@ instalador genera uno propio por servidor, ver
   con `provider: 'simulated'` en vez de `'manual'`.
 - `POST /api/business/payments/:id/checkout` funciona de verdad: crea un
   `PaymentAttempt` y devuelve un `redirectUrl` hacia
-  `${PANEL_PUBLIC_URL}/pago-simulado/<checkoutId>` (la página del Alcance F;
-  mientras no exista, usa directamente los dos endpoints de abajo).
+  `${PANEL_PUBLIC_URL}/pago-simulado/<checkoutId>`.
+- En el panel, el pago muestra **"Pagar en simulador"** (o **"Continuar
+  pago"** si ya existe un intento). La página de checkout requiere la sesión
+  de la empresa dueña y permite aprobar o rechazar la prueba; no mueve dinero.
 - `POST /api/payments/simulated/:checkoutId/approve` (o `.../reject`), con la
   sesión de la empresa dueña del pago, recorre el mismo camino que un
   webhook real firmado — sin mover dinero — y deja el pago `PROCESSED` o de

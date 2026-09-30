@@ -359,7 +359,29 @@ describe('Alcance E: proveedor simulado y webhook de pagos, contra PostgreSQL re
     expect(reportedEvents).toHaveLength(1);
   });
 
-  it('concurrent approve+reject of the same attempt (different eventIds) settle consistently on APPROVED', async () => {
+  it('concurrent approvals with distinct eventIds produce one transition and flag the extra charge for review', async () => {
+    const payment = await completeShiftPayment(15000);
+    const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
+
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, (_, index) => signedWebhookRequest(attempt.checkoutId, 'APPROVED', attempt.totalCents, 'PEN', `evt-distinct-${index}`)),
+    );
+    for (const response of responses) expect(response.status).toBe(200);
+
+    const [finalPayment, finalAttempt, reportedEvents, providerEvents] = await Promise.all([
+      verifier.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+      verifier.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } }),
+      verifier.shiftEvent.findMany({ where: { shiftId: payment.shiftId ?? undefined, type: 'PAYMENT_REPORTED', actorRole: 'SYSTEM' } }),
+      verifier.paymentProviderEvent.findMany({ where: { attemptId: attempt.id } }),
+    ]);
+    expect(finalPayment).toMatchObject({ status: 'PROCESSED', needsReview: true });
+    expect(finalAttempt).toMatchObject({ status: 'APPROVED', failureReason: null });
+    expect(reportedEvents).toHaveLength(1);
+    expect(providerEvents).toHaveLength(5);
+  });
+
+  it('concurrent approve+reject of the same attempt preserves an approved terminal attempt', async () => {
     const payment = await completeShiftPayment(16000);
     const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
     const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
@@ -371,15 +393,38 @@ describe('Alcance E: proveedor simulado y webhook de pagos, contra PostgreSQL re
     expect(approve.status).toBe(200);
     expect(reject.status).toBe(200);
 
-    const finalPayment = await verifier.payment.findUniqueOrThrow({ where: { id: payment.id } });
-    // Cualquiera sea el orden real de ejecución, un rechazo nunca revierte
-    // una aprobación: si la aprobación llegó a asentarse, el pago queda
-    // PROCESSED para siempre; si el rechazo ganó la carrera y se asentó
-    // antes de que la aprobación corriera, esta última todavía puede
-    // aprobarlo después (PENDING admite una aprobación). El único estado
-    // que este par de eventos JAMÁS debe dejar es SCHEDULED (ninguno de los
-    // dos webhooks deja el pago a medio resolver).
-    expect(['PROCESSED', 'PENDING']).toContain(finalPayment.status);
+    const [finalPayment, finalAttempt, reportedEvents] = await Promise.all([
+      verifier.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+      verifier.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } }),
+      verifier.shiftEvent.findMany({ where: { shiftId: payment.shiftId ?? undefined, type: 'PAYMENT_REPORTED', actorRole: 'SYSTEM' } }),
+    ]);
+    expect(finalPayment.status).toBe('PROCESSED');
+    expect(finalAttempt).toMatchObject({ status: 'APPROVED', failureReason: null });
+    expect(reportedEvents).toHaveLength(1);
+  });
+
+  it('an approval after a rejection clears the rejection reason and leaves APPROVED terminal', async () => {
+    const payment = await completeShiftPayment(16500);
+    const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
+
+    expect((await signedWebhookRequest(attempt.checkoutId, 'REJECTED', attempt.totalCents, 'PEN', 'evt-reject-then-approve-reject')).status).toBe(200);
+    expect((await signedWebhookRequest(attempt.checkoutId, 'APPROVED', attempt.totalCents, 'PEN', 'evt-reject-then-approve-approve')).status).toBe(200);
+
+    const finalAttempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+    expect(finalAttempt).toMatchObject({ status: 'APPROVED', failureReason: null });
+  });
+
+  it('a rejection after approval does not overwrite the approved attempt', async () => {
+    const payment = await completeShiftPayment(16750);
+    const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
+
+    expect((await signedWebhookRequest(attempt.checkoutId, 'APPROVED', attempt.totalCents, 'PEN', 'evt-approve-then-reject-approve')).status).toBe(200);
+    expect((await signedWebhookRequest(attempt.checkoutId, 'REJECTED', attempt.totalCents, 'PEN', 'evt-approve-then-reject-reject')).status).toBe(200);
+
+    const finalAttempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+    expect(finalAttempt).toMatchObject({ status: 'APPROVED', failureReason: null });
   });
 
   it('a late approval on an EXPIRED attempt is accepted while the payment is still PENDING', async () => {
@@ -403,6 +448,27 @@ describe('Alcance E: proveedor simulado y webhook de pagos, contra PostgreSQL re
     expect(response.status).toBe(200);
     const finalPayment = await verifier.payment.findUniqueOrThrow({ where: { id: payment.id } });
     expect(finalPayment.status).toBe('PROCESSED');
+  });
+
+  it('lazy expiration racing with approval cannot overwrite an approved attempt', async () => {
+    const payment = await completeShiftPayment(17500);
+    const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
+    await verifier.paymentAttempt.update({ where: { id: attempt.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+
+    const [approval, list] = await Promise.all([
+      signedWebhookRequest(attempt.checkoutId, 'APPROVED', attempt.totalCents, 'PEN', 'evt-expiry-race-approve'),
+      request(app).get('/api/business/payments').set('Authorization', `Bearer ${businessToken}`),
+    ]);
+    expect(approval.status).toBe(200);
+    expect(list.status).toBe(200);
+
+    const [finalPayment, finalAttempt] = await Promise.all([
+      verifier.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+      verifier.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } }),
+    ]);
+    expect(finalPayment.status).toBe('PROCESSED');
+    expect(finalAttempt).toMatchObject({ status: 'APPROVED', failureReason: null });
   });
 
   it('an APPROVED event on an already-PROCESSED payment (double charge) marks needsReview without any other effect', async () => {
@@ -445,6 +511,49 @@ describe('Alcance E: proveedor simulado y webhook de pagos, contra PostgreSQL re
     expect(processed.status).toBe('PROCESSED');
   });
 
+  it('repeating the same simulated decision is deduplicated without a false double-charge review', async () => {
+    const payment = await completeShiftPayment(19250);
+    const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
+
+    const first = await request(app).post(`/api/payments/simulated/${attempt.checkoutId}/approve`).set('Authorization', `Bearer ${businessToken}`);
+    const second = await request(app).post(`/api/payments/simulated/${attempt.checkoutId}/approve`).set('Authorization', `Bearer ${businessToken}`);
+    expect(first.body.result).toBe('approved');
+    expect(second.body.result).toBe('duplicate');
+
+    const [processed, events] = await Promise.all([
+      verifier.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+      verifier.paymentProviderEvent.findMany({ where: { attemptId: attempt.id } }),
+    ]);
+    expect(processed.needsReview).toBe(false);
+    expect(events).toHaveLength(1);
+  });
+
+  it('GET /api/payments/simulated/:checkoutId returns only the owning company checkout summary', async () => {
+    const payment = await completeShiftPayment(19500);
+    const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
+
+    const response = await request(app).get(`/api/payments/simulated/${attempt.checkoutId}`).set('Authorization', `Bearer ${businessToken}`);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      checkoutId: attempt.checkoutId,
+      status: 'CREATED',
+      expiresAt: expect.any(String),
+      payment: {
+        id: payment.id,
+        reference: payment.reference,
+        description: payment.description,
+        totalCents: payment.totalCents,
+        currency: 'PEN',
+        status: 'SCHEDULED',
+      },
+    });
+
+    const missing = await request(app).get('/api/payments/simulated/checkout-ajeno').set('Authorization', `Bearer ${businessToken}`);
+    expect(missing.status).toBe(404);
+  });
+
   it('POST /api/payments/simulated/:checkoutId/reject returns the payment to PENDING', async () => {
     const payment = await completeShiftPayment(21000);
     const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
@@ -456,6 +565,26 @@ describe('Alcance E: proveedor simulado y webhook de pagos, contra PostgreSQL re
     expect(backToPending.status).toBe('PENDING');
   });
 
+  it('a rejection from an old checkout cannot cancel a newer scheduled checkout', async () => {
+    const payment = await completeShiftPayment(22000);
+    const firstCheckout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const firstAttempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: firstCheckout.body.attemptId } });
+    expect((await signedWebhookRequest(firstAttempt.checkoutId, 'REJECTED', firstAttempt.totalCents, 'PEN', 'evt-old-attempt-initial-reject')).status).toBe(200);
+
+    const secondCheckout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    const secondAttempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: secondCheckout.body.attemptId } });
+    expect(secondAttempt.id).not.toBe(firstAttempt.id);
+
+    expect((await signedWebhookRequest(firstAttempt.checkoutId, 'REJECTED', firstAttempt.totalCents, 'PEN', 'evt-old-attempt-late-reject')).status).toBe(200);
+
+    const [finalPayment, finalAttempt] = await Promise.all([
+      verifier.payment.findUniqueOrThrow({ where: { id: payment.id } }),
+      verifier.paymentAttempt.findUniqueOrThrow({ where: { id: secondAttempt.id } }),
+    ]);
+    expect(finalPayment.status).toBe('SCHEDULED');
+    expect(finalAttempt.status).toBe('CREATED');
+  });
+
   it('the simulated endpoints respond 404 when the active provider is not "simulated" (e.g. "manual")', async () => {
     const payment = await completeShiftPayment(23000);
     const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
@@ -465,6 +594,24 @@ describe('Alcance E: proveedor simulado y webhook de pagos, contra PostgreSQL re
     try {
       const response = await request(app).post(`/api/payments/simulated/${attempt.checkoutId}/approve`).set('Authorization', `Bearer ${businessToken}`);
       expect(response.status).toBe(404);
+    } finally {
+      process.env.PAYMENT_PROVIDER = 'simulated';
+    }
+  });
+
+  it('a scheduled simulated payment can be resolved through mark-paid after switching to manual mode', async () => {
+    const payment = await completeShiftPayment(23500);
+    const checkout = await request(app).post(`/api/business/payments/${payment.id}/checkout`).set('Authorization', `Bearer ${businessToken}`);
+    expect(checkout.status).toBe(200);
+    const attempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: checkout.body.attemptId } });
+
+    process.env.PAYMENT_PROVIDER = 'manual';
+    try {
+      const resolved = await request(app).post(`/api/business/payments/${payment.id}/mark-paid`).set('Authorization', `Bearer ${businessToken}`);
+      expect(resolved.status).toBe(200);
+      expect(resolved.body.status).toBe('PROCESSED');
+      const expiredAttempt = await verifier.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } });
+      expect(expiredAttempt).toMatchObject({ status: 'EXPIRED', failureReason: 'PROVIDER_DEACTIVATED' });
     } finally {
       process.env.PAYMENT_PROVIDER = 'simulated';
     }

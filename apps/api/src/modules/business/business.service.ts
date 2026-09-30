@@ -20,6 +20,7 @@ import {
   PaymentNotPayableError as PaymentGatewayNotPayableError,
   ProviderManualError,
   ProviderUnavailableError,
+  activePaymentProviderName,
   resolvePaymentProvider,
   type CheckoutResponse,
 } from '../payments/payments.service.js';
@@ -818,12 +819,12 @@ export class DatabaseBusinessService implements BusinessOperations {
    * el registro de comisión). Solo transiciona `PENDING` -> `PROCESSED`
    * para `provider` `'manual'` (nacido de `checkOut`/`resolveAssignment`) o
    * `'legacy'` (creado con el CRUD antes de este cierre, o backfill de un
-   * pago sin `assignmentId`): en producción puede haber pagos `legacy`
-   * todavía `PENDING`, y marcarlos no altera ningún monto (comisión e IGV
-   * ya están en 0 desde que se crearon), así que es seguro seguir
-   * permitiéndolo. Un pago de pasarela (Alcance E) nunca es `'manual'` ni
-   * `'legacy'`, así que este endpoint jamás lo toca: se confirma solo por
-   * su propio webhook.
+   * pago sin `assignmentId`). También resuelve un pago de pasarela que quedó
+   * pendiente tras cambiar `PAYMENT_PROVIDER`: si su proveedor ya no es el
+   * activo, la empresa puede cerrarlo por esta vía aunque el checkout haya
+   * quedado `SCHEDULED`; en ese caso expira el intento abierto dentro de la
+   * misma transacción. Nunca permite marcar manualmente un pago del proveedor
+   * de pasarela que sigue activo.
    *
    * Atómico: el `updateMany` de abajo es el único guardián de la carrera
    * (dos llamadas simultáneas, o esta contra un cambio de estado
@@ -837,9 +838,18 @@ export class DatabaseBusinessService implements BusinessOperations {
    */
   async markPaymentPaid(session: AuthSession, id: string) {
     const company = await this.companyFor(session);
+    const activeProvider = activePaymentProviderName();
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.payment.updateMany({
-        where: { id, companyId: company.id, status: PaymentStatus.PENDING, provider: { in: ['manual', 'legacy'] } },
+        where: {
+          id,
+          companyId: company.id,
+          OR: [
+            { status: PaymentStatus.PENDING, provider: { in: ['manual', 'legacy'] } },
+            { status: PaymentStatus.PENDING, provider: { not: activeProvider } },
+            { status: PaymentStatus.SCHEDULED, provider: { not: activeProvider } },
+          ],
+        },
         data: { status: PaymentStatus.PROCESSED, processedAt: new Date() },
       });
       if (updated.count === 0) {
@@ -851,6 +861,15 @@ export class DatabaseBusinessService implements BusinessOperations {
         if (!existing) throw new BusinessRecordNotFoundError('PAYMENT_NOT_FOUND');
         throw new PaymentNotPayableError('PAYMENT_NOT_PAYABLE');
       }
+      // Si el proveedor fue desactivado mientras había un checkout abierto,
+      // esta resolución manual deja constancia de que el intento ya no puede
+      // completar el pago. La transición del Payment anterior toma el lock
+      // de fila primero, por lo que una aprobación concurrente gana una sola
+      // de las dos transiciones y la otra ve count = 0.
+      await tx.paymentAttempt.updateMany({
+        where: { paymentId: id, status: 'CREATED' },
+        data: { status: 'EXPIRED', failureReason: 'PROVIDER_DEACTIVATED' },
+      });
       const payment = await tx.payment.findUniqueOrThrow({ where: { id } });
       if (payment.shiftId) {
         await tx.shiftEvent.create({ data: { shiftId: payment.shiftId, actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: payment.id } });

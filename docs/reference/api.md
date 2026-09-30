@@ -488,13 +488,13 @@ Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`. `SCHEDULED` es el che
 
 ### `POST /api/business/payments/:id/mark-paid`
 
-Único cambio de estado que le queda a la empresa. Transiciona `PENDING` → `PROCESSED` (con `processedAt`) sobre un pago **de esa empresa** cuyo `provider` sea `'manual'` (nacido de `checkOut`/`resolveAssignment`) o `'legacy'` (creado con el CRUD retirado, o backfill de un pago sin `assignmentId` anterior al Alcance C): en producción puede haber pagos `legacy` todavía `PENDING`, y marcarlos no altera ningún monto (comisión e IGV ya están en 0 desde que se crearon), así que sigue siendo seguro permitirlo. Nunca toca `amountCents`, `commissionCents`, `taxCents` ni `totalCents`.
+Único cambio de estado que le queda a la empresa. Transiciona `PENDING` → `PROCESSED` (con `processedAt`) sobre un pago **de esa empresa** cuyo `provider` sea `'manual'` (nacido de `checkOut`/`resolveAssignment`) o `'legacy'` (creado con el CRUD retirado, o backfill de un pago sin `assignmentId` anterior al Alcance C). También permite resolver un pago `PENDING` o `SCHEDULED` cuyo proveedor ya no sea el activo, por ejemplo un `simulated` al volver a modo `manual`; si tenía un checkout `CREATED`, lo deja `EXPIRED` con `failureReason: 'PROVIDER_DEACTIVATED'` dentro de la misma transacción. Es su salida controlada después de un cambio de configuración. Un pago del proveedor de pasarela que sigue activo solo se confirma mediante su webhook. Nunca toca `amountCents`, `commissionCents`, `taxCents` ni `totalCents`.
 
 - Si el pago tiene `shiftId`, registra un `ShiftEvent` `PAYMENT_REPORTED` (mismo evento que dejaba el CRUD retirado al marcar `PROCESSED`).
 - Devuelve el `Payment` actualizado (mismos campos que `GET /api/business/payments/:id`).
 - **404 `PAYMENT_NOT_FOUND`**: el pago no existe o es de otra empresa.
-- **409 `PAYMENT_NOT_PAYABLE`**: el pago existe pero ya no es marcable — no está `PENDING` (ya se marcó antes, está `PROCESSED`/`CANCELLED`, o perdió una carrera contra otra llamada concurrente) o su `provider` no es `'manual'`/`'legacy'` (una pasarela del Alcance E se confirma solo por su propio webhook, nunca por este endpoint).
-- Atómico: un `updateMany` condicionado a `status: 'PENDING'` y al `provider`, dentro de una transacción. Dos llamadas concurrentes sobre el mismo pago dejan un solo `PROCESSED` y un solo `ShiftEvent`; la que pierde la carrera responde `409`.
+- **409 `PAYMENT_NOT_PAYABLE`**: el pago existe pero ya no es marcable — ya está `PROCESSED`/`CANCELLED`, perdió una carrera contra otra llamada concurrente o su `provider` es el proveedor de pasarela **activo** (se confirma solo por su propio webhook, nunca por este endpoint).
+- Atómico: un `updateMany` condicionado al estado y al proveedor, dentro de una transacción. Dos llamadas concurrentes sobre el mismo pago dejan un solo `PROCESSED` y un solo `ShiftEvent`; la que pierde la carrera responde `409`. Al resolver un `SCHEDULED` de proveedor inactivo, el mismo bloqueo impide que un webhook tardío procese el intento que acabó de expirar.
 
 ### Comisión, IGV y total (Alcance C del plan de pagos)
 
@@ -555,14 +555,33 @@ Sin autenticación (el proveedor no tiene ningún token de Chambeaya); montado e
   1. Inserta `PaymentProviderEvent`. Un duplicado (mismo `provider` + `eventId`, `P2002`) responde `200` sin ningún efecto adicional.
   2. Busca el `PaymentAttempt` por `checkoutId`. Si no existe, el evento igual queda registrado (auditoría) y responde `404 { "error": "ATTEMPT_NOT_FOUND" }`.
   3. Si `amountCents`/`currency` no coinciden con `attempt.totalCents`/`attempt.currency`: `422 { "error": "AMOUNT_MISMATCH" }`, marca `Payment.needsReview = true` y **no** transiciona nada más (el pago nunca pasa a `PROCESSED` por esta vía).
-  4. `APPROVED` sobre un pago `PENDING`/`SCHEDULED` (incluida una aprobación **tardía** de un intento ya `EXPIRED`, mientras el pago siga sin resolver): intento `APPROVED`, pago `PROCESSED` + `processedAt`, y `ShiftEvent` `PAYMENT_REPORTED` con actor `SYSTEM` si el pago tiene `shiftId`.
-  5. `APPROVED` sobre un pago ya `PROCESSED` (**doble cobro**) o `CANCELLED`: marca `needsReview = true`, sin ningún otro efecto. El reembolso queda fuera de alcance (trabajo futuro).
-  6. `REJECTED`: intento `REJECTED` con `failureReason`; el pago vuelve a `PENDING` **solo si no está ya `PROCESSED`** — un rechazo nunca revierte una aprobación ya asentada.
+  4. `APPROVED` usa una transición condicional atómica `PENDING`/`SCHEDULED` → `PROCESSED` (incluida una aprobación **tardía** de un intento ya `EXPIRED`, mientras el pago siga sin resolver): solo la llamada que cambia la fila deja el intento `APPROVED`, escribe `processedAt` y crea un `ShiftEvent` `PAYMENT_REPORTED` con actor `SYSTEM` si el pago tiene `shiftId`. Las otras aprobaciones concurrentes no duplican ese evento.
+  5. `APPROVED` que no logra esa transición porque el pago ya está `PROCESSED` (**doble cobro**) o `CANCELLED`: marca `needsReview = true`, sin ningún otro efecto. El reembolso queda fuera de alcance (trabajo futuro).
+  6. `REJECTED` mueve el pago a `PENDING` solo si sigue `PENDING`/`SCHEDULED` y no existe otro intento `CREATED` más reciente; en ese caso deja el intento `REJECTED` con `failureReason`. Si una aprobación ganó antes o durante la carrera, o si ya hay otro checkout vigente, no toca el intento terminal ni revierte el pago.
 - Respuestas: `200` (procesado o duplicado), `401`, `404`, `422`.
+
+#### `GET /api/payments/simulated/:checkoutId`
+
+Solo con proveedor activo `simulated` y sesión BUSINESS. Devuelve únicamente
+el resumen del checkout de la empresa dueña: `checkoutId`, estado y vencimiento
+del intento, más `payment { id, reference, description, totalCents, currency,
+status }`. Una empresa distinta, un identificador inexistente o un proveedor
+que no sea `simulated` reciben `404`; la respuesta no revela la existencia de
+un checkout ajeno. Un fallo interno se informa como `500`, para que el panel no
+lo confunda con un checkout inexistente. La página `/pago-simulado/:checkoutId`
+usa esta lectura antes de ofrecer una decisión.
 
 #### `POST /api/payments/simulated/:checkoutId/approve` y `.../reject`
 
 Solo con proveedor activo `simulated` (`404` en cualquier otro modo, incluido `manual`). Exige la sesión BUSINESS **dueña** del pago (`404` para cualquier otra empresa, sin distinguir de "no existe"). Construye y firma un evento con el **mismo formato** que recibiría el webhook (`simulated.provider.ts#buildSimulatedEvent`), lo pasa por `provider.verifyWebhook` (la misma verificación de firma, nunca se salta) y lo procesa con la **misma** `processProviderEvent` que el webhook — sin ningún atajo. `redirectUrl` del checkout simulado apunta a `${PANEL_PUBLIC_URL}/pago-simulado/<checkoutId>` (la página del Alcance F).
+
+La página muestra el total congelado, permite aprobar o rechazar el intento y
+vuelve a leer el resumen persistido después de la decisión. No contiene un
+atajo de cliente: cada botón llama a uno de estos endpoints y, por tanto,
+ejercita la firma y la misma transición que el webhook. Para el simulador, el
+`eventId` es determinista por checkout y resultado: repetir el mismo botón en
+otra pestaña o tras un reintento es un duplicado inocuo. Un webhook externo con
+otro identificador sigue aplicando las defensas de doble cobro descritas arriba.
 
 #### Guardas de arranque (`server.ts`, antes de escuchar en el puerto)
 

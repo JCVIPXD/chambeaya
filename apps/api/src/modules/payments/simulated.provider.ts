@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 import type {
   CheckoutResult,
   CreateCheckoutOptions,
@@ -121,7 +119,11 @@ function parseSimulatedEvent(value: unknown): VerifiedProviderEvent {
 
 /**
  * Construye y firma (mismo formato que `verifyWebhook`) el evento simulado
- * de aprobar/rechazar un checkout. Usado por
+ * de aprobar/rechazar un checkout. El identificador es determinista por
+ * checkout y resultado: volver a pulsar el mismo botón representa el mismo
+ * evento del simulador y la deduplicación lo absorbe, sin falsos dobles
+ * cobros. El resultado opuesto conserva otro identificador para modelar una
+ * decisión posterior del proveedor. Usado por
  * `payments.routes.ts#createPaymentsRouter` para
  * `POST /api/payments/simulated/:checkoutId/(approve|reject)`: el resultado
  * (`rawBody`, cabeceras) se pasa a `SimulatedPaymentProvider#verifyWebhook`
@@ -135,7 +137,13 @@ export function buildSimulatedEvent(
   currency = 'PEN',
 ): { rawBody: Buffer; headers: Record<string, string> } {
   const secret = requireSecret();
-  const body: VerifiedProviderEvent = { eventId: randomUUID(), checkoutId, outcome, amountCents, currency };
+  const body: VerifiedProviderEvent = {
+    eventId: `simulated:${checkoutId}:${outcome}`,
+    checkoutId,
+    outcome,
+    amountCents,
+    currency,
+  };
   const rawBody = Buffer.from(JSON.stringify(body), 'utf8');
   return { rawBody, headers: { [SIGNATURE_HEADER]: signPayload(secret, rawBody) } };
 }

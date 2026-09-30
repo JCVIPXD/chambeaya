@@ -1500,12 +1500,13 @@ describe('DatabaseBusinessService.markPaymentPaid', () => {
     const findFirst = vi.fn(async () => (payment ? { id: payment.id } : null));
     const findUniqueOrThrow = vi.fn(async () => payment as never);
     const shiftEventCreate = vi.fn(async () => undefined);
-    const tx = { payment: { updateMany, findFirst, findUniqueOrThrow }, shiftEvent: { create: shiftEventCreate } };
+    const paymentAttemptUpdateMany = vi.fn(async () => ({ count: 0 }));
+    const tx = { payment: { updateMany, findFirst, findUniqueOrThrow }, paymentAttempt: { updateMany: paymentAttemptUpdateMany }, shiftEvent: { create: shiftEventCreate } };
     const prisma = {
       company: { upsert: companyUpsert() },
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(tx)),
     };
-    return { service: new DatabaseBusinessService(prisma as never), updateMany, findFirst, shiftEventCreate };
+    return { service: new DatabaseBusinessService(prisma as never), updateMany, paymentAttemptUpdateMany, findFirst, shiftEventCreate };
   }
 
   it('marks a PENDING manual payment as PROCESSED and records a PAYMENT_REPORTED event when it has a shift', async () => {
@@ -1515,7 +1516,15 @@ describe('DatabaseBusinessService.markPaymentPaid', () => {
     const result = await service.markPaymentPaid(session, 'payment-1');
 
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: 'payment-1', companyId: 'company-1', status: 'PENDING', provider: { in: ['manual', 'legacy'] } },
+      where: {
+        id: 'payment-1',
+        companyId: 'company-1',
+        OR: [
+          { status: 'PENDING', provider: { in: ['manual', 'legacy'] } },
+          { status: 'PENDING', provider: { not: 'manual' } },
+          { status: 'SCHEDULED', provider: { not: 'manual' } },
+        ],
+      },
       data: { status: 'PROCESSED', processedAt: expect.any(Date) },
     });
     expect(shiftEventCreate).toHaveBeenCalledWith({
@@ -1532,6 +1541,35 @@ describe('DatabaseBusinessService.markPaymentPaid', () => {
 
     expect(shiftEventCreate).not.toHaveBeenCalled();
     expect(result).toEqual(payment);
+  });
+
+  it('allows a pending payment from an inactive simulated provider to be resolved manually', async () => {
+    const payment = { id: 'payment-simulated', shiftId: null, status: 'PROCESSED', provider: 'simulated' };
+    const { service, updateMany } = txWith(payment, 1);
+
+    await service.markPaymentPaid(session, 'payment-simulated');
+
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [
+          { status: 'PENDING', provider: { in: ['manual', 'legacy'] } },
+          { status: 'PENDING', provider: { not: 'manual' } },
+          { status: 'SCHEDULED', provider: { not: 'manual' } },
+        ],
+      }),
+    }));
+  });
+
+  it('expires a live checkout when resolving a scheduled payment from an inactive provider', async () => {
+    const payment = { id: 'payment-scheduled', shiftId: null, status: 'PROCESSED', provider: 'simulated' };
+    const { service, paymentAttemptUpdateMany } = txWith(payment, 1);
+
+    await service.markPaymentPaid(session, 'payment-scheduled');
+
+    expect(paymentAttemptUpdateMany).toHaveBeenCalledWith({
+      where: { paymentId: 'payment-scheduled', status: 'CREATED' },
+      data: { status: 'EXPIRED', failureReason: 'PROVIDER_DEACTIVATED' },
+    });
   });
 
   it('responds 404 (BusinessRecordNotFoundError) when the payment does not exist or belongs to another company', async () => {

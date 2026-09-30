@@ -214,6 +214,26 @@ export type PaymentRecord = {
   workerConfirmedAt: string | null;
 };
 
+export type CheckoutResponse = {
+  attemptId: string;
+  redirectUrl: string;
+  expiresAt: string;
+};
+
+export type SimulatedCheckoutRecord = {
+  checkoutId: string;
+  status: 'CREATED' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+  expiresAt: string;
+  payment: {
+    id: string;
+    reference: string;
+    description: string;
+    totalCents: number;
+    currency: 'PEN';
+    status: 'PENDING' | 'SCHEDULED' | 'PROCESSED' | 'CANCELLED';
+  };
+};
+
 export class ApiError extends Error {
   constructor(public readonly status: number, public readonly code: string) {
     super(code);
@@ -357,5 +377,9 @@ export const businessApi = {
     list: (token: string) => request<PaymentRecord[]>('/business/payments', { token }),
     get: (token: string, id: string) => request<PaymentRecord>(`/business/payments/${id}`, { token }),
     markPaid: (token: string, id: string) => request<PaymentRecord>(`/business/payments/${id}/mark-paid`, { method: 'POST', token }),
+    checkout: (token: string, id: string) => request<CheckoutResponse>(`/business/payments/${id}/checkout`, { method: 'POST', token }),
+    simulatedCheckout: (token: string, checkoutId: string) => request<SimulatedCheckoutRecord>(`/payments/simulated/${encodeURIComponent(checkoutId)}`, { token }),
+    approveSimulated: (token: string, checkoutId: string) => request<{ ok: true; result: string }>(`/payments/simulated/${encodeURIComponent(checkoutId)}/approve`, { method: 'POST', token }),
+    rejectSimulated: (token: string, checkoutId: string) => request<{ ok: true; result: string }>(`/payments/simulated/${encodeURIComponent(checkoutId)}/reject`, { method: 'POST', token }),
   },
 };

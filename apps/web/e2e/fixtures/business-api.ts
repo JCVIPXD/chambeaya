@@ -94,6 +94,13 @@ export const pendingPayment: PaymentRecord = {
   workerConfirmedAt: null,
 };
 
+export const simulatedPendingPayment: PaymentRecord = {
+  ...pendingPayment,
+  id: 'browser-test-payment-simulated',
+  reference: 'CN-TEST-SIM-0001',
+  provider: 'simulated',
+};
+
 type ApiCall ={ method: string; path: string; authorization: string | undefined };
 type BrowserApi = { calls: ApiCall[] };
 
@@ -109,6 +116,7 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
     // (`updateMany` condicionado a `status: 'PENDING'`), sobre una copia
     // para no mutar el fixture importado.
     let paymentRecords: PaymentRecord[] = payments.map((payment) => ({ ...payment }));
+    const simulatedAttempts = new Map<string, { paymentId: string; status: 'CREATED' | 'APPROVED' | 'REJECTED'; expiresAt: string }>();
     const unexpected: string[] = [];
     const pageErrors: string[] = [];
     let authenticated = false;
@@ -193,6 +201,74 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
         paymentRecords = paymentRecords.map((item) => (item.id === id ? updated : item));
         await route.fulfill({ json: updated });
         return;
+      }
+
+      const checkoutMatch = /^\/api\/business\/payments\/([^/]+)\/checkout$/.exec(path);
+      if (method === 'POST' && checkoutMatch) {
+        const id = checkoutMatch[1];
+        const target = paymentRecords.find((item) => item.id === id);
+        if (!target || target.provider !== 'simulated' || !['PENDING', 'SCHEDULED'].includes(target.status)) {
+          await route.fulfill({ status: 409, json: { error: 'PAYMENT_NOT_PAYABLE' } });
+          return;
+        }
+        const existing = [...simulatedAttempts.entries()].find(([, attempt]) => attempt.paymentId === id);
+        const checkoutId = existing?.[0] ?? `checkout-${id}`;
+        if (!existing) {
+          simulatedAttempts.set(checkoutId, {
+            paymentId: id,
+            status: 'CREATED',
+            expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+          });
+          paymentRecords = paymentRecords.map((item) => item.id === id ? { ...item, status: 'SCHEDULED' } : item);
+        }
+        const attempt = simulatedAttempts.get(checkoutId)!;
+        await route.fulfill({ json: {
+          attemptId: checkoutId,
+          redirectUrl: new URL(`/pago-simulado/${checkoutId}`, baseURL).toString(),
+          expiresAt: attempt.expiresAt,
+        } });
+        return;
+      }
+
+      const simulatedMatch = /^\/api\/payments\/simulated\/([^/]+)(?:\/(approve|reject))?$/.exec(path);
+      if (simulatedMatch) {
+        const [, checkoutId, outcome] = simulatedMatch;
+        const attempt = simulatedAttempts.get(checkoutId);
+        const target = attempt && paymentRecords.find((item) => item.id === attempt.paymentId);
+        if (!attempt || !target) {
+          await route.fulfill({ status: 404, json: { error: 'ATTEMPT_NOT_FOUND' } });
+          return;
+        }
+        if (method === 'GET' && !outcome) {
+          await route.fulfill({ json: {
+            checkoutId,
+            status: attempt.status,
+            expiresAt: attempt.expiresAt,
+            payment: {
+              id: target.id,
+              reference: target.reference,
+              description: target.description,
+              totalCents: target.totalCents,
+              currency: 'PEN',
+              status: target.status,
+            },
+          } });
+          return;
+        }
+        if (method === 'POST' && outcome) {
+          if (outcome === 'approve') {
+            attempt.status = 'APPROVED';
+            paymentRecords = paymentRecords.map((item) => item.id === target.id ? { ...item, status: 'PROCESSED', processedAt: new Date().toISOString() } : item);
+            await route.fulfill({ json: { ok: true, result: 'approved' } });
+            return;
+          }
+          attempt.status = 'REJECTED';
+          if (target.status !== 'PROCESSED') {
+            paymentRecords = paymentRecords.map((item) => item.id === target.id ? { ...item, status: 'PENDING' } : item);
+          }
+          await route.fulfill({ json: { ok: true, result: target.status === 'PROCESSED' ? 'noop' : 'rejected' } });
+          return;
+        }
       }
 
       const data: Record<string, unknown> = {

@@ -174,10 +174,25 @@ export async function expireStaleScheduledPayments(
   for (const payment of stale) {
     const attempt = payment.attempts[0];
     if (!attempt || attempt.expiresAt >= now) continue;
-    await prisma.$transaction([
-      prisma.paymentAttempt.update({ where: { id: attempt.id }, data: { status: 'EXPIRED' } }),
-      prisma.payment.updateMany({ where: { id: payment.id, status: 'SCHEDULED' }, data: { status: 'PENDING' } }),
-    ]);
+    await prisma.$transaction(async (tx) => {
+      // Mueve primero el pago con un guard condicional. Si una aprobación
+      // concurrente ya lo llevó a PROCESSED, no hay expiración que aplicar.
+      // El lock de esa escritura hace que Postgres reevalúe el WHERE tras la
+      // transacción concurrente, en lugar de pisar una aprobación reciente.
+      const released = await tx.payment.updateMany({
+        where: { id: payment.id, status: 'SCHEDULED' },
+        data: { status: 'PENDING' },
+      });
+      if (released.count === 0) return;
+
+      // Nunca sobrescribe una decisión ya asentada. Una aprobación tardía
+      // puede mover EXPIRED a APPROVED después de este punto, pero una
+      // expiración que llegue tarde no puede volverla a EXPIRED.
+      await tx.paymentAttempt.updateMany({
+        where: { id: attempt.id, status: 'CREATED' },
+        data: { status: 'EXPIRED' },
+      });
+    });
   }
 }
 
@@ -339,7 +354,17 @@ export async function processProviderEvent(
     }
 
     if (event.outcome === 'APPROVED') {
-      if (payment.status === 'PROCESSED' || payment.status === 'CANCELLED') {
+      // Este `updateMany` es el guardián atómico de la transición. Dos
+      // aprobaciones con eventId distintos pueden leer un snapshot anterior,
+      // pero solo una logra cambiar PENDING/SCHEDULED a PROCESSED; la otra
+      // espera el lock de Postgres, afecta 0 filas y queda marcada para
+      // revisión sin crear otro ShiftEvent.
+      const processedAt = new Date();
+      const processed = await tx.payment.updateMany({
+        where: { id: payment.id, status: { in: ['PENDING', 'SCHEDULED'] } },
+        data: { status: 'PROCESSED', processedAt },
+      });
+      if (processed.count === 0) {
         // Doble cobro (ya PROCESSED) o una aprobación sobre un pago que ya
         // no debería recibir dinero (CANCELLED): nunca se revierte nada,
         // solo se señala para revisión humana.
@@ -347,10 +372,9 @@ export async function processProviderEvent(
         return { kind: 'already_processed' };
       }
       // PENDING o SCHEDULED, aunque el intento ya esté EXPIRED (aprobación
-      // tardía aceptada mientras el pago siga sin resolver): se acepta.
-      const processedAt = new Date();
-      await tx.paymentAttempt.update({ where: { id: attempt.id }, data: { status: 'APPROVED' } });
-      await tx.payment.update({ where: { id: payment.id }, data: { status: 'PROCESSED', processedAt } });
+      // tardía aceptada mientras el pago siga sin resolver): se acepta. Si
+      // antes hubo un rechazo, limpia su motivo al dejar APPROVED terminal.
+      await tx.paymentAttempt.update({ where: { id: attempt.id }, data: { status: 'APPROVED', failureReason: null } });
       if (payment.shiftId) {
         await tx.shiftEvent.create({
           data: { shiftId: payment.shiftId, actorId: null, actorRole: 'SYSTEM', type: 'PAYMENT_REPORTED', detail: payment.id },
@@ -359,13 +383,27 @@ export async function processProviderEvent(
       return { kind: 'approved' };
     }
 
-    // REJECTED: nunca revierte una aprobación ya asentada.
-    if (payment.status === 'PROCESSED') {
-      await tx.paymentAttempt.update({ where: { id: attempt.id }, data: { status: 'REJECTED', failureReason: 'PROVIDER_REJECTED_AFTER_APPROVAL' } });
+    // REJECTED: nunca revierte una aprobación ya asentada. Igual que en la
+    // aprobación, la escritura condicionada evita decidir con el snapshot
+    // leído arriba: si la aprobación concurrente ganó, count será 0 y el
+    // intento terminal APPROVED no se toca. Un rechazo de un checkout
+    // antiguo tampoco puede devolver a PENDING un checkout nuevo que sigue
+    // CREATED: el filtro `none` exige que no exista otro intento vigente.
+    const returnedToPending = await tx.payment.updateMany({
+      where: {
+        id: payment.id,
+        status: { in: ['SCHEDULED', 'PENDING'] },
+        attempts: { none: { id: { not: attempt.id }, status: 'CREATED' } },
+      },
+      data: { status: 'PENDING' },
+    });
+    if (returnedToPending.count === 0) {
       return { kind: 'noop' };
     }
-    await tx.paymentAttempt.update({ where: { id: attempt.id }, data: { status: 'REJECTED', failureReason: 'PROVIDER_REJECTED' } });
-    await tx.payment.updateMany({ where: { id: payment.id, status: { in: ['SCHEDULED', 'PENDING'] } }, data: { status: 'PENDING' } });
+    await tx.paymentAttempt.updateMany({
+      where: { id: attempt.id, status: { not: 'APPROVED' } },
+      data: { status: 'REJECTED', failureReason: 'PROVIDER_REJECTED' },
+    });
     return { kind: 'rejected' };
   });
 }

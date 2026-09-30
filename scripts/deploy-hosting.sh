@@ -157,6 +157,7 @@ if [[ "$payment_provider" == "simulated" ]]; then
     echo "pon PAYMENT_SIMULATION_ALLOWED=true en $ENV_FILE; si no, la API se negará a" >&2
     echo "arrancar (assertPaymentConfig, ver docs/guides/deployment.md)." >&2
     echo >&2
+    exit 1
   fi
 fi
 echo "Modo de pagos activo: ${payment_provider}."

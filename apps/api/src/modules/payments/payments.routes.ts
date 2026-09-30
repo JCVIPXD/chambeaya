@@ -16,6 +16,26 @@ function param(request: Request, name: string): string {
   return Array.isArray(value) ? (value[0] ?? '') : (value ?? '');
 }
 
+type BusinessSession = { userId: string; role: string };
+
+async function requireBusinessSession(request: Request, response: Response, authService: AuthService): Promise<BusinessSession | null> {
+  try {
+    const session = await authService.restore(bearerToken(request.header('authorization')));
+    if (session.role !== 'BUSINESS') {
+      response.status(403).json({ error: 'BUSINESS_ACCOUNT_REQUIRED' });
+      return null;
+    }
+    return session;
+  } catch (error) {
+    if (error instanceof AuthError) {
+      response.status(401).json({ error: error.code });
+      return null;
+    }
+    response.status(401).json({ error: 'INVALID_SESSION' });
+    return null;
+  }
+}
+
 const DEFAULT_WEBHOOK_RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_WEBHOOK_RATE_LIMIT_MAX = 60;
 
@@ -118,22 +138,56 @@ export function createSimulatedPaymentsRouter(
 ) {
   const router = Router();
 
-  const handle = (outcome: 'APPROVED' | 'REJECTED') => async (request: Request, response: Response) => {
-    let session;
+  const ownedAttempt = async (checkoutId: string, session: BusinessSession) => {
+    const attempt = await prisma.paymentAttempt.findUnique({
+      where: { checkoutId },
+      include: { payment: { include: { company: true } } },
+    });
+    return attempt && attempt.payment.company.ownerId === session.userId ? attempt : null;
+  };
+
+  router.get('/simulated/:checkoutId', async (request: Request, response: Response) => {
+    const session = await requireBusinessSession(request, response, authService);
+    if (!session) return;
+    let activeName: string;
     try {
-      session = await authService.restore(bearerToken(request.header('authorization')));
-    } catch (error) {
-      if (error instanceof AuthError) {
-        response.status(401).json({ error: error.code });
+      activeName = activePaymentProviderName();
+    } catch {
+      response.status(404).json({ error: 'PROVIDER_NOT_FOUND' });
+      return;
+    }
+    if (activeName !== 'simulated') {
+      response.status(404).json({ error: 'PROVIDER_NOT_FOUND' });
+      return;
+    }
+    try {
+      const attempt = await ownedAttempt(param(request, 'checkoutId'), session);
+      if (!attempt) {
+        response.status(404).json({ error: 'ATTEMPT_NOT_FOUND' });
         return;
       }
-      response.status(401).json({ error: 'INVALID_SESSION' });
-      return;
+      response.json({
+        checkoutId: attempt.checkoutId,
+        status: attempt.status,
+        expiresAt: attempt.expiresAt.toISOString(),
+        payment: {
+          id: attempt.payment.id,
+          reference: attempt.payment.reference,
+          description: attempt.payment.description,
+          totalCents: attempt.payment.totalCents,
+          currency: attempt.currency,
+          status: attempt.payment.status,
+        },
+      });
+    } catch (error) {
+      console.error(error);
+      response.status(500).json({ error: 'INTERNAL_ERROR' });
     }
-    if (session.role !== 'BUSINESS') {
-      response.status(403).json({ error: 'BUSINESS_ACCOUNT_REQUIRED' });
-      return;
-    }
+  });
+
+  const handle = (outcome: 'APPROVED' | 'REJECTED') => async (request: Request, response: Response) => {
+    const session = await requireBusinessSession(request, response, authService);
+    if (!session) return;
     try {
       let activeName: string;
       try {
@@ -147,11 +201,8 @@ export function createSimulatedPaymentsRouter(
         return;
       }
       const checkoutId = param(request, 'checkoutId');
-      const attempt = await prisma.paymentAttempt.findUnique({
-        where: { checkoutId },
-        include: { payment: { include: { company: true } } },
-      });
-      if (!attempt || attempt.payment.company.ownerId !== session.userId) {
+      const attempt = await ownedAttempt(checkoutId, session);
+      if (!attempt) {
         response.status(404).json({ error: 'ATTEMPT_NOT_FOUND' });
         return;
       }

@@ -162,6 +162,7 @@ type Transaction = {
   total: number;
   status: "Procesado" | "Pendiente" | "Programado" | "Cancelado";
   rawStatus: PaymentRecord["status"];
+  provider: string;
   reference: string;
   dueAt: string | null;
   // Fecha en que la empresa lo marcó como pagado (`mark-paid`). `null`
@@ -340,6 +341,7 @@ function mapPayment(record: PaymentRecord): Transaction {
     total: record.totalCents / 100,
     status: labels[record.status],
     rawStatus: record.status,
+    provider: record.provider,
     dueAt: record.dueAt?.slice(0, 10) ?? null,
     processedAt: record.processedAt,
   };
@@ -1545,7 +1547,11 @@ export default function HomePage() {
   async function markPaymentProcessed(id: string) {
     if (!session) return;
     const payment = paymentRecords.find((item) => item.id === id);
-    if (!payment || payment.rawStatus !== "PENDING") return;
+    const canResolveInactiveCheckout =
+      payment?.provider === "simulated" &&
+      paymentSettings?.mode === "manual" &&
+      (payment.rawStatus === "PENDING" || payment.rawStatus === "SCHEDULED");
+    if (!payment || (payment.rawStatus !== "PENDING" && !canResolveInactiveCheckout)) return;
     const money = (value: number) =>
       value.toLocaleString("es-PE", { minimumFractionDigits: 2 });
     const confirmed = window.confirm(
@@ -1584,6 +1590,29 @@ export default function HomePage() {
         return;
       }
       showToast("No pudimos marcar el pago como pagado.");
+    }
+  }
+  async function startSimulatedCheckout(id: string) {
+    if (!session) return;
+    try {
+      const checkout = await businessApi.payments.checkout(session.token, id);
+      window.location.assign(checkout.redirectUrl);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "PAYMENT_NOT_PAYABLE") {
+        showToast("Este pago ya no está disponible. Actualizamos la lista.");
+        try {
+          const records = await businessApi.payments.list(session.token);
+          setPaymentRecords(records.map(mapPayment));
+        } catch {
+          // El sondeo de Pagos volverá a intentarlo sin bloquear el panel.
+        }
+        return;
+      }
+      if (error instanceof ApiError && error.code === "PROVIDER_MANUAL") {
+        showToast("El entorno de pago simulado no está activo en este momento.");
+        return;
+      }
+      showToast("No pudimos iniciar el pago simulado. Inténtalo nuevamente.");
     }
   }
   async function removeConversation() {
@@ -2827,6 +2856,8 @@ export default function HomePage() {
                       key={transaction.id}
                       transaction={transaction}
                       onMarkProcessed={() => void markPaymentProcessed(transaction.id)}
+                      onCheckout={() => void startSimulatedCheckout(transaction.id)}
+                      paymentMode={paymentSettings?.mode}
                     />
                   ))}
                   {filteredTransactions.length === 0 && (
@@ -4157,10 +4188,21 @@ function WorkerDirectoryCard({
 function TransactionRow({
   transaction,
   onMarkProcessed,
+  onCheckout,
+  paymentMode,
 }: {
   transaction: Transaction;
   onMarkProcessed: () => void;
+  onCheckout: () => void;
+  paymentMode: string | undefined;
 }) {
+  const canResolveInactiveCheckout = paymentMode === "manual" && transaction.provider === "simulated" && (
+    transaction.rawStatus === "PENDING" || transaction.rawStatus === "SCHEDULED"
+  );
+  const canMarkManual = (transaction.rawStatus === "PENDING" && (
+    transaction.provider === "manual" || transaction.provider === "legacy"
+  )) || canResolveInactiveCheckout;
+  const canCheckout = paymentMode === "simulated" && transaction.provider === "simulated" && (transaction.rawStatus === "PENDING" || transaction.rawStatus === "SCHEDULED");
   return (
     <div className="transaction-row">
       <span className="transaction-name">
@@ -4184,13 +4226,18 @@ function TransactionRow({
         <b className={`payment-status ${transaction.status.toLowerCase()}`}>
           {transaction.status}
         </b>
-        {transaction.status === "Pendiente" && (
+        {canMarkManual && (
           <button
             className="payment-quick-action"
             type="button"
             onClick={onMarkProcessed}
           >
             <Check size={12} /> Marcar como pagado
+          </button>
+        )}
+        {canCheckout && (
+          <button className="payment-quick-action" type="button" onClick={onCheckout}>
+            <CircleDollarSign size={12} /> {transaction.rawStatus === "SCHEDULED" ? "Continuar pago" : "Pagar en simulador"}
           </button>
         )}
       </span>

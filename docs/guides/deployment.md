@@ -475,6 +475,15 @@ minutos), que son los correctos para producción hoy.
   `NEXT_BASE_PATH`; en producción con `PAYMENT_PROVIDER=manual` no hace
   ninguna falta.
 
+> **Al volver de `simulated` a `manual`** (por ejemplo, al terminar una demo),
+> un pago `simulated` que siga `PENDING` ya muestra **"Marcar como pagado"**
+> en el panel y `POST /business/payments/:id/mark-paid` lo resuelve de forma
+> atómica. También sirve si el checkout quedó `SCHEDULED`: expira ese intento
+> abierto con motivo `PROVIDER_DEACTIVATED` y procesa el pago en la misma
+> operación. Es una salida para un proveedor que ya no está activo; un pago
+> cuyo proveedor siga activo conserva su flujo propio y no se puede marcar a
+> mano.
+
 **Cuando se elija un proveedor real** (Mercado Pago, Culqi, Niubiz o
 Izipay): se agrega un nuevo `*.provider.ts` que implemente la interfaz
 `PaymentProvider` (`apps/api/src/modules/payments/provider.ts`), se suma su
