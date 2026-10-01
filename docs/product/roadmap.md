@@ -306,6 +306,60 @@ dinero real. No habilita una pasarela en producción ni sustituye elegir un
 proveedor regulado, la validación legal/laboral/tributaria, conciliación,
 reembolsos, payout real o disputas: todo ello sigue pendiente.
 
+#### Plan de integración con Culqi (decidido 2026-10-01, PAUSADO)
+
+> **Pausado el 2026-10-01** por el cambio de enfoque a puestos fijos y moneda
+> virtual; ver [moneda-virtual.md](moneda-virtual.md). Los alcances G a J no se
+> retoman hasta que M7 (compra de monedas) lo requiera.
+
+Proveedor elegido: **Culqi** (producto CulqiOnline, integración por API), por
+aceptar tarjetas y Yape. Decisiones de diseño:
+
+- **Sueldo:** la empresa paga al trabajador directamente (Yape, Plin o
+  transferencia) y lo marca como pagado, como en el modo manual. Chambeaya no
+  custodia ese dinero ni hace payout.
+- **Comisión:** se acumula por turno pagado y se **liquida por periodo**. La
+  empresa paga la liquidación desde el panel con el checkout de Culqi (tarjeta o
+  Yape). No hay cobro automático de la comisión en la v1 (Yape exige aprobación
+  del usuario en cada pago); el cobro automático con tarjeta guardada queda
+  como mejora posterior.
+- **Suscripciones:** solo con tarjeta, con cobro recurrente de Culqi. Hoy no
+  existe ningún endpoint de activación y el panel muestra "Sin plan activo".
+
+| Alcance | Responsable | Contenido |
+|---|---|---|
+| **G. Adaptador Culqi** | Codex | Proveedor `culqi` sobre la capa de adaptadores existente, con llaves de prueba: cargos con token de tarjeta o Yape, verificación del webhook de Culqi y configuración por variables de entorno. Conserva `manual` y `simulated`. |
+| **H. Liquidación de comisiones** | Codex | Modelo de liquidación periódica (abierta, emitida, pagada, vencida): suma las comisiones de los turnos pagados, se paga desde el panel con checkout Culqi, vistas para empresa y admin y consecuencia por mora. |
+| **I. Suscripciones** | Codex | Planes `PILOT` y `PRO`: estado, periodo, permisos, activación, panel de plan, cobro recurrente con tarjeta y webhooks de renovación o fallo. |
+| **J. Cierre técnico** | Codex | Pruebas de integración y e2e contra el ambiente de integración de Culqi, documentación, guarda de arranque en producción para `culqi`. |
+
+Cada alcance se registra en `docs/PROGRESO.md` y se cierra solo con una
+auditoría `APROBADO` de `auditor-opus`.
+
+**Pendientes del dueño del producto (no son de código):**
+
+1. Crear la cuenta de Culqi (CulqiOnline) y obtener las llaves de **prueba**
+   (`pk_test_`, `sk_test_`, secreto del webhook) en CulqiPanel > Desarrollo >
+   API Keys; guardarlas solo en el `.env` local, nunca en el repositorio ni en
+   el chat. *Estado: bloqueado, la cuenta aún no se pudo crear.*
+2. Confirmar en la documentación de Culqi el cobro recurrente (suscripciones)
+   y que no admite Yape.
+3. Decidir periodicidad de la liquidación, días de plazo, consecuencia por mora
+   (por ejemplo, bloquear la publicación de turnos nuevos), monto mínimo a
+   liquidar y precios de `PILOT` y `PRO`.
+4. Antes de producción: afiliar el comercio real con el RUC definitivo (RUC
+   activo, cuenta bancaria en soles a nombre de ese RUC, ficha RUC, documento
+   del representante legal y constancia de la cuenta; validación de 24 a 72
+   horas hábiles), generar las llaves de producción, definir los comprobantes
+   electrónicos de la comisión y la suscripción con un contador, actualizar
+   términos y política de privacidad (Chambeaya cobra comisión y no custodia el
+   sueldo) y autorizar el despliegue y el cambio de `PAYMENT_PROVIDER`.
+
+Con llaves de prueba no se mueve dinero real ni importa a nombre de quién esté
+la cuenta bancaria. Cambiar de comercio después implica afiliar uno nuevo con
+el RUC definitivo y generar llaves nuevas; en el código solo cambian variables
+de entorno.
+
 ### Fase 7 — Operación y plataforma de producción
 
 - Roles y permisos para equipos empresariales.

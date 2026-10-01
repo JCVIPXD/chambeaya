@@ -28,6 +28,8 @@ que corresponda a tu objetivo y evita crear documentos nuevos en la raíz de
   priorizado para pasar de la versión híbrida actual a un piloto real.
 - [Hoja de ruta](product/roadmap.md): principios, fases y decisiones de
   producto vigentes.
+- [Moneda virtual y puestos fijos](product/moneda-virtual.md): cambio de
+  enfoque decidido el 2026-10-01, con reglas, alcances M0 a M7 y pendientes.
 - [Hipótesis de membresías](product/memberships.md): propuesta comercial para
   validar durante el piloto; no es una oferta pública.
 - [Perfil de talento e integraciones](product/talent-profile-rollout.md):
