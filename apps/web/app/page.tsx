@@ -82,6 +82,10 @@ import { ApplicantCvButton } from "../components/applicant-cv";
 import { CrudModal } from "../components/crud-modal";
 import { ChangePasswordModal } from "../components/change-password-modal";
 
+// Los turnos temporales son un flujo legado. La API aplica la misma bandera;
+// ocultar estos controles evita ofrecer una acción que el servidor rechazaría.
+const temporaryShiftsEnabled = process.env.NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED === "true";
+
 type ViewName =
   | "Resumen"
   | "Turnos"
@@ -1785,17 +1789,19 @@ export default function HomePage() {
             >
               <Users size={17} /> Equipo
             </button>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => {
-                setEditingShift(null);
-                setPublishOpen(true);
-              }}
-            >
-              <Plus size={18} />
-              <span>Publicar turno</span>
-            </button>
+            {temporaryShiftsEnabled && (
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => {
+                  setEditingShift(null);
+                  setPublishOpen(true);
+                }}
+              >
+                <Plus size={18} />
+                <span>Publicar turno</span>
+              </button>
+            )}
           </div>
         </header>
 
@@ -1839,16 +1845,18 @@ export default function HomePage() {
               >
                 <CalendarCheck2 size={17} /> Calendario
               </button>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => {
-                  setEditingShift(null);
-                  setPublishOpen(true);
-                }}
-              >
-                <Plus size={17} /> Nuevo turno
-              </button>
+              {temporaryShiftsEnabled && (
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => {
+                    setEditingShift(null);
+                    setPublishOpen(true);
+                  }}
+                >
+                  <Plus size={17} /> Nuevo turno
+                </button>
+              )}
             </ViewHeader>
             {selectedShift && (
               <section

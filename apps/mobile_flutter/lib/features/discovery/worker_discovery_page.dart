@@ -23,12 +23,17 @@ class WorkerDiscoveryPage extends StatefulWidget {
     required this.repository,
     this.onApplicationChanged,
     this.workerName,
+    this.temporaryShiftsEnabled = true,
     SearchAlertStore? alertStore,
   }) : alertStore = alertStore ?? InMemorySearchAlertStore();
 
   final WorkerMarketplaceRepository repository;
   final VoidCallback? onApplicationChanged;
   final String? workerName;
+
+  /// `WorkerShell` entrega la bandera real. El valor conserva los tests
+  /// aislados de esta pantalla en el entorno de transición habilitado.
+  final bool temporaryShiftsEnabled;
   final SearchAlertStore alertStore;
 
   @override
@@ -184,6 +189,7 @@ class _WorkerDiscoveryPageState extends State<WorkerDiscoveryPage> {
             availabilitySaving: _availabilitySaving,
             onAvailabilityChanged: _setAvailability,
             workerName: widget.workerName,
+            temporaryShiftsEnabled: widget.temporaryShiftsEnabled,
           ),
         );
       },
@@ -220,6 +226,7 @@ class _DiscoveryContent extends StatelessWidget {
     required this.availabilitySaving,
     required this.onAvailabilityChanged,
     this.workerName,
+    required this.temporaryShiftsEnabled,
   });
 
   final DiscoveryController controller;
@@ -233,6 +240,7 @@ class _DiscoveryContent extends StatelessWidget {
   final bool availabilitySaving;
   final ValueChanged<bool> onAvailabilityChanged;
   final String? workerName;
+  final bool temporaryShiftsEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -284,7 +292,12 @@ class _DiscoveryContent extends StatelessWidget {
                   ),
                 ),
                 VerticalDivider(width: 1, color: context.palette.border),
-                Expanded(child: _Detail(controller: controller)),
+                Expanded(
+                  child: _Detail(
+                    controller: controller,
+                    temporaryShiftsEnabled: temporaryShiftsEnabled,
+                  ),
+                ),
               ],
             ),
           ),
@@ -305,6 +318,7 @@ class _DiscoveryContent extends StatelessWidget {
       isAvailable: isAvailable,
       onAvailabilityChanged: onAvailabilityChanged,
       workerName: workerName,
+      temporaryShiftsEnabled: temporaryShiftsEnabled,
     );
   }
 }
@@ -757,8 +771,12 @@ void _showFilterSheet(
 );
 
 class _Detail extends StatelessWidget {
-  const _Detail({required this.controller});
+  const _Detail({
+    required this.controller,
+    required this.temporaryShiftsEnabled,
+  });
   final DiscoveryController controller;
+  final bool temporaryShiftsEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -776,6 +794,7 @@ class _Detail extends StatelessWidget {
           ApplicationState.notApplied,
       onToggleSaved: () => controller.toggleSaved(shift.id),
       onApply: () => _apply(context, shift),
+      temporaryShiftsEnabled: temporaryShiftsEnabled,
     );
   }
 

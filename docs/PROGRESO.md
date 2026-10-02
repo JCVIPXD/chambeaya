@@ -54,6 +54,34 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20261001-032 — M0: pausa operativa de turnos temporales y pagos
+
+- Fecha: 2026-10-01 22:05 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260930-031`; cambio de enfoque de 2026-10-01.
+- Alcance: incorpora `TEMPORARY_SHIFTS_ENABLED`, apagada por defecto y activable solo con el valor literal `true`. La API responde `503 TEMPORARY_SHIFTS_DISABLED` antes de validar o ejecutar una publicación o postulación de turno; el panel web oculta publicar/nuevo turno y el panel móvil oculta postular. Las suites de API y Playwright habilitan explícitamente la bandera para conservar la cobertura histórica. Quedan pausados hasta M7 los alcances G (Culqi), H (liquidación de comisiones), I (suscripciones) y J (cierre de pagos); se conserva sin cambios el modo manual, los adaptadores y el proveedor simulado ya auditados.
+- Archivos: `apps/api/src/modules/temporary-shifts.ts`, `apps/api/src/app.ts`, rutas de negocio y marketplace, configuración y pruebas de API; `apps/web/app/page.tsx`, `apps/web/playwright.config.ts`; `apps/mobile_flutter/lib/core/config/temporary_shifts.dart`, `worker_shell.dart`, descubrimiento y detalle de puesto.
+- Decisiones: solo se bloquean las dos acciones de entrada al flujo legado (publicar y postular), antes de efectos o validación; las operaciones históricas y sus datos se preservan. Flutter toma la bandera por `--dart-define=TEMPORARY_SHIFTS_ENABLED=true`; el panel web usa `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true`.
+- Validaciones: `npm run build --workspace=@chambeaya/api` correcto; `npm run test --workspace=@chambeaya/api` correcto, 28 archivos y 515 pruebas; `npm run build --workspace=@chambeaya/web` correcto; `npx prisma validate --schema apps/api/prisma/schema.prisma` y `git diff --check` correctos.
+- Riesgos: `NO_EJECUTADA` la suite Flutter: el SDK/dependencias de Flutter no están disponibles en este equipo; `dart analyze` no puede resolver `package:flutter`. La bandera móvil está cubierta por tipado/formateo, pero requiere correr `flutter analyze` y `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true` en Flutter 3.44.0.
+- Siguiente paso: `auditor-opus` audita M0 y M1; no reactivar turnos ni pagos G–J sin una instrucción posterior del usuario.
+
+### CN-20261001-033 — M1: libro mayor de moneda virtual
+
+- Fecha: 2026-10-01 22:05 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261001-032`.
+- Alcance: agrega cuentas para trabajadores y empresas y un libro mayor append-only de Chambitas con cantidad firmada, saldo resultante, acción, motivo, relación, actor, secuencia por cuenta y clave de idempotencia única. Incluye saldo y movimientos paginados para trabajador y empresa, y ajustes manuales de administrador con motivo y clave obligatorios. No existen retiros ni transferencias. La migración conserva sin modificación `WalletMovement`, que continúa siendo el historial legado de pagos en céntimos y no se mezcla con la moneda virtual.
+- Archivos: `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261001100000_virtual_currency_ledger/migration.sql`, `apps/api/src/modules/currency/`, `apps/api/src/app.ts`, pruebas de rutas e integración `currency-ledger.integration.test.ts`, y `docs/reference/api.md`.
+- Decisiones: el nombre se configura con `VIRTUAL_CURRENCY_NAME` (predeterminado `Chambitas`). No hay columna de saldo editable: el saldo se deriva del último movimiento. Cada ajuste bloquea su cuenta en una transacción `Serializable`, relee el último saldo y rechaza sobregiros; los `CHECK` de PostgreSQL también prohíben saldo resultante negativo, movimiento en cero y cuentas con ambos titulares o ninguno. Un trigger impide `UPDATE` y `DELETE` de movimientos, y las relaciones que los sostienen son `RESTRICT` para conservar la auditoría. Las lecturas no crean cuentas.
+- Validaciones: `npx prisma generate --schema apps/api/prisma/schema.prisma`, `npx prisma validate --schema apps/api/prisma/schema.prisma`, `npm run build --workspace=@chambeaya/api`, `npm run test --workspace=@chambeaya/api` (28 archivos, 515 pruebas), `npm run build --workspace=@chambeaya/web` y `git diff --check`: correctos. Las pruebas unitarias cubren roles, validación de motivo y bandera; la integración nueva cubre PostgreSQL real, idempotencia, paginación, aislamiento de `WalletMovement` y ocho débitos concurrentes sin saldo negativo.
+- Riesgos: `NO_EJECUTADA` la integración real de PostgreSQL y su prueba concurrente: Docker Desktop no está iniciado, el puerto configurado `127.0.0.1:5433` no acepta conexiones y el `DATABASE_URL` local apunta al hostname interno `db`, no a una base `*_test`. No se aplicó la migración ni se usó la instancia PostgreSQL local existente para evitar tocar una base no identificada como prueba.
+- Siguiente paso: `auditor-opus` debe levantar una base PostgreSQL desechable terminada en `_test`, ejecutar `prisma migrate deploy` y `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api`, y auditar concurrencia, roles y migración antes de aprobar.
+
 ### CN-20260930-031 — Reauditoría de `CN-20260930-030` y cierre de los Alcances E y F (pagos simulados)
 
 - Fecha: 2026-09-30 (America/Lima)

@@ -15,6 +15,9 @@ import type { TalentOperations } from './modules/talent/talent.service.js';
 import type { TalentInvitationOperations } from './modules/talent/talent_invitation.service.js';
 import { createRateLimitMiddleware, type RateLimitOptions } from './middleware/rate_limit.js';
 import { createPaymentsWebhookRouter, createSimulatedPaymentsRouter } from './modules/payments/payments.routes.js';
+import { temporaryShiftsEnabled } from './modules/temporary-shifts.js';
+import { createAdminCurrencyRouter, createBusinessCurrencyRouter, createWorkerCurrencyRouter } from './modules/currency/currency.routes.js';
+import { CurrencyLedgerService } from './modules/currency/currency.service.js';
 
 const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_AUTH_RATE_LIMIT_MAX = 20;
@@ -92,11 +95,18 @@ export function createApp(options: {
    * sin esto, cada router abriría su propio `PrismaClient` por defecto.
    */
   paymentsPrisma?: PrismaClient;
+  /** Cliente compartido por el libro mayor de Chambitas. */
+  currencyPrisma?: PrismaClient;
+  /** Habilita el flujo legado de turnos temporales. Por defecto se toma de
+   * `TEMPORARY_SHIFTS_ENABLED`, apagado salvo valor literal `true`. */
+  temporaryShiftsEnabled?: boolean;
 } = {}): Express {
   const app = express();
   const authService = options.authService ?? new DatabaseAuthService();
   const shiftEvents = options.marketplaceEvents ?? marketplaceShiftEvents;
   const paymentsPrisma = options.paymentsPrisma ?? new PrismaClient();
+  const currencyLedger = new CurrencyLedgerService(options.currencyPrisma ?? new PrismaClient());
+  const legacyShiftsEnabled = options.temporaryShiftsEnabled ?? temporaryShiftsEnabled();
 
   const authRateLimiter =
     options.rateLimit === false
@@ -143,11 +153,15 @@ export function createApp(options: {
   });
   app.use('/api', createMarketplaceRouter(options.marketplaceService, shiftEvents, authService, {
     feedRefreshIntervalMs: options.marketplaceFeedRefreshIntervalMs,
+    temporaryShiftsEnabled: legacyShiftsEnabled,
   }));
+  app.use('/api', createWorkerCurrencyRouter(authService, currencyLedger));
   app.use('/api', createTalentRouter(authService, options.talentService, options.talentInvitationService));
   app.use('/api/auth', createAuthRouter(authService, { rateLimiter: authRateLimiter }));
-  app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish()));
+  app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish(), legacyShiftsEnabled));
+  app.use('/api/business', createBusinessCurrencyRouter(authService, currencyLedger));
   app.use('/api/admin', createAdminRouter(authService));
+  app.use('/api/admin', createAdminCurrencyRouter(authService, currencyLedger));
   // Checkout simulado (Alcance E): sesión BUSINESS normal, después de
   // `express.json()` global, a diferencia del webhook de arriba.
   app.use('/api/payments', createSimulatedPaymentsRouter(authService, paymentsPrisma));

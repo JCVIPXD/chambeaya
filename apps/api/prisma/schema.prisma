@@ -50,6 +50,19 @@ enum WalletMovementStatus {
   REVERSED
 }
 
+/// Tipo de titular de una cuenta del libro mayor de moneda virtual. Una
+/// cuenta pertenece exactamente a un trabajador o a una empresa.
+enum CurrencyAccountOwnerType {
+  WORKER
+  COMPANY
+}
+
+/// Acciones que originan movimientos de Chambitas. M1 solo habilita ajustes
+/// administrativos; los débitos por acciones de producto llegan en M4.
+enum CurrencyMovementAction {
+  ADMIN_ADJUSTMENT
+}
+
 enum ApplicationStatus {
   PENDING
   ACCEPTED
@@ -171,6 +184,8 @@ model User {
   cancellations ShiftCancellation[]
   events        ShiftEvent[]
   walletMovements WalletMovement[]
+  currencyAccount CurrencyAccount? @relation("WorkerCurrencyAccount")
+  currencyMovementsCreated CurrencyMovement[] @relation("CurrencyMovementCreatedBy")
   conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
   companyWorkerContacts CompanyWorkerContact[] @relation("CompanyWorkerContactUser")
   talentProfile WorkerTalentProfile?
@@ -205,6 +220,7 @@ model Company {
   conversations Conversation[]
   payments      Payment[]
   subscription  CompanySubscription?
+  currencyAccount CurrencyAccount? @relation("CompanyCurrencyAccount")
   talentInvitations TalentInvitation[]
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
@@ -814,4 +830,44 @@ model WalletMovement {
   @@index([workerId, createdAt])
   @@index([workerId, status])
   @@unique([workerId, reference])
+}
+
+/// Cuenta sin saldo materializado: el saldo se deriva del último movimiento
+/// inmutable. Las restricciones SQL de la migración aseguran que el tipo de
+/// titular coincida con exactamente una de las dos referencias.
+model CurrencyAccount {
+  id        String                   @id @default(cuid())
+  ownerType CurrencyAccountOwnerType
+  workerId  String?                  @unique
+  worker    User?                    @relation("WorkerCurrencyAccount", fields: [workerId], references: [id], onDelete: Restrict)
+  companyId String?                  @unique
+  company   Company?                 @relation("CompanyCurrencyAccount", fields: [companyId], references: [id], onDelete: Restrict)
+  movements CurrencyMovement[]
+  createdAt DateTime                 @default(now())
+
+  @@index([ownerType])
+}
+
+/// Libro mayor append-only de la moneda virtual. Nunca se actualiza ni se
+/// elimina desde la aplicación: `balanceAfter` es la foto resultante de cada
+/// movimiento y el saldo actual se deriva de la última fila por cuenta.
+model CurrencyMovement {
+  id                String                 @id @default(cuid())
+  accountId         String
+  account           CurrencyAccount        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  sequence          Int
+  quantity          Int
+  balanceAfter      Int
+  action            CurrencyMovementAction
+  reason            String?
+  relatedEntityType String?
+  relatedEntityId   String?
+  idempotencyKey    String                 @unique
+  createdById       String?
+  createdBy         User?                  @relation("CurrencyMovementCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt         DateTime               @default(now())
+
+  @@unique([accountId, sequence])
+  @@index([accountId, sequence])
+  @@index([createdById, createdAt])
 }

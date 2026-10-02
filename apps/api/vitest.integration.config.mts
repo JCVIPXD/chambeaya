@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    setupFiles: ['./tests/setup.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/.git/**'],
     // Cada archivo de `tests/integration/**` comparte una única base de datos
     // Postgres real y trunca sus propias tablas en `beforeAll`/`afterAll`

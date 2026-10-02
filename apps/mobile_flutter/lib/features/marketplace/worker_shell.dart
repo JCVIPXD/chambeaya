@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/config/temporary_shifts.dart' as feature_flags;
 import '../../core/navigation/adaptive_worker_scaffold.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/theme_mode_controller.dart';
@@ -27,6 +28,7 @@ class WorkerShell extends StatefulWidget {
     this.authRepository,
     this.sessionToken,
     this.googleOnlyAccount = false,
+    this.temporaryShiftsEnabled = feature_flags.temporaryShiftsEnabled,
   }) : talentProfileRepository =
            talentProfileRepository ??
            DemoTalentProfileRepository(name: workerName ?? 'Trabajador'),
@@ -46,6 +48,7 @@ class WorkerShell extends StatefulWidget {
   final AuthRepository? authRepository;
   final String? sessionToken;
   final bool googleOnlyAccount;
+  final bool temporaryShiftsEnabled;
 
   /// Optional: lets the profile tab expose a "Modo oscuro" toggle. Widget
   /// tests that build `WorkerShell` directly (without the app's
@@ -98,6 +101,7 @@ class _WorkerShellState extends State<WorkerShell> {
         repository: widget.repository,
         alertStore: widget.alertStore,
         workerName: widget.workerName,
+        temporaryShiftsEnabled: widget.temporaryShiftsEnabled,
         onApplicationChanged: () => setState(() => _applicationRevision++),
       ),
       WorkerApplicationsPage(

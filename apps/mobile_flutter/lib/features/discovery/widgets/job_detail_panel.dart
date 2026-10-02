@@ -13,6 +13,7 @@ class JobDetailPanel extends StatelessWidget {
     required this.applicationState,
     required this.onToggleSaved,
     required this.onApply,
+    this.temporaryShiftsEnabled = true,
   });
 
   final Shift shift;
@@ -20,6 +21,7 @@ class JobDetailPanel extends StatelessWidget {
   final ApplicationState applicationState;
   final VoidCallback onToggleSaved;
   final VoidCallback onApply;
+  final bool temporaryShiftsEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -51,7 +53,8 @@ class JobDetailPanel extends StatelessWidget {
               ),
             ),
           ),
-          _ApplyBar(applied: applied, onApply: onApply),
+          if (temporaryShiftsEnabled)
+            _ApplyBar(applied: applied, onApply: onApply),
         ],
       ),
     );

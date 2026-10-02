@@ -10,6 +10,72 @@ Authorization: Bearer <token>
 
 El API obtiene el propietario desde la sesión. No acepta un `companyId` enviado por el cliente, evitando que una empresa acceda a registros de otra.
 
+## Moneda virtual (M1)
+
+La moneda virtual es crédito cerrado. Su nombre se toma de
+`VIRTUAL_CURRENCY_NAME` (por defecto, `Chambitas`) y siempre se devuelve en
+la respuesta como `currency`. No hay rutas para retirar dinero ni transferir
+crédito entre cuentas.
+
+El saldo no está almacenado como una columna editable: se deriva del último
+movimiento del libro mayor. Cada movimiento contiene cantidad con signo,
+saldo resultante, acción, relación, actor y fecha. Las respuestas no exponen
+la clave de idempotencia, pero el servidor la exige al crear ajustes y la
+protege con un índice único global.
+
+### Trabajador
+
+Ambas rutas requieren sesión `WORKER` y operan exclusivamente sobre la cuenta
+del usuario autenticado:
+
+- `GET /api/workers/currency/balance` → `{ currency, balance }`.
+- `GET /api/workers/currency/movements?limit=25&cursor=<id>` →
+  `{ currency, items, nextCursor }`. `limit` es un entero entre 1 y 100 y
+  `nextCursor` es `null` al llegar al final.
+
+### Empresa
+
+Ambas rutas requieren sesión `BUSINESS` y resuelven la empresa por el dueño de
+la sesión, nunca por un identificador enviado por el cliente:
+
+- `GET /api/business/currency/balance`.
+- `GET /api/business/currency/movements?limit=25&cursor=<id>`.
+
+Sus respuestas tienen el mismo formato que las rutas de trabajador. Una
+cuenta sin movimientos devuelve saldo `0` y una lista vacía; una lectura no
+crea una cuenta ni modifica el libro mayor.
+
+### Ajustes del administrador
+
+Solo una sesión `ADMIN` puede registrar movimientos en M1:
+
+- `POST /api/admin/currency/workers/:workerId/adjustments`
+- `POST /api/admin/currency/companies/:companyId/adjustments`
+
+El cuerpo es:
+
+```json
+{
+  "quantity": 25,
+  "reason": "Bono de bienvenida autorizado",
+  "idempotencyKey": "admin-bonus-worker-20261001-001"
+}
+```
+
+`quantity` es un entero no nulo entre `-1000000` y `1000000`; un valor
+negativo nunca puede dejar el saldo bajo cero (`409
+INSUFFICIENT_CURRENCY_BALANCE`). `reason` es obligatorio (3 a 500 caracteres)
+y `idempotencyKey` es obligatorio (8 a 128 caracteres). Repetir exactamente la
+misma solicitud devuelve el movimiento original con `200` e `idempotent:
+true`; reutilizar la clave para otra cuenta o con datos diferentes devuelve
+`409 IDEMPOTENCY_KEY_REUSED`. Un ajuste nuevo devuelve `201`.
+
+El movimiento queda registrado como `ADMIN_ADJUSTMENT`, con el administrador
+en `actor`, el motivo y la relación `ADMIN_ADJUSTMENT`; no hay actualización
+ni borrado de filas del libro mayor. Las escrituras usan una transacción
+serializable y bloqueo explícito de la cuenta antes de calcular el saldo
+resultante, para evitar gasto doble bajo concurrencia.
+
 ## Superadmin: cuentas empresariales
 
 Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar el alta de empresas que ya entregaron sus datos a Chambeaya:

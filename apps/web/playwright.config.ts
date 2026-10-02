@@ -29,6 +29,8 @@ export default defineConfig({
     env: {
       // The browser fixture intercepts this origin; no real API or accounts are used.
       NEXT_PUBLIC_API_URL: `${baseURL}/api`,
+      TEMPORARY_SHIFTS_ENABLED: 'true',
+      NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED: 'true',
       NEXT_TELEMETRY_DISABLED: '1',
     },
   },

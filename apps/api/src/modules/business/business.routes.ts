@@ -16,6 +16,7 @@ import {
   type BusinessOperations,
   type ShiftInput,
 } from './business.service.js';
+import { TEMPORARY_SHIFTS_DISABLED_ERROR, temporaryShiftsEnabled as legacyTemporaryShiftsEnabled } from '../temporary-shifts.js';
 
 // Tope de cualquier monto de dinero que entra por un formulario (el pago por
 // persona de un turno, o el `amountCents` del CRUD manual de pagos): además
@@ -223,6 +224,7 @@ export function createBusinessRouter(
   authService: AuthService = new DatabaseAuthService(),
   operations: BusinessOperations = new DatabaseBusinessService(),
   onShiftsChanged: () => void = () => {},
+  temporaryShiftsEnabled = legacyTemporaryShiftsEnabled(),
 ) {
   const router = Router();
 
@@ -233,6 +235,10 @@ export function createBusinessRouter(
 
   router.get('/shifts', route(authService, async (_request, response, session) => { response.json(await operations.listShifts(session)); }));
   router.post('/shifts', route(authService, async (request, response, session) => {
+    if (!temporaryShiftsEnabled) {
+      response.status(503).json({ error: TEMPORARY_SHIFTS_DISABLED_ERROR });
+      return;
+    }
     const input = shiftSchema.parse(request.body);
     assertShiftDatesValid(input);
     const shift = await operations.createShift(session, input);
