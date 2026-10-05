@@ -11,6 +11,29 @@ import {
 import { PrivateDocumentStorage } from "../talent/private_document_storage.js";
 import { CHECK_IN_LATE_LIMIT_MS, resolveAssignmentLifecycle } from "../operations/shift-state.js";
 
+/**
+ * El libro mayor de moneda virtual es inmutable (trigger append-only), así que
+ * un titular con movimientos no se puede borrar sin destruir la auditoría.
+ * Decisión financiera (CN-20261001-035): se bloquea con 409 y no se borra nada
+ * (ni filas ni archivos). Una cuenta sin movimientos no tiene historial que
+ * conservar y se elimina junto con el titular.
+ */
+const LEDGER_RETAINED = "CURRENCY_LEDGER_RETAINED";
+
+class LedgerRetainedError extends Error {
+  constructor() {
+    super(LEDGER_RETAINED);
+  }
+}
+
+function isCurrencyForeignKeyViolation(error: unknown) {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2003" &&
+    JSON.stringify(error.meta ?? {}).includes("Currency")
+  );
+}
+
 function bearerToken(value: string | undefined) {
   return value?.startsWith("Bearer ") ? value.slice(7).trim() : "";
 }
@@ -135,6 +158,17 @@ export function createAdminRouter(
         error.code === "P2002"
       ) {
         response.status(409).json({ error: "DUPLICATE_RECORD" });
+        return;
+      }
+      if (error instanceof LedgerRetainedError || isCurrencyForeignKeyViolation(error)) {
+        response.status(409).json({ error: LEDGER_RETAINED });
+        return;
+      }
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2003"
+      ) {
+        response.status(409).json({ error: "RELATED_RECORDS_EXIST" });
         return;
       }
       console.error(error);
@@ -264,7 +298,7 @@ export function createAdminRouter(
     guard(request, response, async (adminId) => {
       const company = await prisma.company.findUnique({
         where: { id: request.params.id },
-        select: { ownerId: true },
+        select: { id: true, ownerId: true },
       });
       if (!company) {
         response.status(404).json({ error: "COMPANY_NOT_FOUND" });
@@ -274,7 +308,14 @@ export function createAdminRouter(
         response.status(400).json({ error: "SELF_DELETE_NOT_ALLOWED" });
         return;
       }
-      await prisma.user.delete({ where: { id: company.ownerId } });
+      await prisma.$transaction(async (tx) => {
+        const movements = await tx.currencyMovement.count({
+          where: { account: { companyId: company.id } },
+        });
+        if (movements > 0) throw new LedgerRetainedError();
+        await tx.currencyAccount.deleteMany({ where: { companyId: company.id } });
+        await tx.user.delete({ where: { id: company.ownerId } });
+      });
       response.status(204).send();
     }),
   );
@@ -316,10 +357,25 @@ export function createAdminRouter(
         where: { userId: request.params.id },
         select: { storageKey: true },
       });
+      // Primero la base (en transacción) y después los archivos: si el borrado
+      // se rechaza (libro mayor retenido) no se pierde ningún archivo. Si el
+      // almacenamiento falla tras confirmar, solo quedan archivos huérfanos
+      // sin fila que los referencie, que es el fallo recuperable.
+      await prisma.$transaction(async (tx) => {
+        const movements = await tx.currencyMovement.count({
+          where: { account: { workerId: request.params.id } },
+        });
+        if (movements > 0) throw new LedgerRetainedError();
+        await tx.currencyAccount.deleteMany({ where: { workerId: request.params.id } });
+        await tx.user.delete({ where: { id: request.params.id } });
+      });
       for (const document of workerDocuments) {
-        await documents.remove(document.storageKey);
+        try {
+          await documents.remove(document.storageKey);
+        } catch (error) {
+          console.error("ORPHAN_WORKER_DOCUMENT_FILE", document.storageKey, error);
+        }
       }
-      await prisma.user.delete({ where: { id: request.params.id } });
       response.status(204).send();
     }),
   );

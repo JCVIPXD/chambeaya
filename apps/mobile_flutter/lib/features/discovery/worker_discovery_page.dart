@@ -289,6 +289,7 @@ class _DiscoveryContent extends StatelessWidget {
                     isAvailable: isAvailable,
                     onAvailabilityChanged: onAvailabilityChanged,
                     workerName: workerName,
+                    temporaryShiftsEnabled: temporaryShiftsEnabled,
                   ),
                 ),
                 VerticalDivider(width: 1, color: context.palette.border),
@@ -456,10 +457,12 @@ class _ResultsColumn extends StatelessWidget {
     required this.onClearAlert,
     required this.isAvailable,
     required this.onAvailabilityChanged,
+    required this.temporaryShiftsEnabled,
     this.workerName,
     this.grid = false,
   });
   final DiscoveryController controller;
+  final bool temporaryShiftsEnabled;
   final bool usesLiveFeed;
   final List<Shift> shifts;
   final ClientDemoScenario scenario;
@@ -657,7 +660,10 @@ class _ResultsColumn extends StatelessWidget {
             heightFactor: .88,
             child: AnimatedBuilder(
               animation: controller,
-              builder: (_, _) => _Detail(controller: controller),
+              builder: (_, _) => _Detail(
+                controller: controller,
+                temporaryShiftsEnabled: temporaryShiftsEnabled,
+              ),
             ),
           ),
         );

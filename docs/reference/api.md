@@ -71,10 +71,55 @@ true`; reutilizar la clave para otra cuenta o con datos diferentes devuelve
 `409 IDEMPOTENCY_KEY_REUSED`. Un ajuste nuevo devuelve `201`.
 
 El movimiento queda registrado como `ADMIN_ADJUSTMENT`, con el administrador
-en `actor`, el motivo y la relación `ADMIN_ADJUSTMENT`; no hay actualización
-ni borrado de filas del libro mayor. Las escrituras usan una transacción
-serializable y bloqueo explícito de la cuenta antes de calcular el saldo
-resultante, para evitar gasto doble bajo concurrencia.
+en `actor` y el motivo (`relatedEntity` es `null` en un ajuste: el actor ya
+consta en `createdById`); no hay actualización ni borrado de filas del libro
+mayor. Las escrituras usan una transacción `Serializable` con reintento
+(`withSerializableRetry`). Lo que impide el saldo negativo y el gasto doble no
+es el `SELECT ... FOR UPDATE` de la cuenta (bajo `Serializable` la
+instantánea se fija en esa primera sentencia, antes de esperar el bloqueo, así
+que solo reduce conflictos), sino la detección de conflictos de serialización
+(`40001`, que se reintenta), el índice único `(accountId, sequence)` y el
+`CHECK balanceAfter >= 0`. Con mucha contención sobre una misma cuenta los 6
+intentos pueden agotarse y la ruta responde `500`; en ese caso no se aplicó
+nada y repetir la solicitud (misma clave) es seguro.
+
+Otros códigos de estas rutas: `403 WORKER_ACCOUNT_REQUIRED`,
+`BUSINESS_ACCOUNT_REQUIRED` o `ADMIN_ACCOUNT_REQUIRED` si la sesión tiene otro
+rol; `404 WORKER_NOT_FOUND` / `COMPANY_NOT_FOUND` si el titular del ajuste no
+existe (o el id de trabajador no es de rol `WORKER`); `409
+CURRENCY_BALANCE_LIMIT_EXCEEDED` si el saldo resultante superaría
+`2147483647` (columna `Int` de 32 bits); `400 INVALID_CURSOR` si `cursor` no es
+un movimiento de la propia cuenta. `idempotencyKey` solo admite letras, dígitos
+y `._:-`, y debe empezar por letra o dígito.
+
+Garantías en la base (migración `20261001100000_virtual_currency_ledger`): un
+trigger rechaza todo `UPDATE` y `DELETE` sobre `CurrencyMovement`
+(`CURRENCY_MOVEMENT_APPEND_ONLY`); `CHECK` impide `quantity = 0`,
+`balanceAfter < 0` y una cuenta sin titular o con los dos; `(accountId,
+sequence)` es único, de modo que dos escrituras concurrentes nunca encadenan
+sobre el mismo saldo. Las claves foráneas hacia `User`, `Company` y
+`CurrencyAccount` son `RESTRICT` (esquema y migraciones coinciden; la
+migración `20261005100000_currency_ledger_cleanup` quita el índice duplicado
+`CurrencyMovement_accountId_sequence_idx`).
+
+**Borrado de titulares (`CN-20261001-035`).** El libro es inmutable, así que
+una cuenta con movimientos no puede desaparecer sin destruir la auditoría.
+`DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` responden
+`409 CURRENCY_LEDGER_RETAINED` si el titular tiene al menos un movimiento
+(aunque el saldo sea `0`), sin borrar filas ni archivos. Una cuenta sin
+movimientos se elimina junto con el titular. La verificación y el borrado van
+en una sola transacción; si un movimiento (o una cuenta) se confirma entre el
+conteo y el borrado, la clave `RESTRICT` aborta la transacción y no se borra
+nada (los archivos solo se eliminan después de confirmar), pero hoy la ruta
+responde `500 INTERNAL_ERROR`: PostgreSQL informa esa violación como `23001`
+(`restrict_violation`), que Prisma no traduce a `P2003`, así que el mapeo del
+`guard` a `409` no la alcanza (comprobado en la reauditoría
+`CN-20261001-036`). Otros `P2003` (`23503`) responden `409
+RELATED_RECORDS_EXIST`. Anonimizar o desactivar al titular
+queda como alcance futuro; mientras tanto, para retirar a un titular con
+historial hay que dejar su saldo documentado y conservar la cuenta. `ADMIN` que
+registró ajustes tampoco puede borrarse (`createdById` es `RESTRICT`). `WalletMovement` no se modificó: sigue siendo el
+historial legado de pagos en céntimos y no forma parte de la moneda virtual.
 
 ## Superadmin: cuentas empresariales
 
@@ -84,9 +129,9 @@ Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar e
 - `GET /api/admin/companies`: listado con propietario y suscripción.
 - `POST /api/admin/companies`: crea en una transacción la cuenta `BUSINESS` y su empresa.
 - `PATCH /api/admin/companies/:id`: actualiza datos operativos (RUC, correo y contraseña no se modifican aquí).
-- `DELETE /api/admin/companies/:id`: elimina la empresa y su cuenta propietaria; no permite eliminar la cuenta del administrador actual.
+- `DELETE /api/admin/companies/:id`: elimina la empresa y su cuenta propietaria; no permite eliminar la cuenta del administrador actual; `409 CURRENCY_LEDGER_RETAINED` si la empresa tiene movimientos de moneda virtual.
 - `GET /api/admin/workers`: listado global de cuentas `WORKER` con su contacto por empresa.
-- `DELETE /api/admin/workers/:id`: elimina una cuenta `WORKER` (`404 WORKER_NOT_FOUND` si el id no existe o no corresponde a un trabajador). Antes de borrar la cuenta, elimina del almacenamiento privado el CV y la foto de perfil del trabajador, si existían; el resto de filas asociadas (aplicaciones, asignaciones, sesiones, identidades externas) se elimina en cascada a nivel de base de datos.
+- `DELETE /api/admin/workers/:id`: elimina una cuenta `WORKER` (`404 WORKER_NOT_FOUND` si el id no existe o no corresponde a un trabajador). Borra primero en la base (transacción) y solo después elimina del almacenamiento privado el CV y la foto de perfil del trabajador, si existían (un fallo del almacenamiento tras confirmar el borrado se registra en el log y no deshace la baja: solo quedan archivos huérfanos); si el trabajador tiene movimientos de moneda virtual responde `409 CURRENCY_LEDGER_RETAINED` sin tocar archivos. El resto de filas asociadas (aplicaciones, asignaciones, sesiones, identidades externas) se elimina en cascada a nivel de base de datos.
 
 El alta exige nombre comercial, RUC de 11 dígitos, correo y contraseña inicial (mínimo 8 caracteres, con mayúscula y número). Los datos de contacto y razón social pueden completarse o editarse después desde el panel.
 
@@ -161,6 +206,19 @@ Reglas por bucket (los pagos `'legacy'` nunca aportan a ninguno: nacieron con co
 - `GET /api/business/payment-settings` → `{ commissionBps, taxBps, currency: 'PEN', mode }`: el ajuste global vigente que se congelaría en un turno nuevo (`GET /api/admin/settings` sin el detalle de auditoría). El panel lo usa para la vista previa en vivo del formulario de publicación. Desde el Alcance E, `mode` es el nombre del proveedor de pago **activo** (`PAYMENT_PROVIDER`, ver [Despliegue con Docker](../guides/deployment.md)): `'manual'` en producción hoy (sin proveedor contratado), o `'simulated'` en desarrollo/QA.
 
 ## Turnos
+
+**Pausa de turnos temporales (M0, `CN-20261001-032`).** Los turnos temporales
+quedan inactivos por defecto. Mientras la API no reciba
+`TEMPORARY_SHIFTS_ENABLED=true` (valor literal), `POST /api/business/shifts` y
+`POST /api/shifts/:id/applications` responden `503 { "error":
+"TEMPORARY_SHIFTS_DISABLED" }` antes de validar el cuerpo o tocar datos. El
+resto de rutas de turnos (consultar, editar, cancelar, aceptar postulaciones,
+confirmar, check-in/check-out, resolver) sigue operando para cerrar lo ya
+publicado; no se borra código ni datos. El panel web oculta "Publicar turno" y
+"Nuevo turno" salvo `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` (se fija al
+compilar el panel), y Flutter oculta "Postular" salvo
+`--dart-define=TEMPORARY_SHIFTS_ENABLED=true`. Las suites de API y Playwright
+activan la bandera para conservar su cobertura.
 
 - `GET /api/business/shifts`
 - `POST /api/business/shifts`

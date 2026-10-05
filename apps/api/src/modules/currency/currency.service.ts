@@ -45,9 +45,14 @@ function movementView(movement: MovementWithActor) {
 
 /**
  * Libro mayor de Chambitas. No mantiene una columna de saldo: cada escritura
- * bloquea la cuenta, relee su último movimiento y agrega una fila. El bloqueo
- * y `Serializable` impiden saldo negativo y doble gasto cuando M4 introduzca
- * débitos; M1 usa exactamente el mismo camino para ajustes manuales.
+ * relee el último movimiento de la cuenta y agrega una fila. La corrección
+ * bajo concurrencia (sin saldo negativo ni doble gasto) NO la da el bloqueo de
+ * fila: la sostienen el aislamiento `Serializable` (SSI aborta con 40001 a
+ * quien leyó un saldo ya superado y `withSerializableRetry` reintenta), el
+ * índice único `(accountId, sequence)` y el `CHECK balanceAfter >= 0`. Con
+ * mucha contención sobre una misma cuenta los reintentos pueden agotarse y
+ * responder 500; el estado final sigue siendo correcto. M1 y los débitos de M4
+ * usan este mismo camino.
  */
 export class CurrencyLedgerService {
   constructor(
@@ -152,8 +157,10 @@ export class CurrencyLedgerService {
 
     try {
       const result = await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
-        // Establece un orden por cuenta. Debe ocurrir antes de leer el último
-        // saldo, para que dos débitos nunca calculen contra la misma foto.
+        // Este bloqueo solo reduce conflictos: bajo Serializable la instantánea
+        // se fija en esta primera sentencia, antes de esperar, así que quien
+        // espera puede haber leído un saldo anterior. La garantía real es SSI
+        // (40001 + reintento), el único (accountId, sequence) y el CHECK.
         await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "CurrencyAccount" WHERE "id" = ${account.id} FOR UPDATE`);
         const repeated = await tx.currencyMovement.findUnique({ where: { idempotencyKey: input.idempotencyKey }, include: movementInclude });
         if (repeated) {
@@ -172,8 +179,6 @@ export class CurrencyLedgerService {
             balanceAfter,
             action: 'ADMIN_ADJUSTMENT',
             reason: input.reason,
-            relatedEntityType: 'ADMIN_ADJUSTMENT',
-            relatedEntityId: input.actorId,
             idempotencyKey: input.idempotencyKey,
             createdById: input.actorId,
           },

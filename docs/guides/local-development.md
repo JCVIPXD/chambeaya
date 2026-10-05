@@ -134,6 +134,26 @@ propio `.env`, si usas uno junto a `docker-compose.yml`); con `manual`,
 `checkout` responde `409 PROVIDER_MANUAL` y el flujo vuelve a ser el de
 "marcar como pagado" descrito en [API y reglas operativas](../reference/api.md).
 
+### Turnos temporales pausados (M0) y moneda virtual (M1)
+
+Desde `CN-20261001-032` los turnos temporales están apagados por defecto: la
+API responde `503 TEMPORARY_SHIFTS_DISABLED` al publicar un turno o postular,
+el panel oculta "Publicar turno"/"Nuevo turno" y Flutter oculta "Postular". Lo
+ya sembrado por `npm run demo:seed` (la postulación pendiente, aceptar,
+check-in, pagos) sigue funcionando. Para reactivar el flujo legado en tu
+máquina hacen falta las tres banderas: `TEMPORARY_SHIFTS_ENABLED=true` en la
+API, `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` al arrancar o compilar el
+panel, y `--dart-define=TEMPORARY_SHIFTS_ENABLED=true` en Flutter.
+Con Docker, `docker-compose.yml` reenvía `TEMPORARY_SHIFTS_ENABLED` y
+`VIRTUAL_CURRENCY_NAME` a la API y `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED` al
+panel (desde `CN-20261001-035`): defínelas en tu `.env` o expórtalas antes de
+`docker compose up` (están documentadas, vacías, en `.env.example`). Vacías
+equivalen a "apagado" y a `Chambitas`.
+
+El nombre de la moneda virtual se toma de `VIRTUAL_CURRENCY_NAME`
+(predeterminado `Chambitas`). Las rutas de saldo, movimientos y ajustes del
+administrador están en [API y reglas operativas](../reference/api.md#moneda-virtual-m1).
+
 ### Trabajo diario en terminales separadas
 
 Cuando necesites ver los logs de cada componente por separado, usa tres

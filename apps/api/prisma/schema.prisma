@@ -854,7 +854,7 @@ model CurrencyAccount {
 model CurrencyMovement {
   id                String                 @id @default(cuid())
   accountId         String
-  account           CurrencyAccount        @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  account           CurrencyAccount        @relation(fields: [accountId], references: [id], onDelete: Restrict)
   sequence          Int
   quantity          Int
   balanceAfter      Int
@@ -868,6 +868,5 @@ model CurrencyMovement {
   createdAt         DateTime               @default(now())
 
   @@unique([accountId, sequence])
-  @@index([accountId, sequence])
   @@index([createdById, createdAt])
 }

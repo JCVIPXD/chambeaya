@@ -32,6 +32,37 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  for (final enabled in [true, false]) {
+    testWidgets(
+      'phone detail sheet ${enabled ? 'offers' : 'hides'} Postular ahora',
+      (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: WorkerDiscoveryPage(
+              repository: DemoWorkerMarketplaceRepository(),
+              temporaryShiftsEnabled: enabled,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Mozo de Salón').first);
+        await tester.pumpAndSettle();
+
+        expect(find.byType(BottomSheet), findsOneWidget);
+        expect(
+          find.bySemanticsLabel(RegExp('Postular ahora')),
+          enabled ? findsWidgets : findsNothing,
+        );
+      },
+    );
+  }
+
   testWidgets('desktop discovery shows results and selected detail together', (
     tester,
   ) async {

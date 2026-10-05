@@ -498,6 +498,25 @@ entrega la comisión de Chambeaya en la misma operación, así que Chambeaya
 nunca custodia la paga del trabajador — el destino de pago del trabajador
 queda por definir junto con esa integración.
 
+### Turnos temporales pausados y moneda virtual (M0/M1)
+
+Desde `CN-20261001-032` una instalación nueva o actualizada arranca con los
+turnos temporales apagados: publicar un turno y postular responden `503
+TEMPORARY_SHIFTS_DISABLED` y el panel oculta esos botones. Es el
+comportamiento buscado en producción: déjalas vacías en `.env.production`.
+`docker-compose.production.yml` reenvía `TEMPORARY_SHIFTS_ENABLED` y
+`VIRTUAL_CURRENCY_NAME` a la API (en tiempo de ejecución) y
+`NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED` como argumento de compilación del panel
+(`apps/web/Dockerfile.production`; se incrusta en el bundle, así que cambiarla
+exige reconstruir la imagen `web`). Vacías equivalen a "apagado" y a
+`Chambitas`. Las migraciones `20261001100000_virtual_currency_ledger` y
+`20261005100000_currency_ledger_cleanup` (quita un índice duplicado) solo
+tocan tablas e índices nuevos y las aplica `prisma migrate deploy` al
+actualizar. Tras ellas, `DELETE /api/admin/workers/:id` y
+`DELETE /api/admin/companies/:id` responden `409 CURRENCY_LEDGER_RETAINED` si
+el titular tiene movimientos de moneda (el libro es inmutable; no se borra
+nada, ni filas ni archivos). Ver [API y reglas operativas](../reference/api.md#moneda-virtual-m1).
+
 ## Actualizar una versión
 
 ```bash

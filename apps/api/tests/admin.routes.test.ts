@@ -45,7 +45,7 @@ type FakeDocument = { id: string; userId: string; storageKey: string };
  * instance. It does not reproduce any other Prisma behaviour (errors, other
  * models, transactions).
  */
-function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[] } = {}) {
+function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[]; ledgerWorkerIds?: string[] } = {}) {
   const users = new Map(options.users?.map((user) => [user.id, user]) ?? []);
   const documents = [...(options.documents ?? [])];
   const applications: { id: string; workerId: string }[] = [
@@ -55,7 +55,16 @@ function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[] } 
     { id: 'assignment-1', workerId: 'worker-1' },
   ];
 
-  return {
+  const ledgerWorkerIds = new Set(options.ledgerWorkerIds ?? []);
+  const currencyMovement = {
+    count: vi.fn(async ({ where }: { where: { account: { workerId?: string } } }) =>
+      where.account.workerId && ledgerWorkerIds.has(where.account.workerId) ? 3 : 0),
+  };
+  const currencyAccount = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+
+  const fake = {
+    currencyMovement,
+    currencyAccount,
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
         const found = users.get(where.id);
@@ -83,6 +92,9 @@ function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[] } 
     },
     inspect: () => ({ users, documents, applications, assignments }),
   };
+  return Object.assign(fake, {
+    $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(fake)),
+  });
 }
 
 function fakeDocumentStorage() {
@@ -166,8 +178,8 @@ describe('DELETE /api/admin/workers/:id', () => {
     expect(response.status).toBe(204);
     expect(response.body).toEqual({});
 
-    // The two private documents (CV and photo) must be removed from disk
-    // before the database row disappears via cascade.
+    // The two private documents (CV and photo) are removed from disk after
+    // the database delete is confirmed (CN-20261001-035).
     expect(documents.remove).toHaveBeenCalledTimes(2);
     expect(documents.remove).toHaveBeenCalledWith('cv-key.pdf');
     expect(documents.remove).toHaveBeenCalledWith('photo-key.jpg');
@@ -181,6 +193,26 @@ describe('DELETE /api/admin/workers/:id', () => {
     // The admin account itself is untouched: no self-delete guard is needed
     // for this route because an ADMIN can never match role === 'WORKER'.
     expect(state.users.has('admin-1')).toBe(true);
+  });
+
+  it('blocks the delete with 409 and keeps every file when the worker has ledger movements', async () => {
+    const prisma = fakePrisma({
+      users: [{ id: 'worker-1', role: 'WORKER' }],
+      documents: [{ id: 'doc-cv', userId: 'worker-1', storageKey: 'cv-key.pdf' }],
+      ledgerWorkerIds: ['worker-1'],
+    });
+    const documents = fakeDocumentStorage();
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const app = buildApp(prisma, documents, { [admin.token]: admin });
+
+    const response = await request(app)
+      .delete('/api/admin/workers/worker-1')
+      .set('Authorization', `Bearer ${admin.token}`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({ error: 'CURRENCY_LEDGER_RETAINED' });
+    expect(documents.remove).not.toHaveBeenCalled();
+    expect(prisma.user.delete).not.toHaveBeenCalled();
   });
 
   it('deletes a worker without documents without attempting any file cleanup', async () => {

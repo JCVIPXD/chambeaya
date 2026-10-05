@@ -1,3 +1,5 @@
+import 'package:chambeaya_mobile/core/config/temporary_shifts.dart'
+    as feature_flags;
 import 'package:chambeaya_mobile/features/auth/auth_session.dart';
 import 'package:chambeaya_mobile/features/auth/auth_session_store.dart';
 import 'package:chambeaya_mobile/features/discovery/discovery_models.dart';
@@ -117,16 +119,24 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(laMarCard);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Postular ahora'));
-      await tester.pumpAndSettle();
-      expect(find.text('Postulación enviada'), findsWidgets);
+      final repositoryBefore = tester
+          .widget<WorkerShell>(find.byType(WorkerShell))
+          .repository;
+      if (feature_flags.temporaryShiftsEnabled) {
+        await tester.tap(find.text('Postular ahora'));
+        await tester.pumpAndSettle();
+        expect(find.text('Postulación enviada'), findsWidgets);
+      } else {
+        // M0: con los turnos temporales apagados el detalle no ofrece
+        // "Postular ahora" (sin ruta de UI hacia el flujo legado). La
+        // persistencia del repositorio se comprueba aplicando directo.
+        expect(find.text('Postular ahora'), findsNothing);
+        await repositoryBefore.applyToShift('shift-la-mar');
+      }
       // Dismiss the modal detail sheet by tapping its barrier.
       await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
 
-      final repositoryBefore = tester
-          .widget<WorkerShell>(find.byType(WorkerShell))
-          .repository;
       final statesBefore = await repositoryBefore.applicationStates();
       final savedBefore = await repositoryBefore.savedShiftIds();
       expect(statesBefore['shift-la-mar'], ApplicationState.submitted);

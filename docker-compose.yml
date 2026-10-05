@@ -43,6 +43,9 @@ services:
       PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-dev-only-payment-webhook-secret-do-not-use-in-prod}
       PAYMENT_CHECKOUT_TTL_MINUTES: ${PAYMENT_CHECKOUT_TTL_MINUTES:-30}
       PANEL_PUBLIC_URL: ${PANEL_PUBLIC_URL:-http://127.0.0.1:3000}
+      # M0/M1: turnos temporales apagados salvo "true" literal; nombre de la moneda.
+      TEMPORARY_SHIFTS_ENABLED: ${TEMPORARY_SHIFTS_ENABLED:-}
+      VIRTUAL_CURRENCY_NAME: ${VIRTUAL_CURRENCY_NAME:-}
     ports:
       - "127.0.0.1:${API_HOST_PORT:-4000}:4000"
     volumes:
@@ -65,6 +68,7 @@ services:
       dockerfile: apps/web/Dockerfile.dev
     environment:
       NEXT_PUBLIC_API_URL: http://127.0.0.1:4000/api
+      NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED: ${NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED:-}
     ports:
       - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
     volumes:
