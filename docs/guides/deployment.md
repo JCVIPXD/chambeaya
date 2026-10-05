@@ -517,6 +517,16 @@ actualizar. Tras ellas, `DELETE /api/admin/workers/:id` y
 el titular tiene movimientos de moneda (el libro es inmutable; no se borra
 nada, ni filas ni archivos). Ver [API y reglas operativas](../reference/api.md#moneda-virtual-m1).
 
+La migración `20261005120000_currency_catalog` (M2, `CN-20261005-037`) solo
+agrega el tipo `CurrencyCatalogKind`, las tablas `CurrencyCatalogEntry` y
+`CurrencyCatalogChange`, y siembra 16 entradas con valores **provisionales**
+(`isProvisional = true`). Usa `gen_random_uuid()`, que exige PostgreSQL 13 o
+posterior; las imágenes de compose usan `postgres:16`. En M2 ninguna acción
+real cobra ni premia con el catálogo. Aun así, el dueño del producto debe
+revisar y ajustar los valores con `PATCH /api/admin/currency/catalog/:entryId`
+antes de conectar acciones (M4). Ver
+[Catálogo de costos y premios](../reference/api.md#catálogo-de-costos-y-premios-m2).
+
 ## Actualizar una versión
 
 ```bash

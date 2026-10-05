@@ -63,6 +63,12 @@ enum CurrencyMovementAction {
   ADMIN_ADJUSTMENT
 }
 
+/// M2: una acción del catálogo cuesta moneda (COST) o la otorga (REWARD).
+enum CurrencyCatalogKind {
+  COST
+  REWARD
+}
+
 enum ApplicationStatus {
   PENDING
   ACCEPTED
@@ -186,6 +192,8 @@ model User {
   walletMovements WalletMovement[]
   currencyAccount CurrencyAccount? @relation("WorkerCurrencyAccount")
   currencyMovementsCreated CurrencyMovement[] @relation("CurrencyMovementCreatedBy")
+  currencyCatalogUpdates CurrencyCatalogEntry[] @relation("CurrencyCatalogUpdatedBy")
+  currencyCatalogChanges CurrencyCatalogChange[] @relation("CurrencyCatalogChangedBy")
   conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
   companyWorkerContacts CompanyWorkerContact[] @relation("CompanyWorkerContactUser")
   talentProfile WorkerTalentProfile?
@@ -869,4 +877,48 @@ model CurrencyMovement {
 
   @@unique([accountId, sequence])
   @@index([createdById, createdAt])
+}
+
+/// M2: catálogo configurable de costos y premios de la moneda virtual. Una
+/// fila por (acción, actor). `actionKey` es una clave estable validada por la
+/// aplicación (`CURRENCY_ACTION_KEYS`); `kind`, `actor` y `actionKey` no se
+/// editan. `freeMonthlyQuota` (usos gratis por mes calendario de Lima) y
+/// `refundWindowHours` (devolución automática, la usa M4) solo aplican a COST.
+/// `isProvisional` queda en true hasta que un administrador edite la fila.
+model CurrencyCatalogEntry {
+  id                String              @id @default(cuid())
+  actionKey         String
+  actor             CurrencyAccountOwnerType
+  kind              CurrencyCatalogKind
+  amount            Int
+  active            Boolean             @default(true)
+  freeMonthlyQuota  Int                 @default(0)
+  refundWindowHours Int?
+  isProvisional     Boolean             @default(true)
+  updatedAt         DateTime            @updatedAt
+  updatedById       String?
+  updatedBy         User?               @relation("CurrencyCatalogUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  changes           CurrencyCatalogChange[]
+
+  @@unique([actionKey, actor])
+}
+
+/// Historial inmutable de cada cambio al catálogo: una fila por campo
+/// modificado, con valor anterior, nuevo, motivo y autor (como
+/// `PlatformSettingChange`; `changedById` pasa a nulo si se borra al admin).
+model CurrencyCatalogChange {
+  id          String               @id @default(cuid())
+  entryId     String
+  entry       CurrencyCatalogEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  actionKey   String
+  actor       CurrencyAccountOwnerType
+  field       String
+  oldValue    String
+  newValue    String
+  reason      String
+  changedById String?
+  changedBy   User?                @relation("CurrencyCatalogChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime             @default(now())
+
+  @@index([entryId, createdAt])
 }

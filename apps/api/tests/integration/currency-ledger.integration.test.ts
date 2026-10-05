@@ -169,6 +169,72 @@ describe('currency ledger under PostgreSQL concurrency', () => {
       expect(await verifier.currencyAccount.count({ where: { workerId: user.id } })).toBe(0);
     });
 
+    // BAJO-4 de CN-20261001-036: un movimiento confirmado entre el conteo y el
+    // borrado respondía 500 (SQLSTATE 23001 que Prisma no reporta como P2003).
+    describe('a movement committed while the delete is in flight', () => {
+      type Holder = { kind: 'worker' | 'company'; id: string; ownerId: string; path: string };
+
+      async function newHolder(kind: Holder['kind'], tag: string): Promise<Holder> {
+        if (kind === 'worker') {
+          const user = await prisma.user.create({ data: { email: `race.${tag}@chambeaya.test`, passwordHash: 'x', salt: 'x', role: 'WORKER', name: `Carrera ${tag}`, identifier: `8${Math.floor(1e7 + Math.random() * 9e7)}` } });
+          return { kind, id: user.id, ownerId: user.id, path: `/api/admin/workers/${user.id}` };
+        }
+        const ruc = `2${Math.floor(1e10 + Math.random() * 8e10)}`;
+        const owner = await prisma.user.create({ data: { email: `race.${tag}@chambeaya.test`, passwordHash: 'x', salt: 'x', role: 'BUSINESS', name: `Carrera ${tag}`, identifier: ruc } });
+        const company = await prisma.company.create({ data: { ownerId: owner.id, name: `Carrera ${tag}`, ruc } });
+        return { kind, id: company.id, ownerId: owner.id, path: `/api/admin/companies/${company.id}` };
+      }
+
+      const subject = (holder: Holder) => (holder.kind === 'worker'
+        ? { ownerType: 'WORKER' as const, workerId: holder.id }
+        : { ownerType: 'COMPANY' as const, companyId: holder.id });
+
+      /** Abre una transacción que escribe el movimiento y la mantiene abierta
+       * hasta `release()`; mientras tanto lanza el borrado y comprueba que espera. */
+      async function deleteWhileMovementIsUncommitted(holder: Holder, prepare: (tx: PrismaClient) => Promise<string>) {
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        let inserted!: () => void;
+        const insertedPromise = new Promise<void>((resolve) => { inserted = resolve; });
+        const writer = prisma.$transaction(async (tx) => {
+          const accountId = await prepare(tx as unknown as PrismaClient);
+          await tx.currencyMovement.create({ data: { accountId, sequence: 1, quantity: 5, balanceAfter: 5, action: 'ADMIN_ADJUSTMENT', idempotencyKey: `race-${holder.id}`, reason: 'Movimiento de la carrera' } });
+          inserted();
+          await gate;
+        });
+        await insertedPromise;
+        let settled = false;
+        const deletion = del(holder.path).then((response) => { settled = true; return response; });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(settled, 'el borrado debe esperar a la transacción abierta').toBe(false);
+        release();
+        await writer;
+        return deletion;
+      }
+
+      it.each(['worker', 'company'] as const)('answers 409 and keeps everything when the account existed (%s)', async (kind) => {
+        const holder = await newHolder(kind, `lock-${kind}`);
+        const account = await prisma.currencyAccount.create({ data: subject(holder) });
+        const response = await deleteWhileMovementIsUncommitted(holder, async (tx) => {
+          await tx.$queryRaw`SELECT "id" FROM "CurrencyAccount" WHERE "id" = ${account.id} FOR UPDATE`;
+          return account.id;
+        });
+        expect(response.status, JSON.stringify(response.body)).toBe(409);
+        expect(response.body).toEqual({ error: 'CURRENCY_LEDGER_RETAINED' });
+        expect(await verifier.user.count({ where: { id: holder.ownerId } })).toBe(1);
+        expect(await verifier.currencyMovement.count({ where: { accountId: account.id } })).toBe(1);
+      }, 30_000);
+
+      it.each(['worker', 'company'] as const)('answers 409, not 500, when the account appears during the delete (%s, SQLSTATE 23001)', async (kind) => {
+        const holder = await newHolder(kind, `new-${kind}`);
+        const response = await deleteWhileMovementIsUncommitted(holder, async (tx) => (await tx.currencyAccount.create({ data: subject(holder) })).id);
+        expect(response.status, JSON.stringify(response.body)).toBe(409);
+        expect(response.body).toEqual({ error: 'CURRENCY_LEDGER_RETAINED' });
+        expect(await verifier.user.count({ where: { id: holder.ownerId } })).toBe(1);
+        expect(await verifier.currencyMovement.count({ where: { account: subject(holder) } })).toBe(1);
+      }, 30_000);
+    });
+
     it('answers 409 for a company with ledger movements and deletes one without', async () => {
       const owner = await prisma.user.create({ data: { email: 'owner.ledger@chambeaya.test', passwordHash: 'x', salt: 'x', role: 'BUSINESS', name: 'Empresa con libro', identifier: '20111111111' } });
       const company = await prisma.company.create({ data: { ownerId: owner.id, name: 'Empresa con libro', ruc: '20111111111' } });

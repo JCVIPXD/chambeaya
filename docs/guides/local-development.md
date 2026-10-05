@@ -153,6 +153,11 @@ equivalen a "apagado" y a `Chambitas`.
 El nombre de la moneda virtual se toma de `VIRTUAL_CURRENCY_NAME`
 (predeterminado `Chambitas`). Las rutas de saldo, movimientos y ajustes del
 administrador están en [API y reglas operativas](../reference/api.md#moneda-virtual-m1).
+El catálogo de costos y premios (M2) se siembra al aplicar las migraciones
+y se edita por API (todavía no tiene pantalla). En una base de pruebas,
+`TRUNCATE "User" CASCADE` de las suites de integración también lo vacía. Si
+necesitas los valores sembrados, aplica de nuevo las migraciones en una base
+limpia. Ver [Catálogo de costos y premios](../reference/api.md#catálogo-de-costos-y-premios-m2).
 
 ### Trabajo diario en terminales separadas
 

@@ -67,7 +67,40 @@ Mecanismos para no molestar:
 - Ninguna acción esencial (por ejemplo, aceptar una oferta o responder a quien
   ya te escribió) queda bloqueada por falta de saldo.
 
-El catálogo final, con montos, lo fija el dueño del producto en el alcance M2.
+El catálogo final, con montos, lo fija el dueño del producto. M2 entrega la
+tabla configurable con valores **provisionales** (ver la sección siguiente).
+
+## Valores provisionales del catálogo (M2)
+
+M2 siembra estos valores **PROVISIONALES** para poder probar el flujo; el dueño
+del producto los ajustará desde la API de administración (cada entrada queda con
+`isProvisional = true` hasta su primera edición, y cada cambio guarda quién,
+cuándo, motivo y valor anterior/nuevo). Todavía ninguna acción real los usa
+(M4/M6). Fuente: `apps/api/src/modules/currency/currency.catalog.ts` y la
+migración `20261005120000_currency_catalog`.
+
+| Acción | Actor | Tipo | Monto | Cuota gratis/mes | Devolución |
+|---|---|---|---|---|---|
+| Publicar más allá de la cuota (`JOB_PUBLISH_EXTRA`) | Empresa | Costo | 10 | 3 | no |
+| Destacar un puesto (`JOB_HIGHLIGHT`) | Empresa | Costo | 10 | 0 | no |
+| Invitar a un candidato (`TALENT_INVITE`) | Empresa | Costo | 5 | 0 | 72 h |
+| Desbloquear contacto (`CANDIDATE_CONTACT_UNLOCK`) | Empresa | Costo | 10 | 0 | no |
+| Postular más allá de la cuota (`APPLICATION_EXTRA`) | Trabajador | Costo | 5 | 10 | 72 h |
+| Postulación con prioridad (`APPLICATION_PRIORITY`) | Trabajador | Costo | 10 | 0 | 72 h |
+| Destacar el perfil (`PROFILE_HIGHLIGHT`) | Trabajador | Costo | 10 | 0 | no |
+| Perfil completo (`PROFILE_COMPLETE`) | Trabajador | Premio | 20 | | |
+| Documento verificado (`DOCUMENT_VERIFIED`) | Trabajador | Premio | 10 | | |
+| Invitación respondida (`INVITATION_RESPONDED`) | Trabajador | Premio | 5 | | |
+| Referido (`REFERRAL`) | Trabajador | Premio | 20 | | |
+| Empresa verificada (`COMPANY_VERIFIED`) | Empresa | Premio | 20 | | |
+| Postulantes respondidos a tiempo (`APPLICANTS_RESPONDED_ON_TIME`) | Empresa | Premio | 5 | | |
+| Contratación confirmada (`HIRE_CONFIRMED`) | Empresa | Premio | 20 | | |
+| Bono de bienvenida (`WELCOME_BONUS`) | Ambos (50 c/u) | Premio | 50 | | |
+
+Reglas: la cuota gratuita cuenta por mes calendario de **Lima**; la devolución
+de 72 h se sembró solo en las acciones donde la otra parte puede no responder
+(invitar y postular) y su ejecución es de M4. Lo básico sigue siendo gratis y
+una acción inactiva o sin entrada nunca se bloquea.
 
 ## Puesto fijo y proceso de contrato
 

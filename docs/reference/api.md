@@ -108,18 +108,95 @@ una cuenta con movimientos no puede desaparecer sin destruir la auditoría.
 `409 CURRENCY_LEDGER_RETAINED` si el titular tiene al menos un movimiento
 (aunque el saldo sea `0`), sin borrar filas ni archivos. Una cuenta sin
 movimientos se elimina junto con el titular. La verificación y el borrado van
-en una sola transacción; si un movimiento (o una cuenta) se confirma entre el
-conteo y el borrado, la clave `RESTRICT` aborta la transacción y no se borra
-nada (los archivos solo se eliminan después de confirmar), pero hoy la ruta
-responde `500 INTERNAL_ERROR`: PostgreSQL informa esa violación como `23001`
-(`restrict_violation`), que Prisma no traduce a `P2003`, así que el mapeo del
-`guard` a `409` no la alcanza (comprobado en la reauditoría
-`CN-20261001-036`). Otros `P2003` (`23503`) responden `409
-RELATED_RECORDS_EXIST`. Anonimizar o desactivar al titular
+en una sola transacción que bloquea primero la cuenta (`SELECT ... FOR UPDATE`)
+y cuenta después: un ajuste que ya tenía la cuenta bloqueada termina antes y su
+movimiento se ve en el conteo. Si un movimiento o una cuenta se confirma de
+todos modos entre el conteo y el borrado (por ejemplo, una cuenta que aún no
+existía al contar), la clave `RESTRICT` aborta la transacción con SQLSTATE
+`23001` (`restrict_violation`), que Prisma entrega como error desconocido y no
+como `P2003`; el `guard` reconoce ese código y la restricción de moneda y
+responde `409 CURRENCY_LEDGER_RETAINED` (corrección de BAJO-4 de
+`CN-20261001-036`, con pruebas de integración de la carrera). No se borra nada
+y los archivos solo se eliminan después de confirmar. Cualquier otra violación
+`RESTRICT` o `P2003` responde `409 RELATED_RECORDS_EXIST`. Anonimizar o desactivar al titular
 queda como alcance futuro; mientras tanto, para retirar a un titular con
 historial hay que dejar su saldo documentado y conservar la cuenta. `ADMIN` que
 registró ajustes tampoco puede borrarse (`createdById` es `RESTRICT`). `WalletMovement` no se modificó: sigue siendo el
 historial legado de pagos en céntimos y no forma parte de la moneda virtual.
+
+### Catálogo de costos y premios (M2)
+
+Tabla configurable por el administrador que define qué acciones cuestan moneda
+(`COST`) o la otorgan (`REWARD`). **M2 solo configura y resuelve: ninguna
+acción real cobra ni premia todavía** (eso es M4/M6) y no escribe en el libro.
+Principio de producto: lo básico es siempre gratis; el catálogo nunca bloquea
+una acción esencial.
+
+Cada entrada es única por (`actionKey`, `actor`). `actor` usa los valores del
+libro: `WORKER` (trabajador) o `COMPANY` (empresa); `WELCOME_BONUS` existe una
+vez por actor. Claves estables (`CURRENCY_ACTION_KEYS`):
+
+| Actor | `COST` | `REWARD` |
+|---|---|---|
+| `COMPANY` | `JOB_PUBLISH_EXTRA`, `JOB_HIGHLIGHT`, `TALENT_INVITE`, `CANDIDATE_CONTACT_UNLOCK` | `COMPANY_VERIFIED`, `APPLICANTS_RESPONDED_ON_TIME`, `HIRE_CONFIRMED`, `WELCOME_BONUS` |
+| `WORKER` | `APPLICATION_EXTRA`, `APPLICATION_PRIORITY`, `PROFILE_HIGHLIGHT` | `PROFILE_COMPLETE`, `DOCUMENT_VERIFIED`, `INVITATION_RESPONDED`, `REFERRAL`, `WELCOME_BONUS` |
+
+Campos editables: `amount` (entero 1 a 1000000), `active`, `freeMonthlyQuota`
+(entero 0 a 10000: usos gratis por mes calendario de **Lima**, UTC-5, solo en
+`COST`) y `refundWindowHours` (entero 1 a 8760 o `null` = sin devolución; plazo
+de devolución automática que usará M4, solo en `COST`). `actionKey`, `actor` y
+`kind` son fijos. Una entrada inactiva se trata como gratuita y no otorga nada.
+
+**Administrador** (sesión `ADMIN`; otro rol responde `403`):
+
+- `GET /api/admin/currency/catalog` → `{ currency, items }` con todas las
+  entradas (`id`, `actionKey`, `actor`, `kind`, `amount`, `active`,
+  `freeMonthlyQuota`, `refundWindowHours`, `isProvisional`, `updatedAt`,
+  `updatedBy`).
+- `PATCH /api/admin/currency/catalog/:entryId` con cuerpo estricto (campos
+  desconocidos rechazados) `{ amount?, active?, freeMonthlyQuota?,
+  refundWindowHours?, reason }`: `reason` (3 a 500 caracteres) es obligatorio y
+  debe cambiar al menos un campo. Responde `{ changed, entry }`; `changed` lista
+  los campos que de verdad cambiaron (un cambio sin diferencias no escribe
+  historial). `400 INVALID_INPUT` si falla la validación; `400
+  CATALOG_FIELD_NOT_APPLICABLE` si se manda una cuota o devolución a un
+  `REWARD`; `404 CATALOG_ENTRY_NOT_FOUND`. La primera edición pone
+  `isProvisional` en `false`. Las ediciones simultáneas de una entrada se
+  encadenan con `SELECT ... FOR UPDATE`.
+- `GET /api/admin/currency/catalog/changes?limit=25&cursor=<id>&entryId=<id>`
+  → `{ items, nextCursor }`, del más reciente al más antiguo. Una fila por
+  campo modificado (`CurrencyCatalogChange`): `field`, `oldValue`, `newValue`,
+  `reason`, `changedBy`, `createdAt` (igual que `PlatformSettingChange`; si se
+  borra al administrador, `changedBy` queda `null` y la fila se conserva).
+  `oldValue` y `newValue` son texto: números y booleanos en su forma literal
+  (`"10"` o `"true"`). Una devolución sin plazo se guarda como `"null"`.
+
+**Trabajador y empresa** (solo lectura, solo entradas activas de su propio
+actor, sin ids, autor ni `isProvisional`):
+
+- `GET /api/workers/currency/catalog` (sesión `WORKER`) y
+  `GET /api/business/currency/catalog` (sesión `BUSINESS`) →
+  `{ currency, items }`, con `{ actionKey, kind, amount }` y, en `COST`,
+  `freeMonthlyQuota`, `freeRemaining` (cuota restante este mes de Lima) y
+  `refundWindowHours`.
+
+**Servicio de resolución** (`CurrencyCatalogService.resolve(actionKey, actor,
+userId)` y la función pura `resolveCatalogAction`): devuelve el costo o premio
+vigente, la cuota gratuita restante del mes de Lima (ventana `[inicio, fin)` en
+UTC) y `charge` (si la acción debe cobrarse ahora: solo un `COST` activo con la
+cuota agotada). No escribe en el libro. Los usos del mes los entrega un
+`CurrencyUsageCounter`; en M2 ninguna acción real lo alimenta, así que el valor
+por defecto devuelve `0` y `freeRemaining` es igual a la cuota. M4 aporta el
+contador real.
+
+**Migración `20261005120000_currency_catalog`** (solo agrega): tipo
+`CurrencyCatalogKind`, tablas `CurrencyCatalogEntry` y `CurrencyCatalogChange`,
+`CHECK` (monto > 0, cuota >= 0, devolución > 0 o nula, y sin cuota ni
+devolución en `REWARD`) y la siembra de los valores **provisionales** (ver
+[moneda-virtual.md](../product/moneda-virtual.md#valores-provisionales-del-catálogo-m2)).
+`TRUNCATE "User" CASCADE` (pruebas) también vacía el catálogo por su FK a
+`User`; las pruebas de integración lo restablecen desde
+`DEFAULT_CURRENCY_CATALOG`.
 
 ## Superadmin: cuentas empresariales
 

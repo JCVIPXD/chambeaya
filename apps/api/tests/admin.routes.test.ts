@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
@@ -63,6 +64,8 @@ function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[]; l
   const currencyAccount = { deleteMany: vi.fn(async () => ({ count: 0 })) };
 
   const fake = {
+    // Bloqueo FOR UPDATE de la cuenta antes de contar (BAJO-4 de CN-20261001-036).
+    $queryRaw: vi.fn(async () => []),
     currencyMovement,
     currencyAccount,
     user: {
@@ -213,6 +216,27 @@ describe('DELETE /api/admin/workers/:id', () => {
     expect(response.body).toEqual({ error: 'CURRENCY_LEDGER_RETAINED' });
     expect(documents.remove).not.toHaveBeenCalled();
     expect(prisma.user.delete).not.toHaveBeenCalled();
+  });
+
+  it('maps a PostgreSQL restrict violation (23001, unknown to Prisma) to 409', async () => {
+    const restrict = (constraint: string) => new Prisma.PrismaClientUnknownRequestError(
+      `Raw query failed. Code: 23001. Message: update or delete on table "User" violates RESTRICT setting of foreign key constraint "${constraint}" on table "X"`,
+      { clientVersion: 'test' },
+    );
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const run = async (constraint: string) => {
+      const prisma = fakePrisma({ users: [{ id: 'worker-1', role: 'WORKER' }] });
+      prisma.user.delete.mockRejectedValueOnce(restrict(constraint));
+      const app = buildApp(prisma, fakeDocumentStorage(), { [admin.token]: admin });
+      return request(app).delete('/api/admin/workers/worker-1').set('Authorization', `Bearer ${admin.token}`);
+    };
+
+    const currencyRace = await run('CurrencyAccount_workerId_fkey');
+    expect(currencyRace.status).toBe(409);
+    expect(currencyRace.body).toEqual({ error: 'CURRENCY_LEDGER_RETAINED' });
+    const otherRestrict = await run('Shift_companyId_fkey');
+    expect(otherRestrict.status).toBe(409);
+    expect(otherRestrict.body).toEqual({ error: 'RELATED_RECORDS_EXIST' });
   });
 
   it('deletes a worker without documents without attempting any file cleanup', async () => {

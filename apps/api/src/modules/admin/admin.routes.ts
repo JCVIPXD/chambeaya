@@ -26,12 +26,27 @@ class LedgerRetainedError extends Error {
   }
 }
 
+/**
+ * Una FK `RESTRICT` rechaza el borrado con SQLSTATE 23001 (`restrict_violation`),
+ * que Prisma no traduce a `P2003`: llega como error desconocido con el código
+ * y el nombre de la restricción en el mensaje (BAJO-4 de CN-20261001-036). Se
+ * reconoce también el `P2003` que producen las FK `NO ACTION`.
+ */
+function isRestrictViolation(error: unknown) {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) return error.code === "P2003";
+  if (error instanceof Prisma.PrismaClientUnknownRequestError) {
+    return /23001|restrict_violation|violates RESTRICT setting/i.test(error.message);
+  }
+  return false;
+}
+
 function isCurrencyForeignKeyViolation(error: unknown) {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    error.code === "P2003" &&
-    JSON.stringify(error.meta ?? {}).includes("Currency")
-  );
+  if (!isRestrictViolation(error)) return false;
+  const detail =
+    error instanceof Prisma.PrismaClientKnownRequestError
+      ? JSON.stringify(error.meta ?? {})
+      : (error as Error).message;
+  return detail.includes("Currency");
 }
 
 function bearerToken(value: string | undefined) {
@@ -164,10 +179,7 @@ export function createAdminRouter(
         response.status(409).json({ error: LEDGER_RETAINED });
         return;
       }
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === "P2003"
-      ) {
+      if (isRestrictViolation(error)) {
         response.status(409).json({ error: "RELATED_RECORDS_EXIST" });
         return;
       }
@@ -309,6 +321,9 @@ export function createAdminRouter(
         return;
       }
       await prisma.$transaction(async (tx) => {
+        // Bloquea la cuenta antes de contar: un ajuste que ya la tenga bloqueada
+        // termina primero y su movimiento se ve en el conteo (BAJO-4).
+        await tx.$queryRaw`SELECT "id" FROM "CurrencyAccount" WHERE "companyId" = ${company.id} FOR UPDATE`;
         const movements = await tx.currencyMovement.count({
           where: { account: { companyId: company.id } },
         });
@@ -362,6 +377,7 @@ export function createAdminRouter(
       // almacenamiento falla tras confirmar, solo quedan archivos huérfanos
       // sin fila que los referencie, que es el fallo recuperable.
       await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "CurrencyAccount" WHERE "workerId" = ${request.params.id} FOR UPDATE`;
         const movements = await tx.currencyMovement.count({
           where: { account: { workerId: request.params.id } },
         });
