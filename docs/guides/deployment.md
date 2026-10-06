@@ -527,6 +527,15 @@ revisar y ajustar los valores con `PATCH /api/admin/currency/catalog/:entryId`
 antes de conectar acciones (M4). Ver
 [Catálogo de costos y premios](../reference/api.md#catálogo-de-costos-y-premios-m2).
 
+La migración `20261006100000_job_postings` (M3, `CN-20261006-039`) solo agrega
+enums, las tablas `JobPosting`, `JobApplication`, `JobOffer`, `JobOfferUpload` y
+`JobApplicationEvent`, restricciones `CHECK`, un índice único parcial y un
+trigger que impide modificar una oferta aceptada. No toca tablas existentes y
+no necesita variables nuevas. Los PDF de las ofertas se guardan en el mismo
+almacenamiento privado de documentos (`DOCUMENT_STORAGE_ROOT`): el volumen debe
+ser persistente y entrar en la copia de respaldo. Ver
+[Puestos fijos y embudo de selección](../reference/api.md#puestos-fijos-y-embudo-de-selección-m3).
+
 ## Actualizar una versión
 
 ```bash

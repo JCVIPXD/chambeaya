@@ -19,6 +19,10 @@ import { temporaryShiftsEnabled } from './modules/temporary-shifts.js';
 import { createAdminCurrencyRouter, createBusinessCurrencyRouter, createWorkerCurrencyRouter } from './modules/currency/currency.routes.js';
 import { CurrencyCatalogService, type CurrencyUsageCounter } from './modules/currency/currency.catalog.service.js';
 import { CurrencyLedgerService } from './modules/currency/currency.service.js';
+import { createBusinessJobsRouter, createJobEventsRouter, createWorkerJobsRouter } from './modules/jobs/jobs.routes.js';
+import { JobService, type JobHooks } from './modules/jobs/jobs.service.js';
+import { jobEvents, type JobEvents } from './modules/jobs/jobs.events.js';
+import type { PrivateDocumentStorage } from './modules/talent/private_document_storage.js';
 
 const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_AUTH_RATE_LIMIT_MAX = 20;
@@ -100,6 +104,11 @@ export function createApp(options: {
   currencyPrisma?: PrismaClient;
   /** Contador de usos de acciones del catálogo (M4); por defecto nadie consume cuota. */
   currencyUsageCounter?: CurrencyUsageCounter;
+  /** Cliente, almacenamiento, ganchos (M4) y bus de avisos de los puestos fijos (M3). */
+  jobsPrisma?: PrismaClient;
+  jobsStorage?: PrivateDocumentStorage;
+  jobsHooks?: JobHooks;
+  jobsEvents?: JobEvents;
   /** Habilita el flujo legado de turnos temporales. Por defecto se toma de
    * `TEMPORARY_SHIFTS_ENABLED`, apagado salvo valor literal `true`. */
   temporaryShiftsEnabled?: boolean;
@@ -111,6 +120,7 @@ export function createApp(options: {
   const currencyPrisma = options.currencyPrisma ?? new PrismaClient();
   const currencyLedger = new CurrencyLedgerService(currencyPrisma);
   const currencyCatalog = new CurrencyCatalogService(currencyPrisma, options.currencyUsageCounter);
+  const jobsService = new JobService(options.jobsPrisma ?? new PrismaClient(), { storage: options.jobsStorage, hooks: options.jobsHooks, events: options.jobsEvents });
   const legacyShiftsEnabled = options.temporaryShiftsEnabled ?? temporaryShiftsEnabled();
 
   const authRateLimiter =
@@ -165,6 +175,9 @@ export function createApp(options: {
   app.use('/api/auth', createAuthRouter(authService, { rateLimiter: authRateLimiter }));
   app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish(), legacyShiftsEnabled));
   app.use('/api/business', createBusinessCurrencyRouter(authService, currencyLedger, currencyCatalog));
+  app.use('/api/business', createBusinessJobsRouter(authService, jobsService));
+  app.use('/api/workers', createWorkerJobsRouter(authService, jobsService));
+  app.use('/api', createJobEventsRouter(authService, options.jobsEvents ?? jobEvents));
   app.use('/api/admin', createAdminRouter(authService));
   app.use('/api/admin', createAdminCurrencyRouter(authService, currencyLedger, currencyCatalog));
   // Checkout simulado (Alcance E): sesión BUSINESS normal, después de

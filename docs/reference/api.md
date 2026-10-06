@@ -198,6 +198,180 @@ devolución en `REWARD`) y la siembra de los valores **provisionales** (ver
 `User`; las pruebas de integración lo restablecen desde
 `DEFAULT_CURRENCY_CATALOG`.
 
+## Puestos fijos y embudo de selección (M3)
+
+Flujo principal del producto nuevo; no usa ni modifica los turnos temporales
+(siguen detrás de `TEMPORARY_SHIFTS_ENABLED`). Solo API: sin interfaz web ni
+Flutter (M5) y sin cobrar ni devolver monedas (M4). Código en
+`apps/api/src/modules/jobs/` (máquina de estados en `job-state.ts`).
+
+Los valores de los enums van en inglés, como el resto del esquema:
+
+| Término de producto | Valor |
+| --- | --- |
+| Borrador, publicado, pausado, cerrado, cubierto | `DRAFT`, `PUBLISHED`, `PAUSED`, `CLOSED`, `FILLED` |
+| Postulado, preseleccionado, entrevista, oferta, aceptada, contratado | `APPLIED`, `SHORTLISTED`, `INTERVIEW`, `OFFER`, `ACCEPTED`, `HIRED` |
+| Rechazado, retirado | `REJECTED`, `WITHDRAWN` |
+| Presencial, remoto, híbrido | `ONSITE`, `REMOTE`, `HYBRID` |
+| Tiempo completo, parcial | `FULL_TIME`, `PART_TIME` |
+| Plazo indefinido, plazo fijo, prácticas, otro | `INDEFINITE`, `FIXED_TERM`, `INTERNSHIP`, `OTHER` |
+
+### Reglas comunes
+
+- Sesión Bearer. `403 BUSINESS_ACCOUNT_REQUIRED` / `WORKER_ACCOUNT_REQUIRED` si el
+  rol no corresponde; `401 INVALID_SESSION` sin sesión. La empresa se resuelve por
+  el dueño de la sesión: ningún cuerpo ni ruta acepta `companyId` ni `workerId`.
+- Aislamiento: un recurso de otra empresa o de otro trabajador responde `404`
+  (`JOB_POSTING_NOT_FOUND`, `JOB_APPLICATION_NOT_FOUND`, `JOB_OFFER_NOT_FOUND`),
+  igual que uno inexistente. Un borrador no existe para los trabajadores.
+- Validación estricta (`400 INVALID_INPUT` con `issues`): cuerpos `.strict()`
+  (cualquier campo extra, como `status`, `companyId` o `filledVacancies`, se
+  rechaza), textos con longitud máxima, enteros acotados. Dinero siempre en
+  céntimos de la moneda del puesto (`PEN`).
+- Paginación: `limit` 1 a 100 (25 por defecto) y `cursor` opaco devuelto en
+  `nextCursor` (`null` al final). Cursor inválido: `400 INVALID_CURSOR`.
+- Todas las escrituras corren en `Serializable` con reintento (como el resto del
+  código) sobre filas bloqueadas con `FOR UPDATE`. Orden de bloqueo: postulación
+  y después puesto. Repetir una petición que ya tuvo efecto responde `200` con
+  `idempotent: true` y no escribe de nuevo; un conflicto real responde `409`.
+- Errores `409` frecuentes: `INVALID_STATE_TRANSITION` (con `status` actual y
+  `requested`), `POSTING_NOT_PUBLISHED`, `POSTING_NOT_OPEN`, `POSTING_FILLED`,
+  `POSTING_NOT_EDITABLE`, `POSTING_HAS_APPLICATIONS`, `ALREADY_APPLIED`,
+  `OFFER_NOT_PENDING`, `TOO_MANY_PENDING_UPLOADS`.
+
+### Estados del puesto
+
+`DRAFT → PUBLISHED ⇄ PAUSED → CLOSED`; `PUBLISHED`/`PAUSED → FILLED` solo por la
+última contratación confirmada (no hay ruta pública). `CLOSED` y `FILLED` son
+terminales. Un puesto solo se edita en `DRAFT` o `PAUSED` (`409
+POSTING_NOT_EDITABLE`); las preguntas de filtro no cambian si ya hay
+postulaciones (`409 POSTING_HAS_APPLICATIONS`); `vacancies` no baja de lo ya
+cubierto ni lo igualan (`400 VACANCIES_BELOW_FILLED`): mientras el puesto siga
+abierto el total debe superar lo cubierto; para cerrar un puesto cubierto se usa
+la transición a `FILLED`/`CLOSED`. Publicar o postular exige al menos una
+vacante libre (`409 POSTING_FILLED`). Solo un puesto `PUBLISHED` recibe
+postulaciones y aparece en la búsqueda. `filledVacancies` es derivado: lo
+incrementa únicamente la confirmación de una contratación, en la misma
+transacción, con `UPDATE ... WHERE filledVacancies < vacancies` y
+`CHECK (filledVacancies <= vacancies)`.
+
+Al pasar a `CLOSED` (cierre manual) o `FILLED` (última contratación), en la
+misma transacción cada postulación en `OFFER` con oferta `PENDING` retira esa
+oferta (`WITHDRAWN`) y pasa a `REJECTED`. La línea de tiempo registra un
+evento `REJECTED` con detalle `POSTING_CLOSED` o `POSTING_FILLED` (el
+trabajador no ve el detalle de un `REJECTED`, pero sí el estado del puesto) y
+se emite el aviso SSE al trabajador. Las demás postulaciones abiertas
+(`APPLIED`, `SHORTLISTED`, `INTERVIEW`, `ACCEPTED`) no se tocan: una
+postulación `ACCEPTED` sin contratar queda así, sin aviso, sobre un puesto
+`CLOSED`/`FILLED` (no se puede contratar, `409`; la empresa puede rechazarla).
+Si el cierre o la última contratación compiten con una aceptación o una oferta
+simultáneas, `Serializable` decide un solo orden: o la aceptación gana y queda
+`ACCEPTED`, o pierde con `409` y la postulación queda `REJECTED` con la oferta
+`WITHDRAWN`; nunca queda una oferta `PENDING` en un puesto cerrado o cubierto.
+
+Pendiente de decisión de producto (sin cambio en código): el DNI visible para la
+empresa en la constancia de aceptación y el borrado en cascada de la constancia
+al eliminar una cuenta.
+
+### Embudo de la postulación
+
+`APPLIED → SHORTLISTED → INTERVIEW → OFFER → ACCEPTED → HIRED`, con salidas
+`REJECTED` (decide la empresa) y `WITHDRAWN` (decide el trabajador). La empresa
+puede saltarse etapas hacia `INTERVIEW` u `OFFER` y nunca retrocede; el
+trabajador solo se retira o acepta la oferta vigente; `ACCEPTED → HIRED` solo
+lo confirma la empresa. `HIRED`, `REJECTED` y `WITHDRAWN` son terminales. La
+tabla de transiciones por actor está en `job-state.ts`.
+
+### Empresa (`/api/business`)
+
+| Ruta | Efecto |
+| --- | --- |
+| `POST /job-postings` | Crea un borrador (`201`). Campos: `title` (5-120), `description` (20-5000), `responsibilities`/`requirements`/`benefits` (opcionales, hasta 3000), `modality`, `workload`, `salaryMinCents`/`salaryMaxCents` (1 a 10 000 000, mínimo <= máximo, `400 INVALID_SALARY_RANGE`), `location`, `contractType`, `expectedStartDate` (`YYYY-MM-DD`, no pasada en Lima), `vacancies` (1-500), `screeningQuestions` (hasta 5, 10-240 caracteres, sin repetidas). |
+| `GET /job-postings?status=&limit=&cursor=` | Mis puestos, con `applicationsCount`. |
+| `GET /job-postings/:id` | Detalle con `applicantCounts` por etapa. |
+| `PATCH /job-postings/:id` | Edita un borrador o puesto en pausa; al menos un campo. |
+| `POST /job-postings/:id/publish` / `pause` / `close` | Cambia el estado (idempotente). Publicar guarda `publishedAt` la primera vez. |
+| `GET /job-postings/:id/applications?status=APPLIED,SHORTLISTED&limit=&cursor=` | Postulantes (filtro por una o varias etapas): nombre, titular y distrito del perfil, `hasCv`, entrevista y estado de la última oferta. Nunca correo ni teléfono; el número de DNI solo aparece, tras la aceptación, dentro de `acceptanceSnapshot` (ver Constancia de aceptación). |
+| `GET /job-applications/:id` | Detalle: respuestas de filtro, ofertas (todas las versiones), línea de tiempo y motivo de decisión. |
+| `POST /job-applications/:id/stage` `{status}` | `SHORTLISTED` o `INTERVIEW` (sin fecha). La oferta, la contratación y el rechazo tienen su propia ruta. |
+| `POST /job-applications/:id/interview` `{scheduledAt, mode?, note?}` | Programa o reprograma la entrevista (`mode`: `ONSITE`/`VIDEO`/`PHONE`); la fecha debe ser futura y de hasta un año (`400 INVALID_INTERVIEW_DATE`). Pasa a `INTERVIEW`. |
+| `PUT /job-applications/:id/offer-documents` | Sube el PDF de la oferta (cuerpo binario `application/pdf`, hasta 5 MB, cabecera `X-File-Name` con extensión `.pdf`, firma `%PDF-` verificada; `400 INVALID_OFFER_DOCUMENT`, `413 OFFER_DOCUMENT_TOO_LARGE`). Devuelve `{id, name, mediaType, sizeBytes, sha256}`. Se guarda en el almacenamiento privado; hasta 5 sin usar por postulación. |
+| `POST /job-applications/:id/offers` `{salaryCents, contractType, startDate, note?, documentId?}` | Emite una oferta (`201`) y pasa a `OFFER`. Una oferta nueva crea la versión siguiente y deja la pendiente en `SUPERSEDED`. Reenviar una oferta idéntica a la pendiente responde `200` sin versión nueva. `documentId` consume el PDF subido (`400 OFFER_DOCUMENT_NOT_AVAILABLE` si no existe, es de otra postulación o ya se usó). Fecha de ingreso no pasada (Lima). |
+| `POST /job-applications/:id/hire` | Confirma la contratación de una postulación `ACCEPTED`: la pasa a `HIRED`, suma una vacante cubierta y, al llenarse, deja el puesto en `FILLED`. Dos confirmaciones simultáneas por la última vacante: una responde `200` y la otra `409 POSTING_FILLED`. |
+| `POST /job-applications/:id/reject` `{reason?}` | Rechaza (`REJECTED`) desde cualquier etapa abierta, incluida `ACCEPTED`; una oferta pendiente queda `WITHDRAWN`. El motivo (hasta 500) es interno: el trabajador no lo ve. |
+| `GET /job-applications/:id/cv` | CV del postulante (PDF, `no-store`) solo mientras siga en proceso (no `REJECTED`/`WITHDRAWN`) y su perfil sea visible; si no, `404 JOB_DOCUMENT_NOT_FOUND`. |
+| `GET /job-applications/:id/offers/:offerId/document` | PDF de la oferta; `404 JOB_DOCUMENT_NOT_FOUND` si esa versión no tiene documento. |
+
+Con el puesto `CLOSED` o `FILLED` la empresa ya no avanza, programa ni ofrece
+(`409 POSTING_NOT_OPEN`) ni contrata, pero sí puede rechazar.
+
+### Trabajador (`/api/workers`)
+
+| Ruta | Efecto |
+| --- | --- |
+| `GET /job-postings?query=&modality=&workload=&contractType=&minSalaryCents=&location=&limit=&cursor=` | Busca puestos `PUBLISHED`, del más reciente al más antiguo. `minSalaryCents` exige que el máximo del rango lo alcance; `query`/`location` no distinguen mayúsculas. Cada puesto trae `vacanciesRemaining`, `company.name` y `myApplication`. No expone `vacancies`, `filledVacancies` ni datos de otros candidatos. |
+| `GET /job-postings/:id` | Detalle público (`404` si no está publicado). |
+| `POST /job-postings/:id/applications` `{answers:[{question, answer}]}` | Postula (`201`). Debe responder exactamente las preguntas de filtro (`400 INVALID_SCREENING_ANSWERS`). Repetir mientras sigue `APPLIED` responde `200` con la misma postulación; en otro estado, `409 ALREADY_APPLIED` con su `status` (no se puede volver a postular tras retirarse o ser rechazado). Seis envíos simultáneos crean una sola. Puesto no publicado: `409 POSTING_NOT_PUBLISHED`; cubierto: `409 POSTING_FILLED`. |
+| `GET /job-applications?status=&limit=&cursor=` | Mis postulaciones. |
+| `GET /job-applications/:id` | Detalle propio: puesto, entrevista, `currentOfferId`, ofertas con su constancia y línea de tiempo (sin el motivo de rechazo). |
+| `POST /job-applications/:id/withdraw` | Se retira (`WITHDRAWN`) desde cualquier etapa abierta, también tras aceptar la oferta si aún no la contrataron. |
+| `POST /job-applications/:id/offers/:offerId/accept` | Acepta la oferta vigente (`PENDING`): oferta `ACCEPTED`, postulación `ACCEPTED` y constancia. Una versión reemplazada responde `409 OFFER_NOT_PENDING`. |
+| `POST /job-applications/:id/offers/:offerId/decline` | Rechaza la oferta: oferta `DECLINED` y postulación `WITHDRAWN` (rechazar una oferta es una retirada del trabajador; `REJECTED` es siempre decisión de la empresa), con el evento `OFFER_DECLINED`. |
+| `GET /job-applications/:id/offers/:offerId/document` | PDF de la oferta propia. |
+
+### Constancia de aceptación
+
+Al aceptar se guarda `acceptanceSnapshot` en la oferta: fecha de aceptación,
+versión, empresa (nombre, razón social, RUC), trabajador (nombre y número de DNI,
+visibles para la empresa desde ese momento),
+puesto (título, modalidad, jornada, lugar, rango), condiciones ofrecidas
+(salario, moneda, tipo de contrato, fecha de ingreso, nota) y metadatos y
+`sha256` del documento adjunto. Un trigger de PostgreSQL
+(`JobOffer_accepted_is_immutable`) rechaza cualquier `UPDATE` posterior de una
+oferta `ACCEPTED`; emitir una oferta nueva sobre una postulación aceptada da
+`409`. El borrado solo ocurre por cascada al eliminar la postulación, el puesto
+o la cuenta. La firma digital y la integración con planilla siguen fuera de alcance.
+
+### Línea de tiempo y avisos en tiempo real
+
+Cada cambio escribe un `JobApplicationEvent` (quién, qué, estado anterior y
+nuevo, cuándo; el autor pasa a nulo si se borra la cuenta). Tipos: `APPLIED`,
+`SHORTLISTED`, `INTERVIEW_SCHEDULED`, `OFFER_ISSUED`, `OFFER_ACCEPTED`,
+`OFFER_DECLINED`, `HIRED`, `REJECTED`, `WITHDRAWN`.
+
+`GET /api/job-events` (cualquier sesión válida) es un flujo SSE con el mismo
+patrón del feed de turnos. Tras confirmar cada cambio, el servicio avisa solo a
+la contraparte con `event: job` y `{type, applicationId, postingId, status, at}`.
+El bus es en proceso: con varias instancias de la API el aviso solo llega a los
+clientes conectados a la instancia que atendió el cambio (igual que el feed de turnos).
+
+### Puntos de extensión para M4
+
+`JobService` acepta `JobHooks` (`beforePublish`, `beforeApply`, `afterHire`) que se
+ejecutan dentro de la transacción de la operación con el cliente transaccional:
+si M4 cobra o premia allí y el gancho lanza, toda la operación se revierte (el
+cliente recibe `500 INTERNAL_ERROR` mientras M4 no traduzca sus errores). Como la
+operación se reintenta ante conflictos de `Serializable`, un gancho puede
+ejecutarse más de una vez: solo debe escribir con `tx` y nunca producir efectos
+fuera de la base. Por
+defecto no hacen nada.
+
+### Diferido
+
+- Chat de la postulación: `Conversation` exige un `CompanyWorkerContact`
+  (directorio de la empresa) y está atada a turnos; reutilizarla obliga a
+  crear contactos y a ampliar el modelo, así que se difiere a M5.
+- Interfaces web y Flutter (M5), cobro de monedas (M4) y firma digital.
+- Los PDF de ofertas no se borran del almacenamiento privado al eliminar una
+  cuenta, un puesto o una postulación (quedan archivos huérfanos; las filas sí
+  se eliminan en cascada).
+
+**Migración `20261006100000_job_postings`** (solo agrega): enums, tablas
+`JobPosting`, `JobApplication`, `JobOffer`, `JobOfferUpload` y
+`JobApplicationEvent`; `CHECK` de rango salarial, vacantes y salario ofertado;
+índice único parcial (una oferta abierta o aceptada por postulación) y el
+trigger de inmutabilidad.
+
 ## Superadmin: cuentas empresariales
 
 Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar el alta de empresas que ya entregaron sus datos a Chambeaya:

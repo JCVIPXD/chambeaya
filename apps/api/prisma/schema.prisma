@@ -203,6 +203,8 @@ model User {
   documents     WorkerDocument[]
   externalIdentities ExternalIdentity[]
   talentInvitationsCreated TalentInvitation[] @relation("TalentInvitationCreatedBy")
+  jobApplications JobApplication[] @relation("JobApplicationWorker")
+  jobApplicationEvents JobApplicationEvent[] @relation("JobApplicationEventActor")
   platformSettingsUpdates PlatformSettings[] @relation("PlatformSettingsUpdatedBy")
   platformSettingChanges PlatformSettingChange[] @relation("PlatformSettingChangedBy")
   /// Alcance D, corrección de MEDIO-1 de `CN-20260926-020`: quién cerró cada
@@ -230,6 +232,7 @@ model Company {
   subscription  CompanySubscription?
   currencyAccount CurrencyAccount? @relation("CompanyCurrencyAccount")
   talentInvitations TalentInvitation[]
+  jobPostings   JobPosting[]
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
 }
@@ -921,4 +924,199 @@ model CurrencyCatalogChange {
   createdAt   DateTime             @default(now())
 
   @@index([entryId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// M3: puestos fijos formales y embudo de selección. Valores en inglés, igual
+// que el resto del esquema (el mapeo a los términos de producto está en
+// `docs/reference/api.md`). No tocan los turnos temporales.
+// ---------------------------------------------------------------------------
+
+enum JobPostingStatus {
+  DRAFT
+  PUBLISHED
+  PAUSED
+  CLOSED
+  /// Todas las vacantes están cubiertas por contrataciones confirmadas.
+  FILLED
+}
+
+enum JobModality {
+  ONSITE
+  REMOTE
+  HYBRID
+}
+
+enum JobWorkload {
+  FULL_TIME
+  PART_TIME
+}
+
+enum JobContractType {
+  INDEFINITE
+  FIXED_TERM
+  INTERNSHIP
+  OTHER
+}
+
+/// Embudo: APPLIED, SHORTLISTED, INTERVIEW, OFFER, ACCEPTED, HIRED; salidas
+/// REJECTED (decide la empresa) y WITHDRAWN (decide el trabajador, también al
+/// rechazar una oferta). La máquina de estados vive en
+/// `modules/jobs/job-application-state.ts`.
+enum JobApplicationStatus {
+  APPLIED
+  SHORTLISTED
+  INTERVIEW
+  OFFER
+  ACCEPTED
+  HIRED
+  REJECTED
+  WITHDRAWN
+}
+
+enum JobInterviewMode {
+  ONSITE
+  VIDEO
+  PHONE
+}
+
+enum JobOfferStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  /// Reemplazada por una versión nueva antes de ser respondida.
+  SUPERSEDED
+  /// La empresa descartó al candidato con la oferta aún sin responder.
+  WITHDRAWN
+}
+
+enum JobApplicationEventType {
+  APPLIED
+  SHORTLISTED
+  INTERVIEW_SCHEDULED
+  OFFER_ISSUED
+  OFFER_ACCEPTED
+  OFFER_DECLINED
+  HIRED
+  REJECTED
+  WITHDRAWN
+}
+
+model JobPosting {
+  id                 String           @id @default(cuid())
+  companyId          String
+  company            Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title              String
+  description        String
+  responsibilities   String?
+  requirements       String?
+  benefits           String?
+  modality           JobModality
+  workload           JobWorkload
+  /// Rango salarial MENSUAL en céntimos de `currency`, visible al candidato.
+  salaryMinCents     Int
+  salaryMaxCents     Int
+  currency           String           @default("PEN")
+  location           String
+  contractType       JobContractType
+  expectedStartDate  DateTime?
+  vacancies          Int
+  /// Derivado: solo lo incrementa la confirmación de una contratación
+  /// (`HIRED`), en la misma transacción que la hace. Ninguna ruta lo edita.
+  /// `CHECK (filledVacancies <= vacancies)` en la migración.
+  filledVacancies    Int              @default(0)
+  screeningQuestions Json?
+  status             JobPostingStatus @default(DRAFT)
+  publishedAt        DateTime?
+  closedAt           DateTime?
+  applications       JobApplication[]
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([companyId, status])
+  @@index([status, publishedAt, id])
+}
+
+model JobApplication {
+  id               String               @id @default(cuid())
+  postingId        String
+  posting          JobPosting           @relation(fields: [postingId], references: [id], onDelete: Cascade)
+  workerId         String
+  worker           User                 @relation("JobApplicationWorker", fields: [workerId], references: [id], onDelete: Cascade)
+  status           JobApplicationStatus @default(APPLIED)
+  screeningAnswers Json?
+  interviewAt      DateTime?
+  interviewMode    JobInterviewMode?
+  interviewNote    String?
+  decisionReason   String?
+  hiredAt          DateTime?
+  offers           JobOffer[]
+  uploads          JobOfferUpload[]
+  events           JobApplicationEvent[]
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  @@unique([postingId, workerId])
+  @@index([workerId, status])
+  @@index([postingId, status])
+}
+
+/// Oferta versionada. Una nueva oferta crea una versión nueva y marca la
+/// anterior `SUPERSEDED`. Al aceptarse se guarda `acceptanceSnapshot` y un
+/// trigger de la migración impide cualquier `UPDATE` posterior de la fila.
+model JobOffer {
+  id                 String           @id @default(cuid())
+  applicationId      String
+  application        JobApplication   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  version            Int
+  status             JobOfferStatus   @default(PENDING)
+  salaryCents        Int
+  currency           String           @default("PEN")
+  contractType       JobContractType
+  startDate          DateTime
+  note               String?
+  documentStorageKey String?          @unique
+  documentName       String?
+  documentMediaType  String?
+  documentSizeBytes  Int?
+  documentSha256     String?
+  respondedAt        DateTime?
+  acceptanceSnapshot Json?
+  createdAt          DateTime         @default(now())
+
+  @@unique([applicationId, version])
+}
+
+/// Documento PDF subido por la empresa antes de emitir la oferta. Se consume
+/// (`consumedAt`) al emitirla; el archivo vive en el almacenamiento privado.
+model JobOfferUpload {
+  id            String         @id @default(cuid())
+  applicationId String
+  application   JobApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  storageKey    String         @unique
+  originalName  String
+  mediaType     String
+  sizeBytes     Int
+  sha256        String
+  consumedAt    DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@index([applicationId, consumedAt])
+}
+
+model JobApplicationEvent {
+  id            String                  @id @default(cuid())
+  applicationId String
+  application   JobApplication          @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  actorId       String?
+  actor         User?                   @relation("JobApplicationEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole     ShiftEventActorRole
+  type          JobApplicationEventType
+  fromStatus    JobApplicationStatus?
+  toStatus      JobApplicationStatus?
+  detail        String?
+  createdAt     DateTime                @default(now())
+
+  @@index([applicationId, createdAt])
+  @@index([actorId, createdAt])
 }

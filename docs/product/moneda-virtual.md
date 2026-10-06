@@ -117,6 +117,34 @@ acepta en la plataforma y queda constancia con fecha, condiciones y documento
 adjunto. La **firma digital** y la integración con planilla son una etapa
 posterior.
 
+Decisiones de producto del diseño de M3 (detalle técnico en
+[api.md](../reference/api.md#puestos-fijos-y-embudo-de-selección-m3)):
+
+- El trabajador que rechaza una oferta sale como **Retirado**: **Rechazado**
+  es siempre una decisión de la empresa. El motivo del rechazo es una nota
+  interna que el trabajador no ve.
+- Las **vacantes cubiertas** no se editan: solo suben con cada contratación
+  confirmada; al llenarse, el puesto pasa a **Cubierto** y deja de recibir
+  postulaciones.
+- Una oferta nueva crea una **versión**; al aceptarse, las condiciones quedan
+  congeladas (constancia con fecha, empresa, trabajador, condiciones y huella
+  del documento adjunto) y no se pueden modificar.
+- Un trabajador que se retiró o fue rechazado no puede volver a postular al
+  mismo puesto.
+- El total de vacantes de un puesto abierto siempre supera lo cubierto: no se
+  puede bajar hasta igualarlo, y publicar o postular exige una vacante libre.
+- Al **cerrar** o **cubrir** un puesto, las ofertas sin responder se retiran y
+  esas postulaciones pasan a **Rechazado**, con aviso al trabajador
+  (interpretación a confirmar). Las demás postulaciones abiertas no cambian; en
+  particular, una oferta ya **aceptada** y no contratada queda en **Aceptada**
+  sobre un puesto cerrado o cubierto, sin aviso, y la empresa debe rechazarla a
+  mano (la interfaz de M5 debe mostrarlo).
+- Pendientes de decisión del dueño del producto: que la empresa vea el número
+  de DNI del trabajador en la constancia de aceptación (y si eso debe costar
+  moneda en M4), y que la constancia se borre en cascada al eliminar la cuenta
+  del trabajador o de la empresa (a validar con el criterio legal de abajo).
+- El chat de la postulación y las interfaces quedan para M5.
+
 **Riesgo legal a validar antes de operar:** al intermediar empleo formal,
 Chambeaya puede quedar bajo el marco peruano de agencias y bolsas de empleo y
 sus obligaciones, y la contratación laboral (contrato, planilla, T-Registro)
