@@ -536,6 +536,50 @@ almacenamiento privado de documentos (`DOCUMENT_STORAGE_ROOT`): el volumen debe
 ser persistente y entrar en la copia de respaldo. Ver
 [Puestos fijos y embudo de selección](../reference/api.md#puestos-fijos-y-embudo-de-selección-m3).
 
+La migración `20261007100000_currency_actions` (M4, `CN-20261007-043`) agrega
+tablas, columnas y valores de enum, siembra tres ajustes provisionales (tope de
+gasto diario y duración del destacado), rellena `autoClosedReason` en las
+postulaciones que M3 ya había cerrado y cambia a `RESTRICT` las FK de
+`JobPosting.companyId`, `JobApplication.postingId` y `JobApplication.workerId`.
+No borra filas; la aplica `prisma migrate deploy`. Desde M4 la API cobra
+monedas al publicar más allá de la cuota, postular más allá de la cuota,
+destacar, invitar y desbloquear contacto, y otorga el bono de bienvenida al
+registrar un trabajador o crear una empresa.
+
+- **Devolución automática.** Cada proceso de la API ejecuta una tarea en
+  segundo plano que devuelve los cobros vencidos sin respuesta. La variable
+  `CURRENCY_REFUND_INTERVAL_MS` fija el intervalo en milisegundos (por defecto
+  `300000`, 5 min; mínimo `1000`; `0`, `off` o `false` la desactivan). Es segura
+  con varias instancias (`FOR UPDATE SKIP LOCKED`). `POST
+  /api/admin/currency/refunds/run` ejecuta una pasada a mano. Cada devolución se
+  procesa en una transacción `Serializable` con reintento, de modo que un cobro
+  simultáneo sobre la misma cuenta no produce `500`. `docker-compose.yml` y
+  `docker-compose.production.yml` reenvían la variable al contenedor `api`
+  (vacía = valor por defecto) y figura en `.env.example` y
+  `.env.production.example` (`CN-20261007-045`).
+- **Cuentas anteriores a M4.** No reciben el bono automáticamente. Tras
+  actualizar, un administrador puede ejecutar `POST
+  /api/admin/currency/welcome-bonus/backfill` (idempotente). Una cuenta que ya tiene el
+  movimiento del bono se cuenta como «ya lo tenía» aunque el monto de
+  `WELCOME_BONUS` se haya editado después, y la pasada continúa con las demás
+  (`CN-20261007-045`).
+- **Borrado de cuentas.** El bono de bienvenida por sí solo no retiene el borrado:
+  `DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` responden
+  `204` si el único movimiento de la cuenta es el `WELCOME_BONUS`, y el bono
+  desaparece con la cuenta. La migración `20261007120000_welcome_bonus_deletable`
+  (solo reemplaza la función del trigger del libro; no toca filas) permite
+  borrar un movimiento `REWARD`/`WELCOME_BONUS` únicamente dentro de una
+  transacción que declara la cuenta con
+  `set_config('chambeaya.welcome_bonus_delete_account', <id>, true)` y solo si la
+  cuenta no tiene ningún otro movimiento; cualquier otro `DELETE` o `UPDATE` del
+  libro sigue fallando con `CURRENCY_MOVEMENT_APPEND_ONLY`. Con cualquier otro
+  movimiento (gasto, devolución, ajuste, otro premio) la respuesta sigue siendo
+  `409 CURRENCY_LEDGER_RETAINED`.
+  Una cuenta con una oferta de puesto fijo aceptada responde
+  `409 CONTRACT_RECORDS_RETAINED`.
+
+Ver [Acciones conectadas a la moneda virtual](../reference/api.md#acciones-conectadas-a-la-moneda-virtual-m4).
+
 ## Actualizar una versión
 
 ```bash

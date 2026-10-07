@@ -46,7 +46,7 @@ type FakeDocument = { id: string; userId: string; storageKey: string };
  * instance. It does not reproduce any other Prisma behaviour (errors, other
  * models, transactions).
  */
-function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[]; ledgerWorkerIds?: string[] } = {}) {
+function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[]; ledgerWorkerIds?: string[]; acceptedOffers?: number; offerFiles?: string[] } = {}) {
   const users = new Map(options.users?.map((user) => [user.id, user]) ?? []);
   const documents = [...(options.documents ?? [])];
   const applications: { id: string; workerId: string }[] = [
@@ -57,17 +57,30 @@ function fakePrisma(options: { users?: FakeUser[]; documents?: FakeDocument[]; l
   ];
 
   const ledgerWorkerIds = new Set(options.ledgerWorkerIds ?? []);
+  // El bono de bienvenida solo no retiene (CN-20261007-045): el conteo recibe `accountId` y excluye ese movimiento.
   const currencyMovement = {
-    count: vi.fn(async ({ where }: { where: { account: { workerId?: string } } }) =>
-      where.account.workerId && ledgerWorkerIds.has(where.account.workerId) ? 3 : 0),
+    count: vi.fn(async ({ where }: { where: { accountId: string } }) =>
+      ledgerWorkerIds.has(where.accountId.replace('account-', '')) ? 3 : 0),
+    deleteMany: vi.fn(async () => ({ count: 1 })),
   };
   const currencyAccount = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  // Registros de puestos (M4): sin ofertas aceptadas ni postulaciones que quitar.
+  const jobOffer = { count: vi.fn(async () => options.acceptedOffers ?? 0) };
+  const jobApplication = {
+    findMany: vi.fn(async () => (options.offerFiles ?? []).map((key) => ({ offers: [{ documentStorageKey: key }], uploads: [] }))),
+    deleteMany: vi.fn(async () => ({ count: 0 })),
+  };
+  const jobPosting = { deleteMany: vi.fn(async () => ({ count: 0 })) };
 
   const fake = {
     // Bloqueo FOR UPDATE de la cuenta antes de contar (BAJO-4 de CN-20261001-036).
-    $queryRaw: vi.fn(async () => []),
+    $queryRaw: vi.fn(async () => [{ id: 'account-worker-1' }]),
+    $executeRaw: vi.fn(async () => 1),
     currencyMovement,
     currencyAccount,
+    jobOffer,
+    jobApplication,
+    jobPosting,
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
         const found = users.get(where.id);
@@ -216,6 +229,44 @@ describe('DELETE /api/admin/workers/:id', () => {
     expect(response.body).toEqual({ error: 'CURRENCY_LEDGER_RETAINED' });
     expect(documents.remove).not.toHaveBeenCalled();
     expect(prisma.user.delete).not.toHaveBeenCalled();
+  });
+
+  it('blocks the delete with 409 CONTRACT_RECORDS_RETAINED when the worker has an accepted offer, deleting nothing', async () => {
+    const prisma = fakePrisma({
+      users: [{ id: 'worker-1', role: 'WORKER' }],
+      documents: [{ id: 'doc-cv', userId: 'worker-1', storageKey: 'cv-key.pdf' }],
+      acceptedOffers: 1,
+      offerFiles: ['offer-key.pdf'],
+    });
+    const documents = fakeDocumentStorage();
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const response = await request(buildApp(prisma, documents, { [admin.token]: admin })).delete('/api/admin/workers/worker-1').set('Authorization', `Bearer ${admin.token}`);
+    expect([response.status, response.body]).toEqual([409, { error: 'CONTRACT_RECORDS_RETAINED' }]);
+    expect(documents.remove).not.toHaveBeenCalled();
+    expect(prisma.user.delete).not.toHaveBeenCalled();
+    expect(prisma.jobApplication.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('removes the job records and their private files (after commit) of a worker without accepted offers', async () => {
+    const prisma = fakePrisma({ users: [{ id: 'worker-1', role: 'WORKER' }], offerFiles: ['offer-key.pdf'] });
+    const documents = fakeDocumentStorage();
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const response = await request(buildApp(prisma, documents, { [admin.token]: admin })).delete('/api/admin/workers/worker-1').set('Authorization', `Bearer ${admin.token}`);
+    expect(response.status).toBe(204);
+    expect(prisma.jobApplication.deleteMany).toHaveBeenCalledWith({ where: { workerId: 'worker-1' } });
+    expect(documents.remove).toHaveBeenCalledWith('offer-key.pdf');
+  });
+
+  it('maps a restrict violation on a job table (accepted offer racing the delete) to CONTRACT_RECORDS_RETAINED', async () => {
+    const restrict = new Prisma.PrismaClientUnknownRequestError(
+      'Raw query failed. Code: 23001. Message: update or delete on table "User" violates RESTRICT setting of foreign key constraint "JobApplication_workerId_fkey" on table "JobApplication"',
+      { clientVersion: 'test' },
+    );
+    const prisma = fakePrisma({ users: [{ id: 'worker-1', role: 'WORKER' }] });
+    prisma.user.delete.mockRejectedValueOnce(restrict);
+    const admin = session({ userId: 'admin-1', role: 'ADMIN' });
+    const response = await request(buildApp(prisma, fakeDocumentStorage(), { [admin.token]: admin })).delete('/api/admin/workers/worker-1').set('Authorization', `Bearer ${admin.token}`);
+    expect([response.status, response.body]).toEqual([409, { error: 'CONTRACT_RECORDS_RETAINED' }]);
   });
 
   it('maps a PostgreSQL restrict violation (23001, unknown to Prisma) to 409', async () => {

@@ -110,3 +110,18 @@ export function postingAllowsProgress(status: JobPostingStatus) {
 export function postingIsEditable(status: JobPostingStatus) {
   return status === 'DRAFT' || status === 'PAUSED';
 }
+
+/**
+ * Re-postulación flexible (decisión del dueño del producto): solo quien se
+ * retiró (`WITHDRAWN`, incluido el rechazo de una oferta) vuelve a postular al
+ * mismo puesto, y se reactiva la MISMA postulación. Quien fue rechazado por la
+ * empresa (`REJECTED`) o ya fue contratado no puede.
+ */
+export function canReopenApplication(status: JobApplicationStatus) {
+  return status === 'WITHDRAWN';
+}
+
+/** Una postulación con prioridad solo se marca mientras la empresa no la haya movido. */
+export function canPrioritizeApplication(status: JobApplicationStatus) {
+  return status === 'APPLIED';
+}

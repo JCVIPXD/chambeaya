@@ -6,8 +6,11 @@ import type { AuthSession } from '../auth/auth.service.js';
 import { validateScreeningAnswers, MarketplaceError } from '../marketplace/marketplace.service.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
 import { PrivateDocumentStorage } from '../talent/private_document_storage.js';
+import { readCurrencySetting } from '../currency/currency.settings.js';
 import {
   canIssueOffer,
+  canPrioritizeApplication,
+  canReopenApplication,
   canScheduleInterview,
   isTerminalApplication,
   postingAcceptsApplications,
@@ -63,6 +66,7 @@ export type OfferInput = {
   documentId?: string | null;
 };
 export type InterviewInput = { scheduledAt: Date; mode?: JobInterviewMode | null; note?: string | null };
+export type ApplicationListFilter = Page & { statuses?: JobApplicationStatus[]; history?: boolean };
 export type PostingSearch = Page & {
   query?: string;
   modality?: JobModality;
@@ -74,15 +78,26 @@ export type PostingSearch = Page & {
 
 export type DocumentDownload = { originalName: string; mediaType: string; bytes: Buffer };
 
+/** Resumen de un cobro de moneda hecho por un hook (M4); se devuelve al cliente en `charge`. */
+export type JobCharge = { amount: number; usedFreeQuota?: boolean; idempotent?: boolean };
+
 /**
- * Puntos de extensión para M4 (cobro y premios en moneda virtual). Se invocan
- * DENTRO de la transacción de la operación, con el cliente transaccional: si
- * M4 cobra y el hook lanza, toda la operación se revierte. M3 no cobra ni
- * devuelve nada; el valor por defecto no hace nada.
+ * Puntos de extensión de cobro y premios en moneda virtual (M4). Se invocan
+ * DENTRO de la transacción de la operación, con el cliente transaccional: si el
+ * hook cobra y lanza (saldo insuficiente, tope diario), toda la operación se
+ * revierte; si la operación falla después, el cobro se revierte con ella. Sin
+ * hooks (valor por defecto) nada se cobra.
+ *
+ * `beforeApply` se invoca justo DESPUÉS de crear o reabrir la postulación (hace
+ * falta su id para relacionar el cobro y su devolución) y antes de confirmar.
  */
 export interface JobHooks {
-  beforePublish?(context: { tx: Prisma.TransactionClient; userId: string; companyId: string; postingId: string; firstPublication: boolean }): Promise<void>;
-  beforeApply?(context: { tx: Prisma.TransactionClient; userId: string; postingId: string; companyId: string }): Promise<void>;
+  beforePublish?(context: { tx: Prisma.TransactionClient; userId: string; companyId: string; postingId: string; firstPublication: boolean }): Promise<JobCharge | void>;
+  beforeApply?(context: { tx: Prisma.TransactionClient; userId: string; postingId: string; companyId: string; applicationId: string; reopened: boolean }): Promise<JobCharge | void>;
+  /** Postulación con prioridad (acción opcional con costo). */
+  chargePriority?(context: { tx: Prisma.TransactionClient; userId: string; applicationId: string; postingId: string }): Promise<JobCharge | void>;
+  /** Destacar un puesto (acción opcional con costo). */
+  chargeHighlight?(context: { tx: Prisma.TransactionClient; userId: string; companyId: string; postingId: string }): Promise<JobCharge | void>;
   afterHire?(context: { tx: Prisma.TransactionClient; applicationId: string; postingId: string; companyId: string; workerId: string }): Promise<void>;
 }
 
@@ -93,17 +108,19 @@ const MAX_INTERVIEW_HORIZON_MS = 365 * 24 * 60 * 60 * 1000;
 // Utilidades
 // ---------------------------------------------------------------------------
 
-function encodeCursor(date: Date, id: string) {
-  return Buffer.from(JSON.stringify([date.toISOString(), id])).toString('base64url');
+/** `tag` identifica el segmento de un orden compuesto (prioridad: `P`/`N`; destacados: `H`/`N`). */
+function encodeCursor(date: Date, id: string, tag?: string) {
+  return Buffer.from(JSON.stringify(tag ? [date.toISOString(), id, tag] : [date.toISOString(), id])).toString('base64url');
 }
 
-function decodeCursor(cursor: string | undefined): { date: Date; id: string } | null {
+function decodeCursor(cursor: string | undefined): { date: Date; id: string; tag?: string } | null {
   if (!cursor) return null;
   try {
     const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
     if (Array.isArray(parsed) && typeof parsed[0] === 'string' && typeof parsed[1] === 'string') {
       const date = new Date(parsed[0]);
-      if (!Number.isNaN(date.getTime()) && parsed[1].length > 0 && parsed[1].length <= 128) return { date, id: parsed[1] };
+      const tag = parsed[2] === 'P' || parsed[2] === 'N' || parsed[2] === 'H' ? parsed[2] : undefined;
+      if (!Number.isNaN(date.getTime()) && parsed[1].length > 0 && parsed[1].length <= 128) return { date, id: parsed[1], ...(tag ? { tag } : {}) };
     }
   } catch { /* se informa abajo */ }
   throw new JobError('INVALID_CURSOR', 400);
@@ -215,6 +232,8 @@ function companyApplicantSummary(application: ApplicationRecord) {
     status: application.status,
     createdAt: application.createdAt,
     updatedAt: application.updatedAt,
+    isPriority: application.isPriority,
+    prioritizedAt: application.prioritizedAt,
     worker: {
       name: application.worker.name,
       headline: application.worker.talentProfile?.headline ?? null,
@@ -250,6 +269,10 @@ function workerApplicationView(application: ApplicationRecord) {
     status: application.status,
     createdAt: application.createdAt,
     updatedAt: application.updatedAt,
+    isPriority: application.isPriority,
+    prioritizedAt: application.prioritizedAt,
+    /** `POSTING_CLOSED`/`POSTING_FILLED` si el sistema la resolvió al cerrarse o cubrirse el puesto. */
+    autoClosedReason: application.autoClosedReason,
     posting: {
       id: application.posting.id,
       title: application.posting.title,
@@ -288,13 +311,14 @@ function companyPostingView(posting: Prisma.JobPostingGetPayload<object>, extras
     status: posting.status,
     publishedAt: posting.publishedAt,
     closedAt: posting.closedAt,
+    highlightedUntil: posting.highlightedUntil,
     createdAt: posting.createdAt,
     updatedAt: posting.updatedAt,
     ...extras,
   };
 }
 
-function publicPostingView(posting: PostingRecord, mine: { id: string; status: JobApplicationStatus } | null) {
+function publicPostingView(posting: PostingRecord, mine: { id: string; status: JobApplicationStatus } | null, now: Date) {
   return {
     id: posting.id,
     title: posting.title,
@@ -311,6 +335,7 @@ function publicPostingView(posting: PostingRecord, mine: { id: string; status: J
     vacanciesRemaining: posting.vacancies - posting.filledVacancies,
     screeningQuestions: readStringList(posting.screeningQuestions),
     publishedAt: posting.publishedAt,
+    isHighlighted: posting.highlightedUntil !== null && posting.highlightedUntil.getTime() > now.getTime(),
     company: { name: posting.company.name },
     myApplication: mine,
   };
@@ -434,12 +459,13 @@ export class JobService {
       const posting = await this.lockPosting(tx, postingId, company.id);
       const decision = resolvePostingTransition(posting.status, action);
       if (decision.kind === 'INVALID') throw new JobError('INVALID_STATE_TRANSITION', 409, { status: posting.status, requested: decision.to });
-      if (decision.kind === 'IDEMPOTENT') return { ...companyPostingView(posting), idempotent: true };
+      if (decision.kind === 'IDEMPOTENT') return { ...companyPostingView(posting), idempotent: true, chargedAmount: 0 };
       const now = this.now();
+      let charged = 0;
       if (action === 'PUBLISH') {
         if (!postingHasFreeVacancies(posting)) throw new JobError('POSTING_FILLED', 409);
-        // Punto de extensión de M4: cobrar publicaciones extra más allá de la cuota gratuita.
-        await this.hooks.beforePublish?.({ tx, userId: session.userId, companyId: company.id, postingId: posting.id, firstPublication: posting.publishedAt === null });
+        // Cobro de M4: publicaciones extra más allá de la cuota gratuita mensual.
+        charged = (await this.hooks.beforePublish?.({ tx, userId: session.userId, companyId: company.id, postingId: posting.id, firstPublication: posting.publishedAt === null }))?.amount ?? 0;
       }
       const updated = await tx.jobPosting.update({
         where: { id: posting.id },
@@ -449,8 +475,8 @@ export class JobService {
           ...(action === 'CLOSE' ? { closedAt: now } : {}),
         },
       });
-      if (action === 'CLOSE') await this.releasePendingOffers(tx, emit, posting.id, session.userId, 'POSTING_CLOSED');
-      return { ...companyPostingView(updated), idempotent: false };
+      if (action === 'CLOSE') await this.resolveOpenApplications(tx, emit, posting.id, session.userId, 'POSTING_CLOSED');
+      return { ...companyPostingView(updated), idempotent: false, chargedAmount: charged };
     });
   }
 
@@ -461,20 +487,22 @@ export class JobService {
     const posting = await this.prisma.jobPosting.findFirst({ where: { id: postingId, companyId: company.id }, select: { id: true } });
     if (!posting) throw new JobError('JOB_POSTING_NOT_FOUND', 404);
     const cursor = decodeCursor(filter.cursor);
+    const keyset = cursor ? { OR: [{ createdAt: { lt: cursor.date } }, { createdAt: cursor.date, id: { lt: cursor.id } }] } : {};
     const rows = await this.prisma.jobApplication.findMany({
       where: {
         postingId,
         ...(filter.statuses?.length ? { status: { in: filter.statuses } } : {}),
-        ...(cursor ? { OR: [{ createdAt: { lt: cursor.date } }, { createdAt: cursor.date, id: { lt: cursor.id } }] } : {}),
+        // Orden: primero las postulaciones con prioridad (pagada), luego por antigüedad inversa.
+        ...(cursor ? { AND: [cursor.tag === 'P' ? { OR: [{ isPriority: true, ...keyset }, { isPriority: false }] } : { isPriority: false, ...keyset }] } : {}),
       },
       include: applicationInclude,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: [{ isPriority: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
       take: filter.limit + 1,
     });
     const items = rows.slice(0, filter.limit);
     return {
       items: items.map(companyApplicantSummary),
-      nextCursor: rows.length > filter.limit ? encodeCursor(items[items.length - 1]!.createdAt, items[items.length - 1]!.id) : null,
+      nextCursor: rows.length > filter.limit ? encodeCursor(items[items.length - 1]!.createdAt, items[items.length - 1]!.id, items[items.length - 1]!.isPriority ? 'P' : 'N') : null,
     };
   }
 
@@ -584,6 +612,9 @@ export class JobService {
     return this.run(async (tx, emit) => {
       const application = await this.lockCompanyApplication(tx, applicationId, company.id);
       if (!canIssueOffer(application.status)) throw new JobError('INVALID_STATE_TRANSITION', 409, { status: application.status, requested: 'OFFER' });
+      // Defensa: una oferta aceptada es inmutable y el índice único de ofertas abiertas la cuenta
+      // como abierta; emitir otra nunca debe llegar a un 500 por ese índice.
+      if (application.offers.some((offer) => offer.status === 'ACCEPTED')) throw new JobError('APPLICATION_HAS_ACCEPTED_OFFER', 409, { status: application.status });
       if (!postingAllowsProgress(application.posting.status)) throw new JobError('POSTING_NOT_OPEN', 409, { status: application.posting.status });
       const note = input.note?.trim() || null;
       const latest = application.offers.at(-1);
@@ -644,6 +675,10 @@ export class JobService {
     return this.run(async (tx, emit) => {
       // Orden de bloqueo fijo: postulación y luego puesto.
       const application = await this.lockCompanyApplication(tx, applicationId, company.id);
+      // El sistema la resolvió porque el puesto se cerró o se cubrió: se informa el motivo real.
+      if (application.status === 'REJECTED' && application.autoClosedReason) {
+        throw new JobError(application.autoClosedReason === 'POSTING_FILLED' ? 'POSTING_FILLED' : 'POSTING_NOT_OPEN', 409, { status: application.posting.status });
+      }
       const decision = resolveApplicationTransition(application.status, 'HIRED', 'COMPANY');
       if (decision.kind === 'INVALID') throw new JobError('INVALID_STATE_TRANSITION', 409, { status: application.status, requested: 'HIRED' });
       if (decision.kind === 'IDEMPOTENT') return { ...companyApplicationDetail(application), idempotent: true };
@@ -661,7 +696,7 @@ export class JobService {
       }
       await tx.jobApplication.update({ where: { id: applicationId }, data: { status: 'HIRED', hiredAt: this.now() } });
       await this.record(tx, emit, application, { userId: session.userId, kind: 'COMPANY' }, 'HIRED', application.status, 'HIRED', null, 'HIRED');
-      if (bumped[0]!.filledVacancies >= bumped[0]!.vacancies) await this.releasePendingOffers(tx, emit, posting.id, session.userId, 'POSTING_FILLED');
+      if (bumped[0]!.filledVacancies >= bumped[0]!.vacancies) await this.resolveOpenApplications(tx, emit, posting.id, session.userId, 'POSTING_FILLED');
       // Punto de extensión de M4: premio de empresa por contratación confirmada.
       await this.hooks.afterHire?.({ tx, applicationId, postingId: posting.id, companyId: company.id, workerId: application.workerId });
       return { ...companyApplicationDetail(await this.reload(tx, applicationId)), idempotent: false };
@@ -700,7 +735,8 @@ export class JobService {
   async searchPostings(session: AuthSession, search: PostingSearch) {
     const cursor = decodeCursor(search.cursor);
     const text = search.query?.trim();
-    const where: Prisma.JobPostingWhereInput = {
+    const now = this.now();
+    const filters: Prisma.JobPostingWhereInput = {
       status: 'PUBLISHED',
       ...(search.modality ? { modality: search.modality } : {}),
       ...(search.workload ? { workload: search.workload } : {}),
@@ -708,27 +744,38 @@ export class JobService {
       // El rango del puesto alcanza al menos el mínimo que busca el trabajador.
       ...(search.minSalaryCents ? { salaryMaxCents: { gte: search.minSalaryCents } } : {}),
       ...(search.location ? { location: { contains: search.location.trim(), mode: 'insensitive' as const } } : {}),
-      AND: [
-        ...(text ? [{ OR: [
-          { title: { contains: text, mode: 'insensitive' as const } },
-          { description: { contains: text, mode: 'insensitive' as const } },
-          { company: { name: { contains: text, mode: 'insensitive' as const } } },
-        ] }] : []),
-        ...(cursor ? [{ OR: [{ publishedAt: { lt: cursor.date } }, { publishedAt: cursor.date, id: { lt: cursor.id } }] }] : []),
-      ],
+      ...(text ? { OR: [
+        { title: { contains: text, mode: 'insensitive' as const } },
+        { description: { contains: text, mode: 'insensitive' as const } },
+        { company: { name: { contains: text, mode: 'insensitive' as const } } },
+      ] } : {}),
     };
-    const rows = await this.prisma.jobPosting.findMany({
-      where,
-      include: { company: { select: { id: true, name: true } } },
-      orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
-      take: search.limit + 1,
-    });
+    const keyset: Prisma.JobPostingWhereInput = cursor ? { OR: [{ publishedAt: { lt: cursor.date } }, { publishedAt: cursor.date, id: { lt: cursor.id } }] } : {};
+    const include = { company: { select: { id: true, name: true } } } as const;
+    const orderBy = [{ publishedAt: 'desc' as const }, { id: 'desc' as const }];
+    const take = search.limit + 1;
+    // Orden preferente: primero los puestos destacados vigentes, luego el resto; en cada
+    // segmento, del más reciente al más antiguo. El cursor recuerda el segmento (H/N).
+    const rows: Array<{ posting: PostingRecord; segment: 'H' | 'N' }> = [];
+    if (cursor?.tag !== 'N') {
+      const highlighted = await this.prisma.jobPosting.findMany({
+        where: { AND: [filters, { highlightedUntil: { gt: now } }, keyset] }, include, orderBy, take,
+      });
+      rows.push(...highlighted.map((posting) => ({ posting, segment: 'H' as const })));
+    }
+    if (rows.length < take) {
+      const regular = await this.prisma.jobPosting.findMany({
+        where: { AND: [filters, { OR: [{ highlightedUntil: null }, { highlightedUntil: { lte: now } }] }, cursor?.tag === 'N' ? keyset : {}] },
+        include, orderBy, take: take - rows.length,
+      });
+      rows.push(...regular.map((posting) => ({ posting, segment: 'N' as const })));
+    }
     const items = rows.slice(0, search.limit);
-    const mine = await this.myApplicationsFor(session.userId, items.map((posting) => posting.id));
+    const mine = await this.myApplicationsFor(session.userId, items.map((row) => row.posting.id));
     const last = items[items.length - 1];
     return {
-      items: items.map((posting) => publicPostingView(posting, mine.get(posting.id) ?? null)),
-      nextCursor: rows.length > search.limit && last?.publishedAt ? encodeCursor(last.publishedAt, last.id) : null,
+      items: items.map(({ posting }) => publicPostingView(posting, mine.get(posting.id) ?? null, now)),
+      nextCursor: rows.length > search.limit && last?.posting.publishedAt ? encodeCursor(last.posting.publishedAt, last.posting.id, last.segment) : null,
     };
   }
 
@@ -739,7 +786,7 @@ export class JobService {
     });
     if (!posting) throw new JobError('JOB_POSTING_NOT_FOUND', 404);
     const mine = await this.myApplicationsFor(session.userId, [posting.id]);
-    return publicPostingView(posting, mine.get(posting.id) ?? null);
+    return publicPostingView(posting, mine.get(posting.id) ?? null, this.now());
   }
 
   private async myApplicationsFor(userId: string, postingIds: string[]) {
@@ -751,15 +798,34 @@ export class JobService {
     return new Map(rows.map((row) => [row.postingId, { id: row.id, status: row.status }]));
   }
 
-  async apply(session: AuthSession, postingId: string, answers: Array<{ question: string; answer: string }> = []) {
+  /**
+   * Postula al puesto. Una postulación WITHDRAWN (incluido el rechazo de una oferta) se
+   * REACTIVA (misma fila, historial conservado, evento APPLICATION_REOPENED); una
+   * REJECTED por la empresa no puede volver a postular. El cobro (cuota gratuita o
+   * APPLICATION_EXTRA) va en la misma transacción y su clave es por postulación: reabrirla
+   * nunca cobra otra vez. `priority` añade la prioridad (también con costo) de forma atómica.
+   */
+  async apply(session: AuthSession, postingId: string, answers: Array<{ question: string; answer: string }> = [], options: { priority?: boolean } = {}) {
     const attempt = () => this.run(async (tx, emit) => {
       const posting = await tx.jobPosting.findUnique({ where: { id: postingId }, include: { company: { select: { id: true, name: true, ownerId: true } } } });
       // Un borrador no es visible para nadie más que su empresa.
       if (!posting || posting.status === 'DRAFT') throw new JobError('JOB_POSTING_NOT_FOUND', 404);
-      const existing = await tx.jobApplication.findUnique({ where: { postingId_workerId: { postingId, workerId: session.userId } }, include: applicationInclude });
-      if (existing) {
-        if (existing.status === 'APPLIED') return { ...workerApplicationView(existing), idempotent: true, created: false };
-        throw new JobError('ALREADY_APPLIED', 409, { status: existing.status });
+      const found = await tx.jobApplication.findUnique({ where: { postingId_workerId: { postingId, workerId: session.userId } }, select: { id: true } });
+      // Se bloquea la fila existente: retirarse y volver a postular se serializan.
+      const existing = found ? await this.lockWorkerApplication(tx, found.id, session.userId) : null;
+      let charged = 0;
+      // Una oferta ACCEPTED es una constancia inmutable: la postulación que la tiene no se
+      // reabre (quedaría en APPLIED con una oferta aceptada que ya nadie puede emitir ni cambiar).
+      if (existing && canReopenApplication(existing.status) && existing.offers.some((offer) => offer.status === 'ACCEPTED')) {
+        throw new JobError('APPLICATION_HAS_ACCEPTED_OFFER', 409, { status: existing.status });
+      }
+      if (existing && !canReopenApplication(existing.status)) {
+        if (existing.status !== 'APPLIED') throw new JobError('ALREADY_APPLIED', 409, { status: existing.status });
+        if (options.priority && !existing.isPriority) {
+          charged = await this.buyPriority(tx, existing, session.userId);
+          return { ...workerApplicationView(await this.reload(tx, existing.id)), idempotent: false, created: false, chargedAmount: charged };
+        }
+        return { ...workerApplicationView(existing), idempotent: true, created: false, chargedAmount: 0 };
       }
       if (!postingAcceptsApplications(posting.status)) {
         throw new JobError(posting.status === 'FILLED' ? 'POSTING_FILLED' : 'POSTING_NOT_PUBLISHED', 409, { status: posting.status });
@@ -772,28 +838,78 @@ export class JobService {
         throw error;
       }
       if (!postingHasFreeVacancies(posting)) throw new JobError('POSTING_FILLED', 409);
-      // Punto de extensión de M4: cobrar postulaciones extra más allá de la cuota gratuita.
-      await this.hooks.beforeApply?.({ tx, userId: session.userId, postingId, companyId: posting.companyId });
-      const created = await tx.jobApplication.create({ data: { postingId, workerId: session.userId, screeningAnswers } });
-      const application = await tx.jobApplication.findUniqueOrThrow({ where: { id: created.id }, include: applicationInclude });
-      await this.record(tx, emit, application, { userId: session.userId, kind: 'WORKER' }, 'APPLIED', null, 'APPLIED', null, 'APPLIED');
-      return { ...workerApplicationView(await this.reload(tx, created.id)), idempotent: false, created: true };
+      let applicationId: string;
+      if (existing) {
+        applicationId = existing.id;
+        await tx.jobApplication.update({
+          where: { id: existing.id },
+          data: { status: 'APPLIED', screeningAnswers, interviewAt: null, interviewMode: null, interviewNote: null, decisionReason: null, autoClosedReason: null },
+        });
+      } else {
+        applicationId = (await tx.jobApplication.create({ data: { postingId, workerId: session.userId, screeningAnswers } })).id;
+      }
+      charged += (await this.hooks.beforeApply?.({ tx, userId: session.userId, postingId, companyId: posting.companyId, applicationId, reopened: existing !== null }))?.amount ?? 0;
+      if (options.priority) charged += await this.buyPriority(tx, { id: applicationId, postingId, isPriority: false }, session.userId);
+      const application = await this.reload(tx, applicationId);
+      if (existing) await this.record(tx, emit, application, { userId: session.userId, kind: 'WORKER' }, 'APPLICATION_REOPENED', existing.status, 'APPLIED', null, 'APPLIED');
+      else await this.record(tx, emit, application, { userId: session.userId, kind: 'WORKER' }, 'APPLIED', null, 'APPLIED', null, 'APPLIED');
+      return { ...workerApplicationView(await this.reload(tx, applicationId)), idempotent: false, created: !existing, reopened: existing !== null, chargedAmount: charged };
     });
     try {
       return await attempt();
     } catch (error) {
-      // Postulación doble simultánea: la restricción única sobre `(puesto, trabajador)`
+      // Postulación doble simultánea: la restricción única sobre (puesto, trabajador)
       // hace perder a la segunda; al reintentar ve la primera y responde de forma idempotente.
       if (isUniqueViolation(error)) return attempt();
       throw error;
     }
   }
 
-  async listMyApplications(session: AuthSession, filter: Page & { statuses?: JobApplicationStatus[] }) {
+  /** Marca la postulación con prioridad cobrando APPLICATION_PRIORITY (idempotente por postulación). */
+  private async buyPriority(tx: Prisma.TransactionClient, application: { id: string; postingId: string; isPriority: boolean }, userId: string) {
+    if (application.isPriority) return 0;
+    const charge = await this.hooks.chargePriority?.({ tx, userId, applicationId: application.id, postingId: application.postingId });
+    await tx.jobApplication.update({ where: { id: application.id }, data: { isPriority: true, prioritizedAt: this.now() } });
+    return charge?.amount ?? 0;
+  }
+
+  /** Trabajador: postulación con prioridad sobre una postulación que la empresa aún no movió. */
+  async prioritizeApplication(session: AuthSession, applicationId: string) {
+    return this.run(async (tx) => {
+      const application = await this.lockWorkerApplication(tx, applicationId, session.userId);
+      if (application.isPriority) return { ...workerApplicationView(application), idempotent: true, chargedAmount: 0 };
+      if (!canPrioritizeApplication(application.status)) throw new JobError('PRIORITY_NOT_AVAILABLE', 409, { status: application.status });
+      if (!postingAllowsProgress(application.posting.status)) throw new JobError('POSTING_NOT_OPEN', 409, { status: application.posting.status });
+      const charged = await this.buyPriority(tx, application, session.userId);
+      return { ...workerApplicationView(await this.reload(tx, applicationId)), idempotent: false, chargedAmount: charged };
+    });
+  }
+
+  /** Empresa: destaca un puesto publicado (orden preferente en la búsqueda) durante el plazo configurado. */
+  async highlightPosting(session: AuthSession, postingId: string) {
+    const company = await this.companyFor(session);
+    return this.run(async (tx) => {
+      const posting = await this.lockPosting(tx, postingId, company.id);
+      if (posting.status !== 'PUBLISHED') throw new JobError('POSTING_NOT_PUBLISHED', 409, { status: posting.status });
+      const now = this.now();
+      // Un destacado vigente no se vuelve a cobrar ni se extiende: doble clic seguro.
+      if (posting.highlightedUntil && posting.highlightedUntil.getTime() > now.getTime()) {
+        return { ...companyPostingView(posting), idempotent: true, chargedAmount: 0 };
+      }
+      const charge = await this.hooks.chargeHighlight?.({ tx, userId: session.userId, companyId: company.id, postingId });
+      const hours = await readCurrencySetting(tx, 'JOB_HIGHLIGHT_DURATION_HOURS');
+      const updated = await tx.jobPosting.update({ where: { id: posting.id }, data: { highlightedUntil: new Date(now.getTime() + hours * 3_600_000) } });
+      return { ...companyPostingView(updated), idempotent: false, chargedAmount: charge?.amount ?? 0 };
+    });
+  }
+
+  /** Por defecto oculta lo caducado: postulaciones que el sistema resolvió al cerrarse o cubrirse el puesto. history las incluye. */
+  async listMyApplications(session: AuthSession, filter: ApplicationListFilter) {
     const cursor = decodeCursor(filter.cursor);
     const rows = await this.prisma.jobApplication.findMany({
       where: {
         workerId: session.userId,
+        ...(filter.history ? {} : { autoClosedReason: null }),
         ...(filter.statuses?.length ? { status: { in: filter.statuses } } : {}),
         ...(cursor ? { OR: [{ createdAt: { lt: cursor.date } }, { createdAt: cursor.date, id: { lt: cursor.id } }] } : {}),
       },
@@ -936,17 +1052,20 @@ export class JobService {
   }
 
   /**
-   * Al cerrar o cubrir un puesto, las ofertas aún sin responder ya no pueden
-   * aceptarse: se retiran (`WITHDRAWN`), la postulación pasa a `REJECTED` con el
-   * motivo `POSTING_CLOSED`/`POSTING_FILLED` en la línea de tiempo y el
-   * trabajador recibe el aviso. Las demás postulaciones abiertas no se tocan.
+   * Lo caducado no se muestra: al cerrar o cubrir un puesto, las postulaciones que
+   * seguían esperando una contratación se resuelven en la misma transacción.
+   * - OFFER: la oferta pendiente se retira (WITHDRAWN).
+   * - ACCEPTED (aceptada y no contratada): la oferta aceptada queda intacta como
+   *   constancia (es inmutable) y solo la postulación se resuelve.
+   * Ambas pasan a REJECTED con autoClosedReason POSTING_CLOSED/POSTING_FILLED, evento con
+   * ese detalle y aviso en tiempo real al trabajador. Las demás postulaciones no se tocan.
    */
-  private async releasePendingOffers(tx: Prisma.TransactionClient, emit: Emit, postingId: string, companyUserId: string, reason: 'POSTING_CLOSED' | 'POSTING_FILLED') {
-    const open = await tx.jobApplication.findMany({ where: { postingId, status: 'OFFER' }, include: applicationInclude, orderBy: { id: 'asc' } });
+  private async resolveOpenApplications(tx: Prisma.TransactionClient, emit: Emit, postingId: string, companyUserId: string, reason: 'POSTING_CLOSED' | 'POSTING_FILLED') {
+    const open = await tx.jobApplication.findMany({ where: { postingId, status: { in: ['OFFER', 'ACCEPTED'] } }, include: applicationInclude, orderBy: { id: 'asc' } });
     for (const application of open) {
       const pending = application.offers.find((offer) => offer.status === 'PENDING');
       if (pending) await tx.jobOffer.update({ where: { id: pending.id }, data: { status: 'WITHDRAWN', respondedAt: this.now() } });
-      await tx.jobApplication.update({ where: { id: application.id }, data: { status: 'REJECTED' } });
+      await tx.jobApplication.update({ where: { id: application.id }, data: { status: 'REJECTED', autoClosedReason: reason } });
       await this.record(tx, emit, application, { userId: companyUserId, kind: 'COMPANY' }, 'REJECTED', application.status, 'REJECTED', reason, 'REJECTED');
     }
   }

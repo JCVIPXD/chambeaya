@@ -75,8 +75,8 @@ tabla configurable con valores **provisionales** (ver la sección siguiente).
 M2 siembra estos valores **PROVISIONALES** para poder probar el flujo; el dueño
 del producto los ajustará desde la API de administración (cada entrada queda con
 `isProvisional = true` hasta su primera edición, y cada cambio guarda quién,
-cuándo, motivo y valor anterior/nuevo). Todavía ninguna acción real los usa
-(M4/M6). Fuente: `apps/api/src/modules/currency/currency.catalog.ts` y la
+cuándo, motivo y valor anterior/nuevo). Desde M4 los usan publicar, postular, destacar, invitar y desbloquear
+contacto (los premios, salvo el bono de bienvenida, son de M6). Fuente: `apps/api/src/modules/currency/currency.catalog.ts` y la
 migración `20261005120000_currency_catalog`.
 
 | Acción | Actor | Tipo | Monto | Cuota gratis/mes | Devolución |
@@ -99,8 +99,23 @@ migración `20261005120000_currency_catalog`.
 
 Reglas: la cuota gratuita cuenta por mes calendario de **Lima**; la devolución
 de 72 h se sembró solo en las acciones donde la otra parte puede no responder
-(invitar y postular) y su ejecución es de M4. Lo básico sigue siendo gratis y
+(invitar y postular) y la ejecuta M4. Lo básico sigue siendo gratis y
 una acción inactiva o sin entrada nunca se bloquea.
+
+### Valores provisionales nuevos de M4
+
+Editables por el admin con historial (`/api/admin/currency/settings`), sembrados
+con `isProvisional = true`:
+
+| Ajuste | Valor |
+|---|---|
+| `DAILY_SPEND_CAP_WORKER` (tope diario del trabajador, día de Lima) | 200 monedas |
+| `DAILY_SPEND_CAP_COMPANY` (tope diario de la empresa) | 200 monedas |
+| `JOB_HIGHLIGHT_DURATION_HOURS` (duración de un puesto destacado) | 168 h (7 días) |
+
+También son provisionales el intervalo de la tarea de devolución (5 min, por
+`CURRENCY_REFUND_INTERVAL_MS`) y la ventana de 72 h. `PROFILE_HIGHLIGHT` queda
+diferido (la búsqueda de talento no tiene campo de destacado).
 
 ## Puesto fijo y proceso de contrato
 
@@ -129,20 +144,42 @@ Decisiones de producto del diseño de M3 (detalle técnico en
 - Una oferta nueva crea una **versión**; al aceptarse, las condiciones quedan
   congeladas (constancia con fecha, empresa, trabajador, condiciones y huella
   del documento adjunto) y no se pueden modificar.
-- Un trabajador que se retiró o fue rechazado no puede volver a postular al
-  mismo puesto.
+- **Re-postulación flexible (decisión del dueño, resuelta en M4):** quien se
+  retiró (incluido rechazar una oferta) puede volver a postular al mismo puesto;
+  se reactiva la misma postulación con su historial y no se cobra de nuevo.
+  Quien fue rechazado por la empresa no puede. Tampoco se reabre una postulación
+  que ya tiene una oferta aceptada (`409 APPLICATION_HAS_ACCEPTED_OFFER`): la
+  constancia es inmutable.
 - El total de vacantes de un puesto abierto siempre supera lo cubierto: no se
   puede bajar hasta igualarlo, y publicar o postular exige una vacante libre.
 - Al **cerrar** o **cubrir** un puesto, las ofertas sin responder se retiran y
   esas postulaciones pasan a **Rechazado**, con aviso al trabajador
-  (interpretación a confirmar). Las demás postulaciones abiertas no cambian; en
-  particular, una oferta ya **aceptada** y no contratada queda en **Aceptada**
-  sobre un puesto cerrado o cubierto, sin aviso, y la empresa debe rechazarla a
-  mano (la interfaz de M5 debe mostrarlo).
-- Pendientes de decisión del dueño del producto: que la empresa vea el número
-  de DNI del trabajador en la constancia de aceptación (y si eso debe costar
-  moneda en M4), y que la constancia se borre en cascada al eliminar la cuenta
-  del trabajador o de la empresa (a validar con el criterio legal de abajo).
+  (interpretación a confirmar). Desde M4 también las postulaciones
+  **aceptadas** y no contratadas pasan a **Rechazado** con el motivo del cierre
+  o la cobertura (`autoClosedReason`) y aviso al trabajador (ver «caducados
+  ocultos» abajo); las aceptadas que ya estaban sobre un puesto cerrado antes de
+  M4 no se resuelven solas. Las demás postulaciones abiertas no cambian.
+- **Decisiones del dueño resueltas en M4:** (1) la empresa ve el DNI del
+  trabajador solo tras la aceptación de la oferta, sin costo de moneda; (2) la
+  **constancia se conserva**: no se borra por cascada y el borrado de la cuenta
+  se bloquea con `409 CONTRACT_RECORDS_RETAINED` mientras haya ofertas aceptadas
+  (se guarda como evidencia del acuerdo, soporte y disputas, retención legal y
+  antifraude; la anonimización es alcance futuro); (3) **lo caducado no se
+  muestra**: las postulaciones aceptadas sobre un puesto cerrado o cubierto se
+  rechazan automáticamente con aviso y las listas del trabajador las ocultan
+  salvo con el filtro de historial.
+- **Bono de bienvenida y borrado de cuentas (decisión del dueño, CN-20261007-045):**
+  el bono por sí solo no retiene el borrado. Una cuenta cuyo único movimiento es
+  el `WELCOME_BONUS` se puede borrar desde el superadmin y el bono desaparece con
+  ella; cualquier otro movimiento (gasto, otro premio, devolución, ajuste) sigue
+  dando `409 CURRENCY_LEDGER_RETAINED`.
+- **Decisiones vigentes aceptadas tal cual (observaciones de `CN-20261007-044`,
+  decisión del dueño, sin cambio de comportamiento):** (a) un puesto pagado puede
+  reutilizarse: pausar, editar y volver a publicar no cobra de nuevo, porque solo
+  la primera publicación de un puesto cuenta como extra; (b) la prioridad de una
+  postulación se conserva al re-postular, sin nuevo cobro; (c) el desbloqueo de
+  contacto de un candidato es permanente, aunque después la empresa rechace la
+  postulación que lo originó.
 - El chat de la postulación y las interfaces quedan para M5.
 
 **Riesgo legal a validar antes de operar:** al intermediar empleo formal,
@@ -176,7 +213,7 @@ con una auditoría `APROBADO`.
 | **M1** | Libro mayor de monedas | Cuenta por usuario y por empresa, movimientos inmutables, saldo derivado, idempotencia, concurrencia sin gasto doble, ajustes del admin, API de saldo y movimientos |
 | **M2** | Catálogo de costos y premios | Tabla configurable por el admin con historial, cuotas gratuitas y reglas de devolución |
 | **M3** | Puestos fijos | Modelo de puesto y embudo de selección con oferta y aceptación |
-| **M4** | Acciones conectadas | Aplicar el catálogo de M2 a publicar, postular, destacar, invitar y desbloquear contacto |
+| **M4** | Acciones conectadas | Aplicar el catálogo de M2 a publicar, postular, destacar, invitar y desbloquear contacto; cuota gratuita, tope diario, devolución automática y bono de bienvenida (cerrado: `CN-20261007-043`/`045`, auditoría `CN-20261007-046`; `PROFILE_HIGHLIGHT` diferido) |
 | **M5** | Interfaces | Panel web de empresa y trabajador y Flutter con saldo, movimientos y proceso de selección |
 | **M6** | Ganar monedas | Premios por perfil completo, verificaciones, referidos y constancia |
 | **M7** | Compra de monedas | Reutiliza la capa de adaptadores; requiere el pronunciamiento legal sobre la moneda |

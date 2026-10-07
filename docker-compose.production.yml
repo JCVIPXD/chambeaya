@@ -51,6 +51,8 @@ services:
       # M0/M1: turnos temporales apagados salvo "true" literal; nombre de la moneda.
       TEMPORARY_SHIFTS_ENABLED: ${TEMPORARY_SHIFTS_ENABLED:-}
       VIRTUAL_CURRENCY_NAME: ${VIRTUAL_CURRENCY_NAME:-}
+      # Intervalo (ms) de la devolución automática; vacío = 300000 (5 min); 0, off o false la desactivan.
+      CURRENCY_REFUND_INTERVAL_MS: ${CURRENCY_REFUND_INTERVAL_MS:-}
     ports:
       # Solo loopback: Docker publica puertos saltándose ufw, así que sin
       # "127.0.0.1:" la API quedaría expuesta sin TLS en todas las interfaces.

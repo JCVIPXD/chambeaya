@@ -12,13 +12,21 @@ export type CatalogPatch = {
 };
 export type CatalogPage = { limit: number; cursor?: string; entryId?: string };
 
-/** Cuántas veces usó el usuario una acción dentro de una ventana de tiempo.
- * M2 no conecta ninguna acción real, así que todavía nadie consume cuota;
- * M4 entrega la implementación que lee los usos reales (gratuitos y cobrados). */
+/** Cuántas veces usó el usuario una acción dentro de una ventana de tiempo
+ * (usos gratuitos y cobrados). Es un punto de inyección para pruebas; la
+ * implementación real lee `CurrencyActionUse` (M4). */
 export type CurrencyUsageCounter = {
   countUsage(subject: { actor: CurrencyAccountOwnerType; userId: string }, actionKey: string, window: { start: Date; end: Date }): Promise<number>;
 };
-export const NO_ACTIONS_CONNECTED_YET: CurrencyUsageCounter = { countUsage: async () => 0 };
+
+/** Cuenta los usos reales registrados por `CurrencyActionService.charge`. */
+export class PrismaUsageCounter implements CurrencyUsageCounter {
+  constructor(private readonly prisma: Pick<PrismaClient, 'currencyActionUse'>) {}
+
+  countUsage(subject: { actor: CurrencyAccountOwnerType; userId: string }, actionKey: string, window: { start: Date; end: Date }) {
+    return this.prisma.currencyActionUse.count({ where: { userId: subject.userId, actionKey, occurredAt: { gte: window.start, lt: window.end } } });
+  }
+}
 
 const EDITABLE_FIELDS = ['amount', 'active', 'freeMonthlyQuota', 'refundWindowHours'] as const;
 const entryInclude = { updatedBy: { select: { id: true, name: true } } } as const;
@@ -53,7 +61,7 @@ function keyOrder(actionKey: string) {
 export class CurrencyCatalogService {
   constructor(
     private readonly prisma: PrismaClient = new PrismaClient(),
-    private readonly usage: CurrencyUsageCounter = NO_ACTIONS_CONNECTED_YET,
+    private readonly usage: CurrencyUsageCounter = new PrismaUsageCounter(prisma),
     private readonly currencyName = virtualCurrencyName(),
     private readonly clock: () => Date = () => new Date(),
   ) {}

@@ -3,6 +3,7 @@ import { z, ZodError } from 'zod';
 
 import { AuthError, DatabaseAuthService, type AccountRole, type AuthService, type AuthSession } from '../auth/auth.service.js';
 import { JOB_APPLICATION_STATUSES } from './job-state.js';
+import { CurrencyError } from '../currency/currency.service.js';
 import { JobError } from './jobs.errors.js';
 import { jobEvents, type JobEvents } from './jobs.events.js';
 import { JobService } from './jobs.service.js';
@@ -56,6 +57,7 @@ const pageSchema = z.object({
 const statusList = z.string().trim().max(200).transform((value) => value.split(',').map((item) => item.trim()).filter(Boolean))
   .pipe(z.array(z.enum(JOB_APPLICATION_STATUSES as unknown as [string, ...string[]])).max(8));
 const applicantsQuerySchema = pageSchema.extend({ status: statusList.optional() });
+const myApplicationsQuerySchema = applicantsQuerySchema.extend({ history: z.enum(['true', 'false']).optional() });
 const postingsQuerySchema = pageSchema.extend({ status: z.enum(['DRAFT', 'PUBLISHED', 'PAUSED', 'CLOSED', 'FILLED']).optional() });
 const searchQuerySchema = pageSchema.extend({
   query: z.string().trim().min(1).max(100).optional(),
@@ -81,6 +83,8 @@ const offerSchema = z.object({
 }).strict();
 const applySchema = z.object({
   answers: z.array(z.object({ question: z.string().trim().min(1).max(240), answer: z.string().trim().min(1).max(1_000) }).strict()).max(5).default([]),
+  /** Postulación con prioridad (acción opcional con costo). */
+  priority: z.boolean().optional(),
 }).strict();
 
 // ---------------------------------------------------------------------------
@@ -106,6 +110,11 @@ function sendError(response: Response, error: unknown) {
     return;
   }
   if (error instanceof JobError) {
+    response.status(error.statusCode).json({ error: error.code, ...error.details });
+    return;
+  }
+  // Cobro rechazado por una acción con costo (saldo insuficiente, tope diario): nada se aplicó.
+  if (error instanceof CurrencyError) {
     response.status(error.statusCode).json({ error: error.code, ...error.details });
     return;
   }
@@ -180,6 +189,9 @@ export function createBusinessJobsRouter(
   }));
   router.post('/job-postings/:postingId/close', company(async (request, response, session) => {
     response.json(await service.closePosting(session, param(request, 'postingId')));
+  }));
+  router.post('/job-postings/:postingId/highlight', company(async (request, response, session) => {
+    response.json(await service.highlightPosting(session, param(request, 'postingId')));
   }));
   router.get('/job-postings/:postingId/applications', company(async (request, response, session) => {
     const { limit, cursor, status } = applicantsQuerySchema.parse(request.query);
@@ -265,15 +277,19 @@ export function createWorkerJobsRouter(
     response.json(await service.getPublicPosting(session, param(request, 'postingId')));
   }));
   router.post('/job-postings/:postingId/applications', worker(async (request, response, session) => {
-    const result = await service.apply(session, param(request, 'postingId'), applySchema.parse(request.body ?? {}).answers);
+    const body = applySchema.parse(request.body ?? {});
+    const result = await service.apply(session, param(request, 'postingId'), body.answers, { priority: body.priority });
     response.status(result.created ? 201 : 200).json(result);
   }));
   router.get('/job-applications', worker(async (request, response, session) => {
-    const { limit, cursor, status } = applicantsQuerySchema.parse(request.query);
-    response.json(await service.listMyApplications(session, { limit, cursor, statuses: status as never }));
+    const { limit, cursor, status, history } = myApplicationsQuerySchema.parse(request.query);
+    response.json(await service.listMyApplications(session, { limit, cursor, statuses: status as never, history: history === 'true' }));
   }));
   router.get('/job-applications/:applicationId', worker(async (request, response, session) => {
     response.json(await service.getMyApplication(session, param(request, 'applicationId')));
+  }));
+  router.post('/job-applications/:applicationId/priority', worker(async (request, response, session) => {
+    response.json(await service.prioritizeApplication(session, param(request, 'applicationId')));
   }));
   router.post('/job-applications/:applicationId/withdraw', worker(async (request, response, session) => {
     response.json(await service.withdraw(session, param(request, 'applicationId')));

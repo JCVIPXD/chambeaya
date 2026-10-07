@@ -1,6 +1,8 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 import type { AuthSession } from '../auth/auth.service.js';
+import { CurrencyActionService, instanceKeys } from '../currency/currency.actions.js';
+import { withSerializableRetry } from '../operations/serializable-retry.js';
 
 export type TalentInvitationInput = {
   workerTalentProfileId: string;
@@ -59,7 +61,12 @@ type InvitationRecord = {
 };
 
 export class DatabaseTalentInvitationService implements TalentInvitationOperations {
-  constructor(private readonly prisma = new PrismaClient()) {}
+  /**
+   * `charging` activa el cobro de `TALENT_INVITE` (M4): la invitación y su cobro son
+   * todo-o-nada en una sola transacción. Sin él no se cobra nada (pruebas con un cliente
+   * simulado); `createApp` siempre lo inyecta.
+   */
+  constructor(private readonly prisma = new PrismaClient(), private readonly charging?: CurrencyActionService) {}
 
   async createInvitation(session: AuthSession, input: TalentInvitationInput) {
     this.requireBusiness(session);
@@ -94,19 +101,33 @@ export class DatabaseTalentInvitationService implements TalentInvitationOperatio
     if (existing) throw new TalentInvitationError('INVITATION_ALREADY_ACTIVE');
 
     const expiresAt = new Date(Date.now() + INVITATION_EXPIRATION_DAYS * 24 * 60 * 60 * 1000);
+    const data = {
+      companyId: company.id,
+      workerTalentProfileId: profile.id,
+      shiftId,
+      message: input.message?.trim() || null,
+      expiresAt,
+      createdById: session.userId,
+    };
     try {
-      const created = await this.prisma.talentInvitation.create({
-        data: {
-          companyId: company.id,
-          workerTalentProfileId: profile.id,
-          shiftId,
-          message: input.message?.trim() || null,
-          expiresAt,
-          createdById: session.userId,
-        },
-        include: invitationInclude,
-      });
-      return toBusinessInvitation(created as InvitationRecord);
+      if (!this.charging) {
+        const created = await this.prisma.talentInvitation.create({ data, include: invitationInclude });
+        return toBusinessInvitation(created as InvitationRecord);
+      }
+      const charging = this.charging;
+      // Invitar de forma proactiva cuesta (`TALENT_INVITE`): creación y cobro en una sola
+      // transacción; si el saldo no alcanza o se supera el tope, no queda invitación alguna.
+      const { created, charged } = await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+        const created = await tx.talentInvitation.create({ data, include: invitationInclude });
+        const charge = await charging.charge(tx, {
+          actor: 'COMPANY', userId: session.userId, subjectId: company.id, actionKey: 'TALENT_INVITE',
+          instanceKey: instanceKeys.talentInvite(created.id),
+          related: { type: 'TalentInvitation', id: created.id },
+          reason: 'Invitación a un candidato',
+        });
+        return { created, charged: charge.amount };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+      return { ...toBusinessInvitation(created as InvitationRecord), chargedAmount: charged };
     } catch (error) {
       if (isUniqueConstraintViolation(error)) throw new TalentInvitationError('INVITATION_ALREADY_ACTIVE');
       throw error;

@@ -61,6 +61,12 @@ enum CurrencyAccountOwnerType {
 /// administrativos; los débitos por acciones de producto llegan en M4.
 enum CurrencyMovementAction {
   ADMIN_ADJUSTMENT
+  /// M4: débito por una acción de producto con costo (publicar, postular...).
+  ACTION_CHARGE
+  /// M4: devolución automática de un `ACTION_CHARGE`, enlazada con `refundOfId`.
+  ACTION_REFUND
+  /// M4: premio otorgado por el catálogo (hoy solo el bono de bienvenida).
+  REWARD
 }
 
 /// M2: una acción del catálogo cuesta moneda (COST) o la otorga (REWARD).
@@ -194,6 +200,10 @@ model User {
   currencyMovementsCreated CurrencyMovement[] @relation("CurrencyMovementCreatedBy")
   currencyCatalogUpdates CurrencyCatalogEntry[] @relation("CurrencyCatalogUpdatedBy")
   currencyCatalogChanges CurrencyCatalogChange[] @relation("CurrencyCatalogChangedBy")
+  currencyActionUses CurrencyActionUse[] @relation("CurrencyActionUseUser")
+  currencySettingUpdates CurrencySetting[] @relation("CurrencySettingUpdatedBy")
+  currencySettingChanges CurrencySettingChange[] @relation("CurrencySettingChangedBy")
+  contactUnlocksAsWorker CandidateContactUnlock[] @relation("WorkerContactUnlocks")
   conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
   companyWorkerContacts CompanyWorkerContact[] @relation("CompanyWorkerContactUser")
   talentProfile WorkerTalentProfile?
@@ -233,6 +243,7 @@ model Company {
   currencyAccount CurrencyAccount? @relation("CompanyCurrencyAccount")
   talentInvitations TalentInvitation[]
   jobPostings   JobPosting[]
+  contactUnlocks CandidateContactUnlock[] @relation("CompanyContactUnlocks")
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
 }
@@ -874,6 +885,12 @@ model CurrencyMovement {
   relatedEntityType String?
   relatedEntityId   String?
   idempotencyKey    String                 @unique
+  /// M4: clave del catálogo de la acción que generó el movimiento.
+  actionKey         String?
+  /// M4: en una devolución, el cargo original. Único: un cargo se devuelve una sola vez.
+  refundOfId        String?                @unique
+  refundOf          CurrencyMovement?      @relation("CurrencyRefund", fields: [refundOfId], references: [id], onDelete: Restrict)
+  refund            CurrencyMovement?      @relation("CurrencyRefund")
   createdById       String?
   createdBy         User?                  @relation("CurrencyMovementCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
   createdAt         DateTime               @default(now())
@@ -924,6 +941,77 @@ model CurrencyCatalogChange {
   createdAt   DateTime             @default(now())
 
   @@index([entryId, createdAt])
+}
+
+/// M4: una fila por instancia de acción con costo ejecutada (publicar un
+/// puesto, postular...), cobrada o dentro de la cuota gratuita. Sirve para:
+/// contar la cuota gratuita mensual (calendario de Lima), el tope de gasto
+/// diario, la idempotencia por instancia (`instanceKey`) y la devolución
+/// automática (`refundDueAt`/`refundSettledAt`).
+model CurrencyActionUse {
+  id                String                   @id @default(cuid())
+  userId            String
+  user              User                     @relation("CurrencyActionUseUser", fields: [userId], references: [id], onDelete: Cascade)
+  actor             CurrencyAccountOwnerType
+  actionKey         String
+  /// Identifica la instancia (`job-publish:{postingId}`...). Única: reintentos y
+  /// clics repetidos nunca cobran dos veces.
+  instanceKey       String                   @unique
+  accountId         String?
+  chargedAmount     Int                      @default(0)
+  /// Movimiento de débito (sin FK: el libro es inmutable y se consulta aparte).
+  movementId        String?
+  relatedEntityType String?
+  relatedEntityId   String?
+  occurredAt        DateTime
+  /// Instante a partir del cual se evalúa la devolución (congelado al cobrar).
+  refundDueAt       DateTime?
+  /// Cuándo se resolvió la devolución (devuelta o no elegible).
+  refundSettledAt   DateTime?
+  refundMovementId  String?
+
+  @@index([userId, actionKey, occurredAt])
+  @@index([userId, occurredAt])
+  @@index([refundSettledAt, refundDueAt])
+}
+
+/// M4: ajustes numéricos editables por el administrador con historial (tope de
+/// gasto diario, duración de un puesto destacado). Una fila por clave fija.
+model CurrencySetting {
+  key           String    @id
+  value         Int
+  isProvisional Boolean   @default(true)
+  updatedAt     DateTime  @updatedAt
+  updatedById   String?
+  updatedBy     User?     @relation("CurrencySettingUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+model CurrencySettingChange {
+  id          String   @id @default(cuid())
+  key         String
+  oldValue    String
+  newValue    String
+  reason      String
+  changedById String?
+  changedBy   User?    @relation("CurrencySettingChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@index([key, createdAt])
+}
+
+/// M4: contacto y CV de un candidato que no postuló, desbloqueados por una
+/// empresa. Único por (empresa, candidato): se paga una sola vez.
+model CandidateContactUnlock {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation("CompanyContactUnlocks", fields: [companyId], references: [id], onDelete: Cascade)
+  workerUserId String
+  worker       User     @relation("WorkerContactUnlocks", fields: [workerUserId], references: [id], onDelete: Cascade)
+  movementId   String?
+  createdAt    DateTime @default(now())
+
+  @@unique([companyId, workerUserId])
+  @@index([workerUserId])
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,12 +1088,16 @@ enum JobApplicationEventType {
   HIRED
   REJECTED
   WITHDRAWN
+  /// M4: el trabajador volvió a postular tras retirarse (se reactiva la misma fila).
+  APPLICATION_REOPENED
 }
 
 model JobPosting {
   id                 String           @id @default(cuid())
   companyId          String
-  company            Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  /// RESTRICT (M4): la constancia de una oferta aceptada no desaparece por
+  /// cascada al borrar la empresa; el borrado administrativo se bloquea.
+  company            Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
   title              String
   description        String
   responsibilities   String?
@@ -1029,20 +1121,24 @@ model JobPosting {
   status             JobPostingStatus @default(DRAFT)
   publishedAt        DateTime?
   closedAt           DateTime?
+  /// M4: destacado hasta este instante (orden preferente en la búsqueda).
+  highlightedUntil   DateTime?
   applications       JobApplication[]
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 
   @@index([companyId, status])
   @@index([status, publishedAt, id])
+  @@index([status, highlightedUntil])
 }
 
 model JobApplication {
   id               String               @id @default(cuid())
   postingId        String
-  posting          JobPosting           @relation(fields: [postingId], references: [id], onDelete: Cascade)
+  posting          JobPosting           @relation(fields: [postingId], references: [id], onDelete: Restrict)
   workerId         String
-  worker           User                 @relation("JobApplicationWorker", fields: [workerId], references: [id], onDelete: Cascade)
+  /// RESTRICT (M4): ver `JobPosting.company`.
+  worker           User                 @relation("JobApplicationWorker", fields: [workerId], references: [id], onDelete: Restrict)
   status           JobApplicationStatus @default(APPLIED)
   screeningAnswers Json?
   interviewAt      DateTime?
@@ -1050,6 +1146,13 @@ model JobApplication {
   interviewNote    String?
   decisionReason   String?
   hiredAt          DateTime?
+  /// M4: postulación con prioridad (pagada); la empresa la ve primero.
+  isPriority       Boolean              @default(false)
+  prioritizedAt    DateTime?
+  /// M4: la resolvió el sistema porque el puesto se cerró (`POSTING_CLOSED`) o
+  /// se cubrió (`POSTING_FILLED`) sin contratarla. No es una decisión de la
+  /// empresa; las listas del trabajador la ocultan salvo el historial.
+  autoClosedReason String?
   offers           JobOffer[]
   uploads          JobOfferUpload[]
   events           JobApplicationEvent[]

@@ -2,7 +2,7 @@ import type { JobApplicationStatus } from './job-state.js';
 
 export type JobApplicationEventKind =
   | 'APPLIED' | 'SHORTLISTED' | 'INTERVIEW_SCHEDULED' | 'OFFER_ISSUED' | 'OFFER_ACCEPTED'
-  | 'OFFER_DECLINED' | 'HIRED' | 'REJECTED' | 'WITHDRAWN';
+  | 'OFFER_DECLINED' | 'HIRED' | 'REJECTED' | 'WITHDRAWN' | 'APPLICATION_REOPENED';
 
 export type JobEventNotification = {
   type: JobApplicationEventKind;

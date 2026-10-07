@@ -107,7 +107,19 @@ una cuenta con movimientos no puede desaparecer sin destruir la auditoría.
 `DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` responden
 `409 CURRENCY_LEDGER_RETAINED` si el titular tiene al menos un movimiento
 (aunque el saldo sea `0`), sin borrar filas ni archivos. Una cuenta sin
-movimientos se elimina junto con el titular. La verificación y el borrado van
+movimientos se elimina junto con el titular. **Excepción (CN-20261007-045):** si
+el único movimiento de la cuenta es el `WELCOME_BONUS` (acción `REWARD`, clave
+`WELCOME_BONUS`; sin gastos, otros premios, devoluciones ni ajustes), el borrado
+responde `204` y el bono desaparece con la cuenta. El libro sigue siendo
+inmutable: la migración `20261007120000_welcome_bonus_deletable` solo permite
+borrar ese movimiento dentro de la transacción de borrado del titular, que
+declara la cuenta con `set_config('chambeaya.welcome_bonus_delete_account', <id>,
+true)` (local a la transacción) y solo si la cuenta no tiene ningún otro
+movimiento (el trigger vuelve a comprobarlo). Cualquier otro `DELETE` o
+`UPDATE`, o un `DELETE` sin ese permiso, sigue fallando con
+`CURRENCY_MOVEMENT_APPEND_ONLY`. La cuenta se bloquea (`FOR UPDATE`) antes de
+contar, así que la carrera con un movimiento nuevo se resuelve igual que antes
+(`409`, nada se borra). La verificación y el borrado van
 en una sola transacción que bloquea primero la cuenta (`SELECT ... FOR UPDATE`)
 y cuenta después: un ajuste que ya tenía la cuenta bloqueada termina antes y su
 movimiento se ve en el conteo. Si un movimiento o una cuenta se confirma de
@@ -290,8 +302,9 @@ tabla de transiciones por actor está en `job-state.ts`.
 | `GET /job-postings?status=&limit=&cursor=` | Mis puestos, con `applicationsCount`. |
 | `GET /job-postings/:id` | Detalle con `applicantCounts` por etapa. |
 | `PATCH /job-postings/:id` | Edita un borrador o puesto en pausa; al menos un campo. |
-| `POST /job-postings/:id/publish` / `pause` / `close` | Cambia el estado (idempotente). Publicar guarda `publishedAt` la primera vez. |
-| `GET /job-postings/:id/applications?status=APPLIED,SHORTLISTED&limit=&cursor=` | Postulantes (filtro por una o varias etapas): nombre, titular y distrito del perfil, `hasCv`, entrevista y estado de la última oferta. Nunca correo ni teléfono; el número de DNI solo aparece, tras la aceptación, dentro de `acceptanceSnapshot` (ver Constancia de aceptación). |
+| `POST /job-postings/:id/publish` / `pause` / `close` | Cambia el estado (idempotente). Publicar guarda `publishedAt` la primera vez y solo esa primera publicación cuenta para `JOB_PUBLISH_EXTRA` (ver M4). |
+| `POST /job-postings/:id/highlight` | Destaca el puesto (`JOB_HIGHLIGHT`) por `JOB_HIGHLIGHT_DURATION_HOURS`; mientras siga vigente repetirlo no cobra. |
+| `GET /job-postings/:id/applications?status=APPLIED,SHORTLISTED&limit=&cursor=` | Postulantes (con prioridad primero, `isPriority`; filtro por una o varias etapas): nombre, titular y distrito del perfil, `hasCv`, entrevista y estado de la última oferta. Nunca correo ni teléfono; el número de DNI solo aparece, tras la aceptación, dentro de `acceptanceSnapshot` (ver Constancia de aceptación). |
 | `GET /job-applications/:id` | Detalle: respuestas de filtro, ofertas (todas las versiones), línea de tiempo y motivo de decisión. |
 | `POST /job-applications/:id/stage` `{status}` | `SHORTLISTED` o `INTERVIEW` (sin fecha). La oferta, la contratación y el rechazo tienen su propia ruta. |
 | `POST /job-applications/:id/interview` `{scheduledAt, mode?, note?}` | Programa o reprograma la entrevista (`mode`: `ONSITE`/`VIDEO`/`PHONE`); la fecha debe ser futura y de hasta un año (`400 INVALID_INTERVIEW_DATE`). Pasa a `INTERVIEW`. |
@@ -309,10 +322,11 @@ Con el puesto `CLOSED` o `FILLED` la empresa ya no avanza, programa ni ofrece
 
 | Ruta | Efecto |
 | --- | --- |
-| `GET /job-postings?query=&modality=&workload=&contractType=&minSalaryCents=&location=&limit=&cursor=` | Busca puestos `PUBLISHED`, del más reciente al más antiguo. `minSalaryCents` exige que el máximo del rango lo alcance; `query`/`location` no distinguen mayúsculas. Cada puesto trae `vacanciesRemaining`, `company.name` y `myApplication`. No expone `vacancies`, `filledVacancies` ni datos de otros candidatos. |
+| `GET /job-postings?query=&modality=&workload=&contractType=&minSalaryCents=&location=&limit=&cursor=` | Busca puestos `PUBLISHED`: primero los destacados vigentes (`isHighlighted`), luego del más reciente al más antiguo (cursor estable entre ambos tramos). `minSalaryCents` exige que el máximo del rango lo alcance; `query`/`location` no distinguen mayúsculas. Cada puesto trae `vacanciesRemaining`, `company.name` y `myApplication`. No expone `vacancies`, `filledVacancies` ni datos de otros candidatos. |
 | `GET /job-postings/:id` | Detalle público (`404` si no está publicado). |
-| `POST /job-postings/:id/applications` `{answers:[{question, answer}]}` | Postula (`201`). Debe responder exactamente las preguntas de filtro (`400 INVALID_SCREENING_ANSWERS`). Repetir mientras sigue `APPLIED` responde `200` con la misma postulación; en otro estado, `409 ALREADY_APPLIED` con su `status` (no se puede volver a postular tras retirarse o ser rechazado). Seis envíos simultáneos crean una sola. Puesto no publicado: `409 POSTING_NOT_PUBLISHED`; cubierto: `409 POSTING_FILLED`. |
-| `GET /job-applications?status=&limit=&cursor=` | Mis postulaciones. |
+| `POST /job-postings/:id/applications` `{answers:[{question, answer}]}` | Postula (`201`). Debe responder exactamente las preguntas de filtro (`400 INVALID_SCREENING_ANSWERS`). Repetir mientras sigue `APPLIED` responde `200` con la misma postulación. **Re-postulación (M4):** si estaba `WITHDRAWN` (incluido el rechazo de una oferta) se reactiva la MISMA fila (`APPLIED`, historial conservado, evento `APPLICATION_REOPENED`, responde `200` con `reopened: true`) y no vuelve a cobrar monedas (la clave de cobro es por puesto y trabajador); quien fue `REJECTED` por la empresa, o está en otra etapa, recibe `409 ALREADY_APPLIED` con su `status`; si la postulación `WITHDRAWN` conserva una oferta aceptada, `409 APPLICATION_HAS_ACCEPTED_OFFER` (no se reabre). Cuerpo opcional `priority: true` para postular con prioridad. Seis envíos simultáneos crean una sola. Puesto no publicado: `409 POSTING_NOT_PUBLISHED`; cubierto: `409 POSTING_FILLED`. |
+| `GET /job-applications?status=&history=&limit=&cursor=` | Mis postulaciones. Por defecto **no** incluye las resueltas automáticamente por el cierre o la cobertura del puesto (`autoClosedReason`); `history=true` las incluye. |
+| `POST /job-applications/:id/priority` | Compra la prioridad de una postulación propia que la empresa aún no movió (`APPLICATION_PRIORITY`). Idempotente; `409 PRIORITY_NOT_AVAILABLE` si ya no aplica. |
 | `GET /job-applications/:id` | Detalle propio: puesto, entrevista, `currentOfferId`, ofertas con su constancia y línea de tiempo (sin el motivo de rechazo). |
 | `POST /job-applications/:id/withdraw` | Se retira (`WITHDRAWN`) desde cualquier etapa abierta, también tras aceptar la oferta si aún no la contrataron. |
 | `POST /job-applications/:id/offers/:offerId/accept` | Acepta la oferta vigente (`PENDING`): oferta `ACCEPTED`, postulación `ACCEPTED` y constancia. Una versión reemplazada responde `409 OFFER_NOT_PENDING`. |
@@ -329,15 +343,26 @@ puesto (título, modalidad, jornada, lugar, rango), condiciones ofrecidas
 `sha256` del documento adjunto. Un trigger de PostgreSQL
 (`JobOffer_accepted_is_immutable`) rechaza cualquier `UPDATE` posterior de una
 oferta `ACCEPTED`; emitir una oferta nueva sobre una postulación aceptada da
-`409`. El borrado solo ocurre por cascada al eliminar la postulación, el puesto
-o la cuenta. La firma digital y la integración con planilla siguen fuera de alcance.
+`409`. **Constancia conservada (M4):** la oferta aceptada, su postulación, el
+puesto y la empresa ya no se borran por cascada. Las FK `JobPosting.companyId`,
+`JobApplication.postingId` y `JobApplication.workerId` son `RESTRICT`, y el borrado
+administrativo de una empresa o de un trabajador responde
+`409 CONTRACT_RECORDS_RETAINED` (sin borrar nada) si el titular tiene ofertas
+aceptadas; también se mapea el `23001` de las FK `RESTRICT` ante una aceptación
+que llegue entre la comprobación y el borrado (misma política que el libro de
+monedas). Sin ofertas aceptadas, el borrado retira antes los puestos,
+postulaciones y PDF de la cuenta. La constancia se conserva como evidencia del
+acuerdo, soporte y disputas, retención legal y antifraude; el DNI visible para la
+empresa tras la aceptación es decisión confirmada del dueño del producto. La
+**anonimización** posterior es alcance futuro. La firma digital y la integración
+con planilla siguen fuera de alcance.
 
 ### Línea de tiempo y avisos en tiempo real
 
 Cada cambio escribe un `JobApplicationEvent` (quién, qué, estado anterior y
 nuevo, cuándo; el autor pasa a nulo si se borra la cuenta). Tipos: `APPLIED`,
 `SHORTLISTED`, `INTERVIEW_SCHEDULED`, `OFFER_ISSUED`, `OFFER_ACCEPTED`,
-`OFFER_DECLINED`, `HIRED`, `REJECTED`, `WITHDRAWN`.
+`OFFER_DECLINED`, `HIRED`, `REJECTED`, `WITHDRAWN`, `APPLICATION_REOPENED` (M4).
 
 `GET /api/job-events` (cualquier sesión válida) es un flujo SSE con el mismo
 patrón del feed de turnos. Tras confirmar cada cambio, el servicio avisa solo a
@@ -347,30 +372,149 @@ clientes conectados a la instancia que atendió el cambio (igual que el feed de 
 
 ### Puntos de extensión para M4
 
-`JobService` acepta `JobHooks` (`beforePublish`, `beforeApply`, `afterHire`) que se
-ejecutan dentro de la transacción de la operación con el cliente transaccional:
-si M4 cobra o premia allí y el gancho lanza, toda la operación se revierte (el
-cliente recibe `500 INTERNAL_ERROR` mientras M4 no traduzca sus errores). Como la
-operación se reintenta ante conflictos de `Serializable`, un gancho puede
-ejecutarse más de una vez: solo debe escribir con `tx` y nunca producir efectos
-fuera de la base. Por
-defecto no hacen nada.
+`JobService` acepta `JobHooks` (`beforePublish`, `beforeApply`, `chargePriority`,
+`chargeHighlight`, `afterHire`) que se ejecutan dentro de la transacción de la
+operación con el cliente transaccional. Desde M4 `createJobCurrencyHooks`
+(`currency.hooks.ts`) los conecta con el cobro; sus errores se traducen a `409`
+(ver «Acciones conectadas a la moneda virtual»). Como la operación se reintenta
+ante conflictos de `Serializable`, un gancho puede ejecutarse más de una vez:
+solo escribe con `tx` y es idempotente por clave de instancia.
+
+**Postulaciones aceptadas sobre un puesto que se cierra o se cubre (M4):** al
+cerrar o cubrir un puesto, además de retirar las ofertas `PENDING`, las
+postulaciones `ACCEPTED` no contratadas pasan a `REJECTED` en la misma
+transacción, con `autoClosedReason` (`POSTING_CLOSED` o `POSTING_FILLED`), evento
+con ese detalle y aviso SSE al trabajador. La constancia de la oferta aceptada se
+conserva. Las listas del trabajador las ocultan salvo `history=true`.
 
 ### Diferido
 
 - Chat de la postulación: `Conversation` exige un `CompanyWorkerContact`
   (directorio de la empresa) y está atada a turnos; reutilizarla obliga a
   crear contactos y a ampliar el modelo, así que se difiere a M5.
-- Interfaces web y Flutter (M5), cobro de monedas (M4) y firma digital.
-- Los PDF de ofertas no se borran del almacenamiento privado al eliminar una
-  cuenta, un puesto o una postulación (quedan archivos huérfanos; las filas sí
-  se eliminan en cascada).
+- Interfaces web y Flutter (M5) y firma digital.
+- Los PDF de ofertas se retiran del almacenamiento privado al borrar una cuenta
+  sin ofertas aceptadas; los de una cuenta con constancia se conservan (el
+  borrado se bloquea, ver «Constancia de aceptación»).
 
 **Migración `20261006100000_job_postings`** (solo agrega): enums, tablas
 `JobPosting`, `JobApplication`, `JobOffer`, `JobOfferUpload` y
 `JobApplicationEvent`; `CHECK` de rango salarial, vacantes y salario ofertado;
 índice único parcial (una oferta abierta o aceptada por postulación) y el
 trigger de inmutabilidad.
+
+## Acciones conectadas a la moneda virtual (M4)
+
+Solo API y datos (las interfaces son M5). Usa el catálogo de M2 y el libro de M1.
+
+**Principio:** lo básico es gratis y nunca se bloquea por saldo (aceptar o
+rechazar una oferta, retirarse, responder una invitación, ver el proceso, leer el
+saldo). Solo cobran las acciones del catálogo listadas abajo.
+
+**Cobro atómico.** El débito ocurre dentro de la misma transacción `Serializable`
+de la acción (`CurrencyActionService.charge`, sin transacción propia): si la
+acción falla no queda cobro, y si el cobro falla no queda la acción. Cada
+instancia tiene una clave de idempotencia (`job-publish:{postingId}`,
+`job-apply:{postingId}:{workerId}`, `job-priority:{applicationId}`,
+`job-highlight:{postingId}:{n}`, `talent-invite:{id}`,
+`contact-unlock:{companyId}:{workerUserId}`) guardada en `CurrencyActionUse`
+(único): reintentos y clics repetidos nunca cobran dos veces. La cuenta se
+bloquea con `SELECT ... FOR UPDATE` y el saldo nunca queda negativo.
+
+**Cuota gratuita.** Contador real por usuario, acción y **mes calendario de
+Lima** (`JOB_PUBLISH_EXTRA`: 3/mes empresa; `APPLICATION_EXTRA`: 10/mes
+trabajador). Dentro de la cuota se registra el uso con cobro 0; fuera, se cobra
+el monto del catálogo.
+
+**Errores (409):** `INSUFFICIENT_CURRENCY` `{cost, balance}` (sin efectos
+secundarios), `DAILY_SPEND_CAP_REACHED` `{cost, dailyCap, spentToday}`,
+`IDEMPOTENCY_KEY_REUSED`.
+
+**Tope de gasto diario.** `DAILY_SPEND_CAP_WORKER` y `DAILY_SPEND_CAP_COMPANY`
+(provisional 200 monedas por día de Lima y por actor). Suma lo cobrado en el
+día; nunca aplica a devoluciones, premios ni acciones gratuitas.
+
+| Acción (clave) | Ruta | Notas |
+| --- | --- | --- |
+| `JOB_PUBLISH_EXTRA` | `POST /api/business/job-postings/:id/publish` | Solo la primera publicación cuenta; reanudar un puesto pausado es gratis. |
+| `JOB_HIGHLIGHT` | `POST /api/business/job-postings/:id/highlight` | Fija `highlightedUntil` (duración editable); los destacados salen primero en la búsqueda de puestos. Con uno vigente no cobra. |
+| `APPLICATION_EXTRA` | `POST /api/workers/job-postings/:id/applications` | Una vez por (puesto, trabajador): re-postular no cobra de nuevo. |
+| `APPLICATION_PRIORITY` | `priority: true` al postular, o `POST /api/workers/job-applications/:id/priority` | Marca `isPriority`; la empresa la ve primero. Solo mientras la empresa no la haya movido. Atómico con la postulación. |
+| `TALENT_INVITE` | `POST /api/business/talent-invitations` | Cobra al crear la invitación; con devolución. |
+| `CANDIDATE_CONTACT_UNLOCK` | `POST /api/business/talent/:profileId/unlock-contact` | Idempotente por (empresa, candidato): `201` la primera vez, `200` después, sin cobrar. Habilita `GET /api/business/talent/:profileId/contact` y `.../cv`; `GET /api/business/talent-unlocks` lista los desbloqueos. Sin desbloqueo, `CONTACT_NOT_UNLOCKED`. |
+
+**Cotización sin efectos.** `GET /api/workers/currency/quote` y
+`GET /api/business/currency/quote` con `?actionKey=&targetId=` (opcional: puesto,
+postulación o perfil) devuelven `{currency, actionKey, cost, reason
+(CHARGE|FREE_QUOTA|ALREADY_REGISTERED|FREE_ACTION), freeQuota, balance,
+sufficientBalance, dailyCap, withinDailyCap, canExecute, refundWindowHours}`. No
+escribe nada ni crea cuentas. Acción no cotizable: `404 ACTION_NOT_QUOTABLE`.
+
+**Bono de bienvenida (`WELCOME_BONUS`).** Se otorga al registrar un trabajador y
+al crear la cuenta de una empresa (admin), con clave `welcome-bonus:{actor}:{id}`:
+un solo bono por cuenta; si falla no deshace el alta. Para cuentas anteriores:
+`POST /api/admin/currency/welcome-bonus/backfill` (idempotente; informa cuántas
+cuentas lo recibieron y cuántas ya lo tenían). Una cuenta con el movimiento del
+bono cuenta como «ya lo tenía» aunque el monto de `WELCOME_BONUS` se haya
+editado después (no hay `409 IDEMPOTENCY_KEY_REUSED` y la pasada continúa;
+CN-20261007-045). No hay migración masiva automática.
+
+**Devolución automática.** Tarea programada en proceso (`server.ts`,
+`CURRENCY_REFUND_INTERVAL_MS`, 5 min por defecto; `0`/`off` la desactiva y no
+corre bajo pruebas). Para `TALENT_INVITE`, `APPLICATION_EXTRA` y
+`APPLICATION_PRIORITY` cobradas, al cumplirse `refundWindowHours` del catálogo
+(72 h provisional, congelado al cobrar) devuelve el costo si la otra parte no
+respondió (invitación sin respuesta; postulación todavía `APPLIED` sin
+movimiento de la empresa ni retirada). Un movimiento `ACTION_REFUND` enlazado al
+cobro (`refundOfId`, único) y la clave `refund:{movimiento}` garantizan una sola
+devolución por cobro; cada cobro se reclama con `FOR UPDATE SKIP LOCKED`, seguro
+con varias instancias de la API. `POST /api/admin/currency/refunds/run` ejecuta
+una pasada.
+
+**Ajustes del administrador** (con historial, como el catálogo):
+`GET /api/admin/currency/settings`, `GET /api/admin/currency/settings/changes` y
+`PATCH /api/admin/currency/settings/:key {value, reason}` para
+`DAILY_SPEND_CAP_WORKER`, `DAILY_SPEND_CAP_COMPANY` y
+`JOB_HIGHLIGHT_DURATION_HOURS`.
+
+**Diferido:** `PROFILE_HIGHLIGHT` (destacar el perfil del trabajador) no se
+implementó: la búsqueda de talento usa un orden y un cursor propios sin campo de
+destacado, y cambiarlos excede un cambio acotado. Los premios por perfil
+completo, documentos, referidos, empresa verificada, respuesta a tiempo y
+contratación confirmada son M6.
+
+**Migración `20261007100000_currency_actions`:** agrega `CurrencyActionUse`,
+`CurrencySetting`, `CurrencySettingChange` y `CandidateContactUnlock`; las
+columnas `CurrencyMovement.actionKey/refundOfId`, `JobPosting.highlightedUntil` y
+`JobApplication.isPriority/prioritizedAt/autoClosedReason`; valores de enum
+nuevos; y cambia tres FK a `RESTRICT`. La única sentencia de datos rellena
+`autoClosedReason` en las postulaciones que M3 ya había rechazado al cerrar o
+cubrir un puesto (evento `REJECTED` con ese detalle y sin `decisionReason`); no
+borra filas. Las postulaciones `ACCEPTED` que ya estuvieran sobre un puesto
+cerrado o cubierto antes de M4 no se resuelven solas.
+
+**Bono de bienvenida y borrado (decisión del dueño, CN-20261007-045):** el bono
+por sí solo no retiene el borrado. `DELETE /api/admin/workers/:id` y
+`DELETE /api/admin/companies/:id` responden `204` para una cuenta cuyo único
+movimiento es el `WELCOME_BONUS`; con cualquier otro movimiento siguen
+respondiendo `409 CURRENCY_LEDGER_RETAINED` (ver «Borrado de titulares»).
+Límite conocido (`CN-20261007-046`): como una cuenta recién registrada ahora sí
+llega al borrado, dos borrados simultáneos del mismo titular, o un borrado
+simultáneo con una acción del propio titular (postular, publicar), pueden
+responder `500` al perdedor (registro ya borrado, interbloqueo o FK). La
+transacción se revierte entera: no se borra nada a medias ni se corrompe el
+libro, y repetir la operación da el resultado correcto (`404`, `204` o `409`).
+
+**Postulación con oferta aceptada (CN-20261007-045):** una oferta `ACCEPTED` es
+una constancia inmutable. Si el trabajador se retira después de aceptarla,
+`POST /api/workers/job-postings/:id/applications` no reabre la postulación y
+responde `409 APPLICATION_HAS_ACCEPTED_OFFER` (la postulación queda `WITHDRAWN`
+y la oferta, intacta). Emitir una oferta sobre una postulación que ya tiene una
+aceptada responde el mismo `409`, nunca `500`.
+
+**Devolución y concurrencia (CN-20261007-045):** cada devolución se procesa en una
+transacción `Serializable` con reintento; un cobro simultáneo sobre la misma
+cuenta ya no produce `500` por `(accountId, sequence)`.
 
 ## Superadmin: cuentas empresariales
 
@@ -380,9 +524,9 @@ Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar e
 - `GET /api/admin/companies`: listado con propietario y suscripción.
 - `POST /api/admin/companies`: crea en una transacción la cuenta `BUSINESS` y su empresa.
 - `PATCH /api/admin/companies/:id`: actualiza datos operativos (RUC, correo y contraseña no se modifican aquí).
-- `DELETE /api/admin/companies/:id`: elimina la empresa y su cuenta propietaria; no permite eliminar la cuenta del administrador actual; `409 CURRENCY_LEDGER_RETAINED` si la empresa tiene movimientos de moneda virtual.
+- `DELETE /api/admin/companies/:id`: elimina la empresa y su cuenta propietaria; no permite eliminar la cuenta del administrador actual; `409 CURRENCY_LEDGER_RETAINED` si la empresa tiene movimientos de moneda virtual distintos del bono de bienvenida (el bono por sí solo no retiene: `204`); `409 CONTRACT_RECORDS_RETAINED` si alguna postulación a sus puestos tiene una oferta aceptada. Sin ellas, borra antes sus puestos, postulaciones y los PDF de ofertas.
 - `GET /api/admin/workers`: listado global de cuentas `WORKER` con su contacto por empresa.
-- `DELETE /api/admin/workers/:id`: elimina una cuenta `WORKER` (`404 WORKER_NOT_FOUND` si el id no existe o no corresponde a un trabajador). Borra primero en la base (transacción) y solo después elimina del almacenamiento privado el CV y la foto de perfil del trabajador, si existían (un fallo del almacenamiento tras confirmar el borrado se registra en el log y no deshace la baja: solo quedan archivos huérfanos); si el trabajador tiene movimientos de moneda virtual responde `409 CURRENCY_LEDGER_RETAINED` sin tocar archivos. El resto de filas asociadas (aplicaciones, asignaciones, sesiones, identidades externas) se elimina en cascada a nivel de base de datos.
+- `DELETE /api/admin/workers/:id`: elimina una cuenta `WORKER` (`404 WORKER_NOT_FOUND` si el id no existe o no corresponde a un trabajador). Borra primero en la base (transacción) y solo después elimina del almacenamiento privado el CV y la foto de perfil del trabajador, si existían (un fallo del almacenamiento tras confirmar el borrado se registra en el log y no deshace la baja: solo quedan archivos huérfanos); si el trabajador tiene movimientos de moneda virtual distintos del bono de bienvenida (el bono por sí solo no retiene: `204`) responde `409 CURRENCY_LEDGER_RETAINED` sin tocar archivos, y si tiene una oferta de puesto fijo aceptada, `409 CONTRACT_RECORDS_RETAINED`. Sus postulaciones a puestos fijos se borran explícitamente en la misma transacción (FK `RESTRICT`, M4) y sus PDF de oferta se retiran tras confirmar. El resto de filas asociadas (postulaciones a turnos, asignaciones, sesiones, identidades externas) se elimina en cascada a nivel de base de datos.
 
 El alta exige nombre comercial, RUC de 11 dígitos, correo y contraseña inicial (mínimo 8 caracteres, con mayúscula y número). Los datos de contacto y razón social pueden completarse o editarse después desde el panel.
 
@@ -794,6 +938,8 @@ Persisten el contacto inicial entre una empresa y un perfil del directorio de ta
 - `POST /api/workers/me/talent-invitations/:id/decline` (sesión `WORKER`): rechaza una invitación propia `PENDING` y no vencida.
 
 Estados: `PENDING`, `ACCEPTED`, `DECLINED`, `EXPIRED`, `CANCELLED`. Esta entrega implementa las transiciones `PENDING → ACCEPTED` y `PENDING → DECLINED` (ambas solo por el trabajador destinatario) y la transición automática `PENDING → EXPIRED`, evaluada siempre en el servidor (nunca a partir de un `expiresAt` calculado en el cliente): al listar o al intentar responder una invitación vencida, el servidor la transiciona primero y luego aplica la regla, de forma que una invitación vencida nunca puede aceptarse. `CANCELLED` queda reservada en el modelo para una cancelación futura iniciada por la empresa; no hay todavía ninguna ruta que la produzca.
+
+**Costo (M4):** crear una invitación cobra `TALENT_INVITE` (`409 INSUFFICIENT_CURRENCY` sin efectos si no alcanza) y se devuelve automáticamente si el trabajador no responde en 72 h.
 
 **Duplicados:** no puede existir más de una invitación *activa* (`PENDING` o `ACCEPTED`) para el mismo par empresa/perfil de talento (y turno, si se indicó uno). El intento duplicado responde `409 INVITATION_ALREADY_ACTIVE`, tanto si lo detecta la comprobación previa del servidor como si lo detecta el índice único parcial de la base de datos ante una carrera concurrente; nunca se crea un segundo registro. Tras `DECLINED`, `EXPIRED` o `CANCELLED`, una nueva invitación para el mismo par vuelve a ser posible.
 

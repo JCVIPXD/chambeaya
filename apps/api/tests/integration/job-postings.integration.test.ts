@@ -540,11 +540,15 @@ describe('fixed job postings (M3) under PostgreSQL', () => {
     expect((await issueOffer(companyA.token, id3)).status).toBe(409);
     expect((await request(app).post(company(`${id3}/stage`)).set(as(companyA.token)).send({ status: 'SHORTLISTED' })).status).toBe(409);
 
-    // Retirada del trabajador (idempotente) y sin posibilidad de volver a postular.
+    // Retirada del trabajador (idempotente). Volver a postular reactiva la MISMA postulacion (M4).
     expect((await request(app).post(`/api/workers/job-applications/${id1}/withdraw`).set(as(w1.token))).body).toMatchObject({ status: 'WITHDRAWN', idempotent: false });
     expect((await request(app).post(`/api/workers/job-applications/${id1}/withdraw`).set(as(w1.token))).body.idempotent).toBe(true);
     const again = await apply(w1.token, postingId);
-    expect([again.status, again.body.error, again.body.status]).toEqual([409, 'ALREADY_APPLIED', 'WITHDRAWN']);
+    expect([again.status, again.body.id, again.body.status, again.body.reopened]).toEqual([200, id1, 'APPLIED', true]);
+    expect(again.body.events.at(-1).type).toBe('APPLICATION_REOPENED');
+    expect((await apply(w1.token, postingId)).body.idempotent).toBe(true);
+    // Se retira otra vez: una postulacion retirada no admite acciones de la empresa.
+    expect((await request(app).post(`/api/workers/job-applications/${id1}/withdraw`).set(as(w1.token))).body).toMatchObject({ status: 'WITHDRAWN', idempotent: false });
     expect((await request(app).post(company(`${id1}/reject`)).set(as(companyA.token)).send({})).status).toBe(409);
 
     // Rechazar la oferta equivale a retirarse, con su propio evento.
@@ -574,7 +578,8 @@ describe('fixed job postings (M3) under PostgreSQL', () => {
     expect(results.find((response) => response.status === 409)?.body.error).toBe('POSTING_FILLED');
     expect(await postingRow(postingId)).toMatchObject({ status: 'FILLED', filledVacancies: 1 });
     const statuses = (await Promise.all([a, b].map(({ applicationId }) => applicationRow(applicationId)))).map((row) => row.status).sort();
-    expect(statuses).toEqual(['ACCEPTED', 'HIRED']);
+    // La que perdio la carrera ya no queda "Aceptada" sobre un puesto cubierto: el sistema la resuelve (M4).
+    expect(statuses).toEqual(['HIRED', 'REJECTED']);
   }, 30_000);
 
   it('never exceeds the vacancies with many simultaneous hires, and the counter always equals the hires', async () => {
@@ -659,8 +664,9 @@ describe('fixed job postings (M3) under PostgreSQL', () => {
     const hire = await request(app).post(`/api/business/job-applications/${applicationId}/hire`).set(as(companyA.token));
     expect([hire.status, hire.body.error]).toEqual([409, 'POSTING_NOT_OPEN']);
     expect((await postingRow(postingId)).filledVacancies).toBe(0);
-    // Aun cerrado, la empresa puede rechazar y el trabajador retirarse.
-    expect((await request(app).post(`/api/workers/job-applications/${applicationId}/withdraw`).set(as(workers[2]!.token))).status).toBe(200);
+    // Lo caducado no se queda en "Aceptada": el cierre la resuelve y la constancia se conserva (M4).
+    expect(await applicationRow(applicationId)).toMatchObject({ status: 'REJECTED', autoClosedReason: 'POSTING_CLOSED' });
+    expect((await request(app).post(`/api/workers/job-applications/${applicationId}/withdraw`).set(as(workers[2]!.token))).status).toBe(409);
   });
 
   it('pushes real-time notices only to the counterpart over the SSE stream', async () => {
@@ -706,27 +712,27 @@ describe('fixed job postings (M3) under PostgreSQL', () => {
     await new Promise((resolve) => server.close(resolve));
   }, 30_000);
 
-  it('lets an account with an accepted offer be deleted by cascade (the immutability trigger only blocks UPDATE)', async () => {
+  it('retains the acceptance record: an account with an accepted offer cannot be deleted (RESTRICT, CONTRACT_RECORDS_RETAINED)', async () => {
     const leaver = await makeAccount('WORKER', 'trabajador.baja', '40009999');
     const owner = await makeAccount('BUSINESS', 'empresa.baja', '20333333333');
     const postingId = await createPosting(owner.token, { title: 'Puesto de una empresa que se da de baja', vacancies: 2 });
     const { applicationId, offerId } = await toAccepted(owner.token, leaver.token, postingId);
     const hired = await request(app).post(`/api/business/job-applications/${applicationId}/hire`).set(as(owner.token));
     expect(hired.status).toBe(200);
+
+    // Las FK RESTRICT respaldan la regla aunque otra ruta intentara borrar directamente.
+    await expect(prisma.user.delete({ where: { id: leaver.id } })).rejects.toThrow(/RESTRICT|23001/);
+    await expect(prisma.jobPosting.delete({ where: { id: postingId } })).rejects.toThrow(/RESTRICT|23001/);
+
+    // La ruta de administracion responde 409 sin borrar nada.
+    const workerDelete = await request(app).delete(`/api/admin/workers/${leaver.id}`).set(as(admin.token));
+    expect([workerDelete.status, workerDelete.body]).toEqual([409, { error: 'CONTRACT_RECORDS_RETAINED' }]);
+    const companyId = (await prisma.company.findUniqueOrThrow({ where: { ownerId: owner.id } })).id;
+    const companyDelete = await request(app).delete(`/api/admin/companies/${companyId}`).set(as(admin.token));
+    expect([companyDelete.status, companyDelete.body]).toEqual([409, { error: 'CONTRACT_RECORDS_RETAINED' }]);
     expect(await prisma.jobOffer.count({ where: { id: offerId, status: 'ACCEPTED' } })).toBe(1);
-
-    // Baja del trabajador: la postulacion, la oferta y sus eventos desaparecen; el puesto y la empresa siguen.
-    await prisma.user.delete({ where: { id: leaver.id } });
-    expect(await prisma.jobOffer.count({ where: { id: offerId } })).toBe(0);
-    expect(await prisma.jobApplication.count({ where: { id: applicationId } })).toBe(0);
+    expect(await prisma.jobApplication.count({ where: { id: applicationId } })).toBe(1);
     expect(await prisma.jobPosting.count({ where: { id: postingId } })).toBe(1);
-
-    // Baja de la empresa: el puesto y todo lo que cuelga de el.
-    const second = await makeAccount('WORKER', 'trabajador.baja2', '40009998');
-    const again = await toAccepted(owner.token, second.token, postingId);
-    await prisma.user.delete({ where: { id: owner.id } });
-    expect(await prisma.jobPosting.count({ where: { id: postingId } })).toBe(0);
-    expect(await prisma.jobOffer.count({ where: { id: again.offerId } })).toBe(0);
-    expect(await prisma.user.count({ where: { id: second.id } })).toBe(1);
+    expect(await prisma.user.count({ where: { id: { in: [leaver.id, owner.id] } } })).toBe(2);
   }, 30_000);
 });

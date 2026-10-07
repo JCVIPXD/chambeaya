@@ -262,8 +262,26 @@ export class LocalAuthService implements AuthService {
   }
 }
 
+export type AuthServiceOptions = {
+  /**
+   * Se invoca tras crear la cuenta de un trabajador (bono de bienvenida, M4). Un fallo se
+   * registra pero NUNCA deshace el registro: el bono es idempotente y la ruta de
+   * administración `/api/admin/currency/welcome-bonus/backfill` lo regulariza.
+   */
+  onWorkerCreated?: (workerId: string) => Promise<void>;
+};
+
 export class DatabaseAuthService implements AuthService {
-  constructor(private readonly prisma = new PrismaClient()) {}
+  constructor(private readonly prisma = new PrismaClient(), private readonly options: AuthServiceOptions = {}) {}
+
+  private async notifyWorkerCreated(account: User) {
+    if (account.role !== 'WORKER' || !this.options.onWorkerCreated) return;
+    try {
+      await this.options.onWorkerCreated(account.id);
+    } catch (error) {
+      console.error('WELCOME_BONUS_FAILED', error);
+    }
+  }
 
   async register(input: RegisterInput): Promise<AuthSession> {
     const normalized = normalizeRegistration(input);
@@ -279,6 +297,7 @@ export class DatabaseAuthService implements AuthService {
           identifier: normalized.identifier,
         },
       });
+      await this.notifyWorkerCreated(account);
       return this.sessionFor(account);
     } catch (error) {
       if (
@@ -414,6 +433,7 @@ export class DatabaseAuthService implements AuthService {
         },
       });
       await this.prisma.googleProfileSetup.delete({ where: { id: setup.id } });
+      await this.notifyWorkerCreated(account);
       return this.sessionFor(account);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {

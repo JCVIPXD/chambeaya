@@ -1,12 +1,80 @@
-import { Prisma, PrismaClient, type CurrencyAccountOwnerType, type CurrencyMovement } from '@prisma/client';
+import { Prisma, PrismaClient, type CurrencyAccountOwnerType, type CurrencyMovement, type CurrencyMovementAction } from '@prisma/client';
 
 import { withSerializableRetry } from '../operations/serializable-retry.js';
 import { virtualCurrencyName } from './currency.config.js';
 
 export class CurrencyError extends Error {
-  constructor(public readonly code: string, public readonly statusCode: number) {
+  constructor(
+    public readonly code: string,
+    public readonly statusCode: number,
+    /** Datos que el cliente necesita para explicar el error (p. ej. costo y saldo). */
+    public readonly details: Record<string, unknown> = {},
+  ) {
     super(code);
   }
+}
+
+export type MovementAppend = {
+  accountId: string;
+  /** Positivo suma (premio, devolución), negativo resta (cargo). Nunca cero. */
+  quantity: number;
+  action: CurrencyMovementAction;
+  actionKey?: string | null;
+  reason?: string | null;
+  related?: { type: string; id: string } | null;
+  idempotencyKey: string;
+  createdById?: string | null;
+  /** Solo en una devolución: el cargo original que se devuelve. */
+  refundOfId?: string | null;
+};
+
+/**
+ * Agrega un movimiento DENTRO de la transacción en curso (M4): permite que la
+ * acción de producto y su cobro sean todo-o-nada. Si la transacción se revierte,
+ * el movimiento desaparece con ella. Idempotente por `idempotencyKey`: repetir la
+ * misma petición devuelve el movimiento existente sin escribir nada. Las mismas
+ * garantías que `adjust` (SSI + `(accountId, sequence)` único + CHECK de saldo)
+ * sostienen la corrección bajo concurrencia; el bloqueo de la fila de la cuenta
+ * solo reduce los conflictos.
+ */
+export async function appendMovementTx(tx: Prisma.TransactionClient, input: MovementAppend) {
+  if (input.quantity === 0) throw new Error('INVALID_CURRENCY_QUANTITY');
+  await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "CurrencyAccount" WHERE "id" = ${input.accountId} FOR UPDATE`);
+  const repeated = await tx.currencyMovement.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
+  if (repeated) {
+    if (repeated.accountId !== input.accountId || repeated.quantity !== input.quantity || repeated.action !== input.action) {
+      throw new CurrencyError('IDEMPOTENCY_KEY_REUSED', 409);
+    }
+    return { movement: repeated, idempotent: true };
+  }
+  const latest = await tx.currencyMovement.findFirst({ where: { accountId: input.accountId }, orderBy: { sequence: 'desc' }, select: { sequence: true, balanceAfter: true } });
+  const balance = latest?.balanceAfter ?? 0;
+  const balanceAfter = balance + input.quantity;
+  if (balanceAfter < 0) throw new CurrencyError('INSUFFICIENT_CURRENCY', 409, { cost: -input.quantity, balance });
+  if (balanceAfter > MAX_CURRENCY_BALANCE) throw new CurrencyError('CURRENCY_BALANCE_LIMIT_EXCEEDED', 409);
+  const movement = await tx.currencyMovement.create({
+    data: {
+      accountId: input.accountId,
+      sequence: (latest?.sequence ?? 0) + 1,
+      quantity: input.quantity,
+      balanceAfter,
+      action: input.action,
+      actionKey: input.actionKey ?? null,
+      reason: input.reason ?? null,
+      relatedEntityType: input.related?.type ?? null,
+      relatedEntityId: input.related?.id ?? null,
+      idempotencyKey: input.idempotencyKey,
+      createdById: input.createdById ?? null,
+      refundOfId: input.refundOfId ?? null,
+    },
+  });
+  return { movement, idempotent: false };
+}
+
+/** Saldo actual de una cuenta dentro de la transacción en curso. */
+export async function balanceTx(tx: Prisma.TransactionClient, accountId: string) {
+  const latest = await tx.currencyMovement.findFirst({ where: { accountId }, orderBy: { sequence: 'desc' }, select: { balanceAfter: true } });
+  return latest?.balanceAfter ?? 0;
 }
 
 export type CurrencyMovementPage = { limit: number; cursor?: string };
@@ -34,10 +102,12 @@ function movementView(movement: MovementWithActor) {
     quantity: movement.quantity,
     balanceAfter: movement.balanceAfter,
     action: movement.action,
+    actionKey: movement.actionKey,
     reason: movement.reason,
     relatedEntity: movement.relatedEntityType && movement.relatedEntityId
       ? { type: movement.relatedEntityType, id: movement.relatedEntityId }
       : null,
+    refundOfId: movement.refundOfId,
     actor: movement.createdBy,
     createdAt: movement.createdAt,
   };

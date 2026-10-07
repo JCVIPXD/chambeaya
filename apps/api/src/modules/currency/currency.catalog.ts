@@ -122,3 +122,10 @@ export function resolveCatalogAction(
     refundWindowHours: entry.refundWindowHours,
   };
 }
+
+/** Ventana [start, end) del día calendario de Lima que contiene `now` (base del tope de gasto diario). */
+export function limaDayWindow(now: Date): { start: Date; end: Date } {
+  const lima = new Date(now.getTime() - LIMA_OFFSET_HOURS * 3_600_000);
+  const start = Date.UTC(lima.getUTCFullYear(), lima.getUTCMonth(), lima.getUTCDate(), LIMA_OFFSET_HOURS);
+  return { start: new Date(start), end: new Date(start + 24 * 3_600_000) };
+}

@@ -9,6 +9,11 @@ import {
   type AuthService,
 } from "../auth/auth.service.js";
 import { PrivateDocumentStorage } from "../talent/private_document_storage.js";
+import {
+  ContractRecordsRetainedError,
+  removeCompanyJobRecords,
+  removeWorkerJobRecords,
+} from "../jobs/jobs.retention.js";
 import { CHECK_IN_LATE_LIMIT_MS, resolveAssignmentLifecycle } from "../operations/shift-state.js";
 
 /**
@@ -24,6 +29,27 @@ class LedgerRetainedError extends Error {
   constructor() {
     super(LEDGER_RETAINED);
   }
+}
+
+/**
+ * El bono de bienvenida por sí solo no retiene el borrado (CN-20261007-045,
+ * MEDIO-2 de CN-20261007-044). Con la cuenta ya bloqueada (`FOR UPDATE`, así un
+ * movimiento concurrente termina antes y se ve aquí), cualquier movimiento que
+ * no sea el `WELCOME_BONUS` mantiene el 409. Si el bono es lo único, se declara
+ * el permiso estrecho del trigger del libro (`set_config` local a la
+ * transacción, solo para ESTA cuenta) y se borra ese movimiento; la cuenta y el
+ * titular se borran después en la misma transacción. Un movimiento que se cuele
+ * entre el conteo y el borrado lo rechaza el trigger (que vuelve a comprobarlo)
+ * o la FK `RESTRICT` de la cuenta (23001), y ambos llegan como 409.
+ */
+async function releaseWelcomeOnlyLedger(tx: Prisma.TransactionClient, accountId: string | null) {
+  if (!accountId) return;
+  const others = await tx.currencyMovement.count({
+    where: { accountId, NOT: { action: "REWARD", actionKey: "WELCOME_BONUS" } },
+  });
+  if (others > 0) throw new LedgerRetainedError();
+  await tx.$executeRaw`SELECT set_config('chambeaya.welcome_bonus_delete_account', ${accountId}, true)`;
+  await tx.currencyMovement.deleteMany({ where: { accountId, action: "REWARD", actionKey: "WELCOME_BONUS" } });
 }
 
 /**
@@ -47,6 +73,23 @@ function isCurrencyForeignKeyViolation(error: unknown) {
       ? JSON.stringify(error.meta ?? {})
       : (error as Error).message;
   return detail.includes("Currency");
+}
+
+/**
+ * La constancia de una oferta aceptada (y su postulación, puesto y empresa) se
+ * conserva igual que el libro: borrar al titular se bloquea con 409 y no se borra
+ * nada. Cubre también el 23001 de las FK `RESTRICT` de puestos y postulaciones
+ * (p. ej. una aceptación que llega entre la comprobación y el borrado).
+ */
+const CONTRACT_RETAINED = "CONTRACT_RECORDS_RETAINED";
+
+function isJobForeignKeyViolation(error: unknown) {
+  if (!isRestrictViolation(error)) return false;
+  const detail =
+    error instanceof Prisma.PrismaClientKnownRequestError
+      ? JSON.stringify(error.meta ?? {})
+      : (error as Error).message;
+  return detail.includes("Job");
 }
 
 function bearerToken(value: string | undefined) {
@@ -141,6 +184,10 @@ export function createAdminRouter(
   authService: AuthService = new DatabaseAuthService(),
   prisma = new PrismaClient(),
   documents = new PrivateDocumentStorage(),
+  options: {
+    /** Se invoca tras crear la cuenta de una empresa (bono de bienvenida, M4); un fallo no deshace la alta. */
+    onCompanyCreated?: (ownerId: string) => Promise<void>;
+  } = {},
 ) {
   const router = Router();
   const guard = async (
@@ -175,8 +222,16 @@ export function createAdminRouter(
         response.status(409).json({ error: "DUPLICATE_RECORD" });
         return;
       }
-      if (error instanceof LedgerRetainedError || isCurrencyForeignKeyViolation(error)) {
+      if (
+        error instanceof LedgerRetainedError ||
+        isCurrencyForeignKeyViolation(error) ||
+        (error instanceof Error && error.message.includes("CURRENCY_MOVEMENT_APPEND_ONLY"))
+      ) {
         response.status(409).json({ error: LEDGER_RETAINED });
+        return;
+      }
+      if (error instanceof ContractRecordsRetainedError || isJobForeignKeyViolation(error)) {
+        response.status(409).json({ error: CONTRACT_RETAINED });
         return;
       }
       if (isRestrictViolation(error)) {
@@ -279,6 +334,10 @@ export function createAdminRouter(
           createdAt: company.createdAt,
         };
       });
+      await options.onCompanyCreated?.(user.owner.id).catch((error: unknown) => {
+        // La alta ya está confirmada; el bono se puede regularizar con la ruta de administración.
+        console.error("WELCOME_BONUS_FAILED", error);
+      });
       response.status(201).json(user);
     }),
   );
@@ -320,17 +379,23 @@ export function createAdminRouter(
         response.status(400).json({ error: "SELF_DELETE_NOT_ALLOWED" });
         return;
       }
+      let jobFiles: string[] = [];
       await prisma.$transaction(async (tx) => {
         // Bloquea la cuenta antes de contar: un ajuste que ya la tenga bloqueada
         // termina primero y su movimiento se ve en el conteo (BAJO-4).
-        await tx.$queryRaw`SELECT "id" FROM "CurrencyAccount" WHERE "companyId" = ${company.id} FOR UPDATE`;
-        const movements = await tx.currencyMovement.count({
-          where: { account: { companyId: company.id } },
-        });
-        if (movements > 0) throw new LedgerRetainedError();
+        const accountIds = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "CurrencyAccount" WHERE "companyId" = ${company.id} FOR UPDATE`;
+        await releaseWelcomeOnlyLedger(tx, accountIds[0]?.id ?? null);
+        jobFiles = await removeCompanyJobRecords(tx, company.id);
         await tx.currencyAccount.deleteMany({ where: { companyId: company.id } });
         await tx.user.delete({ where: { id: company.ownerId } });
       });
+      for (const storageKey of jobFiles) {
+        try {
+          await documents.remove(storageKey);
+        } catch (error) {
+          console.error("ORPHAN_JOB_DOCUMENT_FILE", storageKey, error);
+        }
+      }
       response.status(204).send();
     }),
   );
@@ -376,15 +441,21 @@ export function createAdminRouter(
       // se rechaza (libro mayor retenido) no se pierde ningún archivo. Si el
       // almacenamiento falla tras confirmar, solo quedan archivos huérfanos
       // sin fila que los referencie, que es el fallo recuperable.
+      let jobFiles: string[] = [];
       await prisma.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT "id" FROM "CurrencyAccount" WHERE "workerId" = ${request.params.id} FOR UPDATE`;
-        const movements = await tx.currencyMovement.count({
-          where: { account: { workerId: request.params.id } },
-        });
-        if (movements > 0) throw new LedgerRetainedError();
+        const accountIds = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "CurrencyAccount" WHERE "workerId" = ${request.params.id} FOR UPDATE`;
+        await releaseWelcomeOnlyLedger(tx, accountIds[0]?.id ?? null);
+        jobFiles = await removeWorkerJobRecords(tx, request.params.id);
         await tx.currencyAccount.deleteMany({ where: { workerId: request.params.id } });
         await tx.user.delete({ where: { id: request.params.id } });
       });
+      for (const storageKey of jobFiles) {
+        try {
+          await documents.remove(storageKey);
+        } catch (error) {
+          console.error("ORPHAN_JOB_DOCUMENT_FILE", storageKey, error);
+        }
+      }
       for (const document of workerDocuments) {
         try {
           await documents.remove(document.storageKey);
