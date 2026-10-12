@@ -1,6 +1,10 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 import type { AuthSession } from '../auth/auth.service.js';
+import { instanceKeys, type CurrencyActionService } from '../currency/currency.actions.js';
+import type { ProfileRewardService } from '../currency/currency.profile-rewards.js';
+import { readCurrencySetting } from '../currency/currency.settings.js';
+import { withSerializableRetry } from '../operations/serializable-retry.js';
 import { companyCanViewApplicantCv } from './cv_access.js';
 import { PrivateDocumentStorage } from './private_document_storage.js';
 
@@ -95,6 +99,8 @@ export interface TalentOperations {
   updateOwnProfile(session: AuthSession, input: TalentProfileInput): Promise<unknown>;
   listSpecialties(): Promise<unknown>;
   searchTalent(session: AuthSession, input: TalentSearchInput): Promise<unknown>;
+  /** M6: destaca el perfil propio en la búsqueda de talento (`PROFILE_HIGHLIGHT`, con costo). */
+  highlightOwnProfile(session: AuthSession): Promise<unknown>;
   createAssignmentReview(session: AuthSession, assignmentId: string, input: AssignmentReviewInput): Promise<unknown>;
   uploadCv(session: AuthSession, input: CvUploadInput): Promise<unknown>;
   downloadCv(session: AuthSession): Promise<CvDownload | null>;
@@ -104,7 +110,7 @@ export interface TalentOperations {
 }
 
 export class TalentError extends Error {
-  constructor(public readonly code: 'WORKER_ACCOUNT_REQUIRED' | 'BUSINESS_ACCOUNT_REQUIRED' | 'SPECIALTY_NOT_FOUND' | 'REVIEW_NOT_ELIGIBLE' | 'REVIEW_ALREADY_EXISTS' | 'APPLICATION_NOT_FOUND' | 'CV_NOT_AVAILABLE') {
+  constructor(public readonly code: 'WORKER_ACCOUNT_REQUIRED' | 'BUSINESS_ACCOUNT_REQUIRED' | 'SPECIALTY_NOT_FOUND' | 'REVIEW_NOT_ELIGIBLE' | 'REVIEW_ALREADY_EXISTS' | 'APPLICATION_NOT_FOUND' | 'CV_NOT_AVAILABLE' | 'PROFILE_NOT_VISIBLE') {
     super(code);
   }
 }
@@ -130,7 +136,27 @@ export class DatabaseTalentService implements TalentOperations {
   constructor(
     private readonly prisma = new PrismaClient(),
     private readonly documents = new PrivateDocumentStorage(),
+    /** M6: premios de perfil. Sin él nada se otorga (pruebas con un cliente simulado); `createApp` lo inyecta. */
+    private readonly rewards?: ProfileRewardService,
+    /** M6: cobro de `PROFILE_HIGHLIGHT`. Sin él destacar el perfil no cobra (pruebas); `createApp` lo inyecta. */
+    private readonly charging?: CurrencyActionService,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
+
+  /**
+   * Ejecuta `work` y, si hay premios, evalúa el perfil en la MISMA transacción
+   * `Serializable` (con reintento): el cambio y su premio son todo-o-nada y dos
+   * guardados simultáneos nunca pagan dos veces (único del hecho + reintento).
+   */
+  private async withProfileRewards<T>(userId: string, work: (client: Prisma.TransactionClient | PrismaClient) => Promise<T>): Promise<T> {
+    const rewards = this.rewards;
+    if (!rewards) return work(this.prisma);
+    return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      const result = await work(tx);
+      await rewards.evaluate(tx, userId);
+      return result;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 10_000 }));
+  }
 
   async ownProfile(session: AuthSession) {
     this.requireWorker(session);
@@ -150,7 +176,7 @@ export class DatabaseTalentService implements TalentOperations {
     const experiences = input.experiences?.map(toExperienceRecord);
     const certifications = input.certifications?.map(toCertificationRecord);
     const languages = input.languages?.map(toLanguageRecord);
-    const profile = await this.prisma.workerTalentProfile.upsert({
+    const profile = await this.withProfileRewards(session.userId, (client) => client.workerTalentProfile.upsert({
       where: { userId: session.userId },
       create: {
         userId: session.userId,
@@ -170,7 +196,7 @@ export class DatabaseTalentService implements TalentOperations {
         languages: languages ? { deleteMany: {}, create: languages } : undefined,
       },
       include: profileInclude,
-    });
+    }));
     return toOwnProfile(profile);
   }
 
@@ -182,37 +208,96 @@ export class DatabaseTalentService implements TalentOperations {
     });
   }
 
+  /**
+   * Búsqueda de talento con orden preferente (M6, `PROFILE_HIGHLIGHT`): primero los perfiles
+   * destacados vigentes y luego el resto; en cada segmento por `id` ascendente. El cursor es
+   * opaco y recuerda el segmento (`H`/`N`), el último `id` y el INSTANTE de la primera página:
+   * la partición destacados/resto se evalúa siempre con ese instante, de modo que un destacado
+   * que vence o se compra a mitad de la paginación no hace que una fila se repita ni se salte
+   * (`highlightedAt <= instante < highlightedUntil` es destacado; lo demás, resto). Un cursor
+   * antiguo (un `id` simple) se interpreta como continuación del segmento resto.
+   */
   async searchTalent(session: AuthSession, input: TalentSearchInput) {
     this.requireBusiness(session);
     const limit = input.limit ?? 20;
     const query = input.query?.trim();
-    const profiles = await this.prisma.workerTalentProfile.findMany({
-      where: {
-        isVisible: true,
-        ...(input.availableOnly ? { isAvailable: true } : {}),
-        ...(input.district ? { district: { equals: input.district, mode: 'insensitive' } } : {}),
-        ...(input.specialtyId ? { specialties: { some: { specialtyId: input.specialtyId } } } : {}),
-        ...(query
-          ? {
-              OR: [
-                { headline: { contains: query, mode: 'insensitive' } },
-                { district: { contains: query, mode: 'insensitive' } },
-                { user: { name: { contains: query, mode: 'insensitive' } } },
-              ],
-            }
-          : {}),
-      },
-      cursor: input.cursor ? { id: input.cursor } : undefined,
-      skip: input.cursor ? 1 : 0,
-      take: limit + 1,
-      orderBy: { id: 'asc' },
-      include: profileInclude,
-    });
-    const hasMore = profiles.length > limit;
-    return {
-      items: profiles.slice(0, limit).map(toTalentCard),
-      nextCursor: hasMore ? profiles[limit - 1]?.id ?? null : null,
+    const now = this.clock();
+    const cursor = decodeTalentCursor(input.cursor, now);
+    const at = cursor?.at ?? now;
+    const filters: Prisma.WorkerTalentProfileWhereInput = {
+      isVisible: true,
+      ...(input.availableOnly ? { isAvailable: true } : {}),
+      ...(input.district ? { district: { equals: input.district, mode: 'insensitive' } } : {}),
+      ...(input.specialtyId ? { specialties: { some: { specialtyId: input.specialtyId } } } : {}),
+      ...(query
+        ? {
+            OR: [
+              { headline: { contains: query, mode: 'insensitive' } },
+              { district: { contains: query, mode: 'insensitive' } },
+              { user: { name: { contains: query, mode: 'insensitive' } } },
+            ],
+          }
+        : {}),
     };
+    const highlighted: Prisma.WorkerTalentProfileWhereInput = { highlightedAt: { lte: at }, highlightedUntil: { gt: at } };
+    const regular: Prisma.WorkerTalentProfileWhereInput = { OR: [{ highlightedUntil: null }, { highlightedUntil: { lte: at } }, { highlightedAt: { gt: at } }] };
+    const take = limit + 1;
+    type Row = Awaited<ReturnType<DatabaseTalentService['fetchProfiles']>>[number];
+    const rows: Array<{ profile: Row; segment: 'H' | 'N' }> = [];
+    if (!cursor || cursor.segment === 'H') {
+      const found = await this.fetchProfiles({ AND: [filters, highlighted, ...(cursor ? [{ id: { gt: cursor.id } }] : [])] }, take);
+      rows.push(...found.map((profile) => ({ profile, segment: 'H' as const })));
+    }
+    if (rows.length < take) {
+      const found = await this.fetchProfiles({ AND: [filters, regular, ...(cursor?.segment === 'N' ? [{ id: { gt: cursor.id } }] : [])] }, take - rows.length);
+      rows.push(...found.map((profile) => ({ profile, segment: 'N' as const })));
+    }
+    const items = rows.slice(0, limit);
+    const last = items.at(-1);
+    return {
+      items: items.map(({ profile }) => toTalentCard(profile, at)),
+      nextCursor: rows.length > limit && last ? encodeTalentCursor(last.segment, last.profile.id, at) : null,
+    };
+  }
+
+  private fetchProfiles(where: Prisma.WorkerTalentProfileWhereInput, take: number) {
+    return this.prisma.workerTalentProfile.findMany({ where, take, orderBy: { id: 'asc' }, include: profileInclude });
+  }
+
+  /**
+   * Destaca el perfil propio (M6, `PROFILE_HIGHLIGHT`): cobra el costo del catálogo (con su cuota
+   * gratuita y el tope diario de gasto) y fija `highlightedAt/Until` en la misma transacción.
+   * Con un destacado vigente repetirlo no cobra ni extiende (doble clic seguro). Un perfil oculto
+   * (`isVisible = false`) no se puede destacar: pagaría por algo que nadie vería.
+   */
+  async highlightOwnProfile(session: AuthSession) {
+    this.requireWorker(session);
+    const charging = this.charging;
+    return withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+      const ensured = await tx.workerTalentProfile.upsert({ where: { userId: session.userId }, create: { userId: session.userId }, update: {}, select: { id: true } });
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "WorkerTalentProfile" WHERE "id" = ${ensured.id} FOR UPDATE`);
+      const profile = await tx.workerTalentProfile.findUniqueOrThrow({ where: { id: ensured.id }, select: { id: true, isVisible: true, highlightedUntil: true } });
+      if (!profile.isVisible) throw new TalentError('PROFILE_NOT_VISIBLE');
+      const now = this.clock();
+      if (profile.highlightedUntil && profile.highlightedUntil.getTime() > now.getTime()) {
+        return { highlightedUntil: profile.highlightedUntil.toISOString(), idempotent: true, chargedAmount: 0 };
+      }
+      let chargedAmount = 0;
+      if (charging) {
+        const sequence = (await tx.currencyActionUse.count({ where: { actionKey: 'PROFILE_HIGHLIGHT', relatedEntityType: 'WorkerTalentProfile', relatedEntityId: profile.id } })) + 1;
+        const charge = await charging.charge(tx, {
+          actor: 'WORKER', userId: session.userId, subjectId: session.userId, actionKey: 'PROFILE_HIGHLIGHT',
+          instanceKey: instanceKeys.profileHighlight(profile.id, sequence),
+          related: { type: 'WorkerTalentProfile', id: profile.id },
+          reason: 'Perfil destacado',
+        });
+        chargedAmount = charge.amount;
+      }
+      const hours = await readCurrencySetting(tx, 'PROFILE_HIGHLIGHT_DURATION_HOURS');
+      const highlightedUntil = new Date(now.getTime() + hours * 3_600_000);
+      await tx.workerTalentProfile.update({ where: { id: profile.id }, data: { highlightedAt: now, highlightedUntil } });
+      return { highlightedUntil: highlightedUntil.toISOString(), idempotent: false, chargedAmount };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 10_000 }));
   }
 
   async createAssignmentReview(session: AuthSession, assignmentId: string, input: AssignmentReviewInput) {
@@ -251,11 +336,12 @@ export class DatabaseTalentService implements TalentOperations {
         where: { userId_kind: { userId: session.userId, kind: 'CV' } },
         select: { storageKey: true },
       });
-      await this.prisma.workerDocument.upsert({
+      // Reemplazar el archivo borra la verificación del administrador (el premio ya pagado no se repite).
+      await this.withProfileRewards(session.userId, (client) => client.workerDocument.upsert({
         where: { userId_kind: { userId: session.userId, kind: 'CV' } },
         create: { userId: session.userId, kind: 'CV', ...stored },
-        update: stored,
-      });
+        update: { ...stored, verifiedAt: null, verifiedById: null },
+      }));
       if (previous && previous.storageKey !== stored.storageKey) {
         await this.documents.remove(previous.storageKey);
       }
@@ -346,11 +432,11 @@ export class DatabaseTalentService implements TalentOperations {
         where: { userId_kind: { userId: session.userId, kind: 'PROFILE_PHOTO' } },
         select: { storageKey: true },
       });
-      await this.prisma.workerDocument.upsert({
+      await this.withProfileRewards(session.userId, (client) => client.workerDocument.upsert({
         where: { userId_kind: { userId: session.userId, kind: 'PROFILE_PHOTO' } },
         create: { userId: session.userId, kind: 'PROFILE_PHOTO', ...stored },
-        update: stored,
-      });
+        update: { ...stored, verifiedAt: null, verifiedById: null },
+      }));
       if (previous && previous.storageKey !== stored.storageKey) {
         await this.documents.remove(previous.storageKey);
       }
@@ -518,6 +604,7 @@ function toLanguages(profile: {
 }
 
 function toOwnProfile(profile: {
+  highlightedUntil?: Date | null;
   id: string; isAvailable: boolean; isVisible: boolean; headline: string | null; bio: string | null; district: string | null; availabilityText: string | null;
   availabilityDays: string[]; availabilityPeriods: string[];
   workRadiusKm: number | null; workDistricts: string[];
@@ -558,6 +645,7 @@ function toOwnProfile(profile: {
     isCertificationsVisible: profile.isCertificationsVisible,
     isLanguagesVisible: profile.isLanguagesVisible,
     isWorkAreaVisible: profile.isWorkAreaVisible,
+    highlightedUntil: profile.highlightedUntil?.toISOString() ?? null,
     specialties: toSpecialties(profile),
     experiences: toExperiences(profile),
     certifications: toCertifications(profile),
@@ -588,10 +676,11 @@ function reputation(reviews: Array<{ rating: number }>) {
 /// (`isXVisible === false`): la sección se devuelve vacía/`null`, no
 /// omitida, para que el contrato de campos sea estable. Ocultar nunca borra
 /// datos: `toOwnProfile` los sigue mostrando siempre al propio trabajador.
-function toTalentCard(profile: Parameters<typeof toOwnProfile>[0]) {
+function toTalentCard(profile: Parameters<typeof toOwnProfile>[0] & { highlightedAt?: Date | null }, at: Date) {
   const own = toOwnProfile(profile);
   return {
     id: own.id,
+    isHighlighted: Boolean(profile.highlightedAt && profile.highlightedUntil && profile.highlightedAt.getTime() <= at.getTime() && profile.highlightedUntil.getTime() > at.getTime()),
     name: own.name,
     headline: own.headline,
     district: own.district,
@@ -607,4 +696,25 @@ function toTalentCard(profile: Parameters<typeof toOwnProfile>[0]) {
     certifications: own.isCertificationsVisible ? own.certifications : [],
     languages: own.isLanguagesVisible ? own.languages : [],
   };
+}
+
+type TalentCursor = { segment: 'H' | 'N'; id: string; at: Date };
+
+function encodeTalentCursor(segment: 'H' | 'N', id: string, at: Date) {
+  return Buffer.from(JSON.stringify([segment, id, at.toISOString()])).toString('base64url');
+}
+
+/** Un cursor que no se puede leer se trata como un `id` simple del segmento resto (formato anterior a M6). */
+function decodeTalentCursor(cursor: string | undefined, now: Date): TalentCursor | null {
+  if (!cursor) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (Array.isArray(parsed) && (parsed[0] === 'H' || parsed[0] === 'N') && typeof parsed[1] === 'string' && typeof parsed[2] === 'string') {
+      const at = new Date(parsed[2]);
+      if (!Number.isNaN(at.getTime())) return { segment: parsed[0], id: parsed[1], at };
+    }
+  } catch {
+    // formato anterior
+  }
+  return { segment: 'N', id: cursor, at: now };
 }

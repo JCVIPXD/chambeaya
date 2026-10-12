@@ -4,7 +4,10 @@ import { z, ZodError } from 'zod';
 import { AuthError, DatabaseAuthService, type AccountRole, type AuthService } from '../auth/auth.service.js';
 import { CurrencyCatalogService } from './currency.catalog.service.js';
 import { CurrencyQuoteService } from './currency.quote.js';
+import { WorkerReferralService } from './currency.referrals.js';
 import { CurrencyRefundService } from './currency.refunds.js';
+import { CurrencyRewardStatusService } from './currency.reward-status.js';
+import { CurrencyVerificationService } from './currency.verification.js';
 import { CurrencyError, CurrencyLedgerService } from './currency.service.js';
 import { CURRENCY_SETTING_KEYS, CurrencySettingsService, isCurrencySettingKey } from './currency.settings.js';
 import { WelcomeBonusService } from './currency.welcome.js';
@@ -27,6 +30,7 @@ const settingPatchSchema = z.object({
   reason: z.string().trim().min(3).max(500),
 }).strict();
 const settingChangesSchema = pageSchema.extend({ key: z.enum(CURRENCY_SETTING_KEYS).optional() });
+const documentKindSchema = z.enum(['CV', 'PROFILE_PHOTO']);
 const catalogPageSchema = pageSchema.extend({ entryId: z.string().trim().min(1).max(128).optional() });
 /** Solo se editan monto, estado, cuota y devolución; clave, actor y tipo son
  * fijos. El motivo es obligatorio para que cada cambio quede explicado. */
@@ -93,8 +97,19 @@ export function createWorkerCurrencyRouter(
   ledger: CurrencyLedgerService = new CurrencyLedgerService(),
   catalog: CurrencyCatalogService = new CurrencyCatalogService(),
   quotes: CurrencyQuoteService = new CurrencyQuoteService(),
+  extras: { rewards?: CurrencyRewardStatusService; referrals?: WorkerReferralService } = {},
 ) {
   const router = Router();
+  const rewards = extras.rewards ?? new CurrencyRewardStatusService();
+  const referrals = extras.referrals ?? new WorkerReferralService();
+  /** Premios disponibles del trabajador con su estado (M6). Solo datos propios. */
+  router.get('/workers/currency/rewards', guarded(authService, 'WORKER', async (_request, response, userId) => {
+    response.json(await rewards.listFor('WORKER', userId));
+  }));
+  /** Código de referido propio y su resumen (lo crea la primera vez). */
+  router.get('/workers/me/referral', guarded(authService, 'WORKER', async (_request, response, userId) => {
+    response.json(await referrals.summary(userId));
+  }));
   /** Costo previo de una acción (sin efectos): costo, cuota restante, saldo y tope diario. */
   router.get('/workers/currency/quote', guarded(authService, 'WORKER', async (request, response, userId) => {
     const { actionKey, targetId } = quoteSchema.parse(request.query);
@@ -118,8 +133,14 @@ export function createBusinessCurrencyRouter(
   ledger: CurrencyLedgerService = new CurrencyLedgerService(),
   catalog: CurrencyCatalogService = new CurrencyCatalogService(),
   quotes: CurrencyQuoteService = new CurrencyQuoteService(),
+  extras: { rewards?: CurrencyRewardStatusService } = {},
 ) {
   const router = Router();
+  const rewards = extras.rewards ?? new CurrencyRewardStatusService();
+  /** Premios disponibles de la empresa con su estado (M6). */
+  router.get('/currency/rewards', guarded(authService, 'BUSINESS', async (_request, response, userId) => {
+    response.json(await rewards.listFor('COMPANY', userId));
+  }));
   router.get('/currency/quote', guarded(authService, 'BUSINESS', async (request, response, userId) => {
     const { actionKey, targetId } = quoteSchema.parse(request.query);
     response.json(await quotes.quote('COMPANY', userId, actionKey, targetId));
@@ -142,12 +163,13 @@ export function createAdminCurrencyRouter(
   authService: AuthService = new DatabaseAuthService(),
   ledger: CurrencyLedgerService = new CurrencyLedgerService(),
   catalog: CurrencyCatalogService = new CurrencyCatalogService(),
-  extras: { settings?: CurrencySettingsService; welcome?: WelcomeBonusService; refunds?: CurrencyRefundService } = {},
+  extras: { settings?: CurrencySettingsService; welcome?: WelcomeBonusService; refunds?: CurrencyRefundService; verification?: CurrencyVerificationService } = {},
 ) {
   const router = Router();
   const settings = extras.settings ?? new CurrencySettingsService();
   const welcome = extras.welcome ?? new WelcomeBonusService();
   const refunds = extras.refunds ?? new CurrencyRefundService();
+  const verification = extras.verification ?? new CurrencyVerificationService();
   router.get('/currency/settings', guarded(authService, 'ADMIN', async (_request, response) => {
     response.json(await settings.list());
   }));
@@ -167,6 +189,24 @@ export function createAdminCurrencyRouter(
   /** Ejecuta ya la pasada de devoluciones automáticas (la tarea programada hace lo mismo). */
   router.post('/currency/refunds/run', guarded(authService, 'ADMIN', async (_request, response) => {
     response.json(await refunds.sweep());
+  }));
+  /**
+   * Verificaciones que disparan premios (M6). Marcar verificado guarda autor y fecha y otorga el
+   * premio (una vez por tipo de documento / por empresa); repetirlo es idempotente.
+   */
+  router.post('/workers/:workerId/documents/:kind/verification', guarded(authService, 'ADMIN', async (request, response, adminId) => {
+    const kind = documentKindSchema.parse(routeParam(request, 'kind'));
+    response.json(await verification.verifyDocument(adminId, routeParam(request, 'workerId'), kind));
+  }));
+  router.delete('/workers/:workerId/documents/:kind/verification', guarded(authService, 'ADMIN', async (request, response) => {
+    const kind = documentKindSchema.parse(routeParam(request, 'kind'));
+    response.json(await verification.unverifyDocument(routeParam(request, 'workerId'), kind));
+  }));
+  router.post('/companies/:companyId/verification', guarded(authService, 'ADMIN', async (request, response, adminId) => {
+    response.json(await verification.verifyCompany(adminId, routeParam(request, 'companyId')));
+  }));
+  router.delete('/companies/:companyId/verification', guarded(authService, 'ADMIN', async (request, response) => {
+    response.json(await verification.unverifyCompany(routeParam(request, 'companyId')));
   }));
   router.get('/currency/catalog', guarded(authService, 'ADMIN', async (_request, response) => {
     response.json(await catalog.listForAdmin());

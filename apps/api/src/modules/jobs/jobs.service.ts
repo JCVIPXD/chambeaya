@@ -98,7 +98,13 @@ export interface JobHooks {
   chargePriority?(context: { tx: Prisma.TransactionClient; userId: string; applicationId: string; postingId: string }): Promise<JobCharge | void>;
   /** Destacar un puesto (acción opcional con costo). */
   chargeHighlight?(context: { tx: Prisma.TransactionClient; userId: string; companyId: string; postingId: string }): Promise<JobCharge | void>;
-  afterHire?(context: { tx: Prisma.TransactionClient; applicationId: string; postingId: string; companyId: string; workerId: string }): Promise<void>;
+  /** Premio de empresa por contratación confirmada (M6); `userId` es el usuario dueño de la empresa. */
+  afterHire?(context: { tx: Prisma.TransactionClient; userId: string; applicationId: string; postingId: string; companyId: string; workerId: string }): Promise<void>;
+  /**
+   * La empresa movió una postulación fuera de `APPLIED` (preseleccionar, entrevista, oferta
+   * o rechazo): base del premio por responder a tiempo (M6). `at` es el instante de la acción.
+   */
+  afterCompanyResponse?(context: { tx: Prisma.TransactionClient; userId: string; applicationId: string; postingId: string; companyId: string; at: Date }): Promise<void>;
 }
 
 const MAX_PENDING_UPLOADS = 5;
@@ -372,11 +378,21 @@ export class JobService {
    * un intento se reintenta).
    */
   private async run<T>(work: (tx: Prisma.TransactionClient, emit: Emit) => Promise<T>): Promise<T> {
-    const { value, notifications } = await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
-      const notifications: PendingNotification[] = [];
-      const value = await work(tx, (notification) => notifications.push(notification));
-      return { value, notifications };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 10_000 }));
+    let result: { value: T; notifications: PendingNotification[] };
+    try {
+      result = await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+        const notifications: PendingNotification[] = [];
+        const value = await work(tx, (notification) => notifications.push(notification));
+        return { value, notifications };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 10_000 }));
+    } catch (error) {
+      // BAJO-A de CN-20261007-046: un borrado administrativo de la cuenta (o del puesto) confirmado
+      // mientras esta acción corría deja una FK sin destino al insertar (P2003). El estado es el de
+      // "ya no existe", no un fallo del servidor.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2003') throw new JobError('RESOURCE_NO_LONGER_EXISTS', 404);
+      throw error;
+    }
+    const { value, notifications } = result;
     const at = this.now().toISOString();
     for (const notification of notifications) this.bus.publish({ ...notification, at });
     return value;
@@ -698,7 +714,7 @@ export class JobService {
       await this.record(tx, emit, application, { userId: session.userId, kind: 'COMPANY' }, 'HIRED', application.status, 'HIRED', null, 'HIRED');
       if (bumped[0]!.filledVacancies >= bumped[0]!.vacancies) await this.resolveOpenApplications(tx, emit, posting.id, session.userId, 'POSTING_FILLED');
       // Punto de extensión de M4: premio de empresa por contratación confirmada.
-      await this.hooks.afterHire?.({ tx, applicationId, postingId: posting.id, companyId: company.id, workerId: application.workerId });
+      await this.hooks.afterHire?.({ tx, userId: session.userId, applicationId, postingId: posting.id, companyId: company.id, workerId: application.workerId });
       return { ...companyApplicationDetail(await this.reload(tx, applicationId)), idempotent: false };
     });
   }
@@ -1100,6 +1116,10 @@ export class JobService {
       status: statusAfter,
       recipientUserId: actor.kind === 'COMPANY' ? application.workerId : application.posting.company.ownerId,
     });
+    // M6: la primera respuesta de la empresa a una postulación recién llegada (sale de APPLIED).
+    if (actor.kind === 'COMPANY' && from === 'APPLIED') {
+      await this.hooks.afterCompanyResponse?.({ tx, userId: actor.userId, applicationId: application.id, postingId: application.postingId, companyId: application.posting.companyId, at: this.now() });
+    }
   }
 
   /**

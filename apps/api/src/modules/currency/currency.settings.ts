@@ -3,7 +3,13 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { CurrencyError } from './currency.service.js';
 
 /** Ajustes numéricos de la moneda que edita el administrador (M4). */
-export const CURRENCY_SETTING_KEYS = ['DAILY_SPEND_CAP_WORKER', 'DAILY_SPEND_CAP_COMPANY', 'JOB_HIGHLIGHT_DURATION_HOURS'] as const;
+export const CURRENCY_SETTING_KEYS = [
+  'DAILY_SPEND_CAP_WORKER', 'DAILY_SPEND_CAP_COMPANY', 'JOB_HIGHLIGHT_DURATION_HOURS',
+  // M6: premios, referidos y destacar el perfil.
+  'REWARD_CAP_DAILY_WORKER', 'REWARD_CAP_MONTHLY_WORKER', 'REWARD_CAP_DAILY_COMPANY', 'REWARD_CAP_MONTHLY_COMPANY',
+  'REFERRAL_MONTHLY_LIMIT', 'APPLICANT_RESPONSE_WINDOW_HOURS', 'APPLICANT_RESPONSE_MONTHLY_LIMIT',
+  'PROFILE_HIGHLIGHT_DURATION_HOURS',
+] as const;
 export type CurrencySettingKey = typeof CURRENCY_SETTING_KEYS[number];
 
 export function isCurrencySettingKey(value: string): value is CurrencySettingKey {
@@ -23,6 +29,22 @@ export const DEFAULT_CURRENCY_SETTINGS: Readonly<Record<CurrencySettingKey, numb
   DAILY_SPEND_CAP_COMPANY: 200,
   /** Cuánto dura un puesto destacado (168 h = 7 días). */
   JOB_HIGHLIGHT_DURATION_HOURS: 168,
+  /** M6: tope de monedas ganadas por premios por día de Lima y por trabajador (no cuenta el bono de bienvenida). */
+  REWARD_CAP_DAILY_WORKER: 100,
+  /** M6: tope de monedas ganadas por premios por mes de Lima y por trabajador. */
+  REWARD_CAP_MONTHLY_WORKER: 600,
+  /** M6: tope diario de premios por empresa. */
+  REWARD_CAP_DAILY_COMPANY: 100,
+  /** M6: tope mensual de premios por empresa. */
+  REWARD_CAP_MONTHLY_COMPANY: 600,
+  /** M6: referidos premiados por referidor y mes de Lima. */
+  REFERRAL_MONTHLY_LIMIT: 5,
+  /** M6: horas desde que llega una postulación para que responderla dé premio (72 h). */
+  APPLICANT_RESPONSE_WINDOW_HOURS: 72,
+  /** M6: premios de respuesta a tiempo por empresa y mes de Lima. */
+  APPLICANT_RESPONSE_MONTHLY_LIMIT: 20,
+  /** M6: cuánto dura un perfil de trabajador destacado (168 h = 7 días). */
+  PROFILE_HIGHLIGHT_DURATION_HOURS: 168,
 };
 
 /** Límites de validación de cada ajuste (el CHECK de la base solo exige > 0). */
@@ -30,6 +52,14 @@ export const CURRENCY_SETTING_LIMITS: Readonly<Record<CurrencySettingKey, { min:
   DAILY_SPEND_CAP_WORKER: { min: 1, max: 1_000_000 },
   DAILY_SPEND_CAP_COMPANY: { min: 1, max: 1_000_000 },
   JOB_HIGHLIGHT_DURATION_HOURS: { min: 1, max: 8_760 },
+  REWARD_CAP_DAILY_WORKER: { min: 1, max: 1_000_000 },
+  REWARD_CAP_MONTHLY_WORKER: { min: 1, max: 1_000_000 },
+  REWARD_CAP_DAILY_COMPANY: { min: 1, max: 1_000_000 },
+  REWARD_CAP_MONTHLY_COMPANY: { min: 1, max: 1_000_000 },
+  REFERRAL_MONTHLY_LIMIT: { min: 1, max: 1_000 },
+  APPLICANT_RESPONSE_WINDOW_HOURS: { min: 1, max: 8_760 },
+  APPLICANT_RESPONSE_MONTHLY_LIMIT: { min: 1, max: 10_000 },
+  PROFILE_HIGHLIGHT_DURATION_HOURS: { min: 1, max: 8_760 },
 };
 
 type Reader = Pick<Prisma.TransactionClient, 'currencySetting'>;

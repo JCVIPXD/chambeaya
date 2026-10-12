@@ -76,7 +76,7 @@ M2 siembra estos valores **PROVISIONALES** para poder probar el flujo; el dueño
 del producto los ajustará desde la API de administración (cada entrada queda con
 `isProvisional = true` hasta su primera edición, y cada cambio guarda quién,
 cuándo, motivo y valor anterior/nuevo). Desde M4 los usan publicar, postular, destacar, invitar y desbloquear
-contacto (los premios, salvo el bono de bienvenida, son de M6). Fuente: `apps/api/src/modules/currency/currency.catalog.ts` y la
+contacto; los premios, salvo el bono de bienvenida, se otorgan desde M6 (ver «Ganar monedas»). Fuente: `apps/api/src/modules/currency/currency.catalog.ts` y la
 migración `20261005120000_currency_catalog`.
 
 | Acción | Actor | Tipo | Monto | Cuota gratis/mes | Devolución |
@@ -114,8 +114,65 @@ con `isProvisional = true`:
 | `JOB_HIGHLIGHT_DURATION_HOURS` (duración de un puesto destacado) | 168 h (7 días) |
 
 También son provisionales el intervalo de la tarea de devolución (5 min, por
-`CURRENCY_REFUND_INTERVAL_MS`) y la ventana de 72 h. `PROFILE_HIGHLIGHT` queda
-diferido (la búsqueda de talento no tiene campo de destacado).
+`CURRENCY_REFUND_INTERVAL_MS`) y la ventana de 72 h. `PROFILE_HIGHLIGHT`, diferido
+en M4 porque la búsqueda de talento no tenía campo de destacado, se resuelve en M6.
+
+## Ganar monedas (M6, cerrado: `CN-20261012-047`, auditoría `CN-20261012-048`)
+
+Premios automáticos, solo API y datos (las interfaces son M5). Todos los montos son los
+**provisionales** del catálogo de M2 y todos los ajustes siguientes son **provisionales**
+(editables por el admin con historial). Detalle técnico en
+[api.md](../reference/api.md#ganar-monedas-premios-automáticos-m6).
+
+| Premio | Quién | Cuándo se gana | Tope contra granjas |
+|---|---|---|---|
+| Perfil completo | Trabajador | Al cumplir **todas** las secciones obligatorias: titular (≥ 10 caracteres), presentación (≥ 40), distrito, disponibilidad (día y periodo), una especialidad, una experiencia, CV y foto | Una sola vez por trabajador aunque edite, borre y vuelva a completar |
+| Documento verificado | Trabajador | El admin verifica el CV o la foto (con autor y fecha) | Un premio por **tipo** de documento (máximo 2); reemplazar el archivo quita la verificación sin repetir el premio |
+| Invitación respondida | Trabajador | Aceptar o rechazar una invitación dentro del plazo | Una vez por invitación; una anulada, vencida o ya respondida no paga |
+| Referido | Trabajador | Cuando la persona que registró con su código **completa su perfil** (no al registrarse) | Referido único, sin auto-referido, límite mensual por referidor y topes de premios |
+| Empresa verificada | Empresa | El admin verifica la empresa (autor y fecha) | Una vez por empresa |
+| Postulantes respondidos a tiempo | Empresa | Mover una postulación fuera de «Postulado» dentro del plazo | Una vez por postulación y tope mensual por empresa |
+| Contratación confirmada | Empresa | Al confirmar «Contratado» | Una vez por contratación |
+
+**Reglas de todos los premios.** Atómicos con el hecho que los dispara (si el hecho se
+revierte no queda premio; si el premio falla por un error técnico, el hecho se conserva y el
+premio se reintenta cuando el hecho vuelva a evaluarse); idempotentes por hecho (nunca doble
+premio, ni con acciones simultáneas); una entrada inactiva o ausente del catálogo significa «sin
+premio»; no gastan ni dejan saldo negativo; **no cuentan para el tope de gasto** diario; y quedan
+en el libro con su acción y la entidad relacionada. La lista de premios disponibles de cada actor,
+con su estado (ganado o disponible) y lo que falta, se lee por API para que M5 la muestre.
+
+**Reglas anti-fraude vigentes:** tope diario y mensual de monedas ganadas por premios por
+titular (el bono de bienvenida no cuenta); un premio por hecho (clave única); un premio por tipo de
+documento; referidos únicos, sin auto-referido y pagados solo con perfil completo, con límite
+mensual; respuesta a tiempo una vez por postulación con tope mensual por empresa; las verificaciones
+solo las hace el admin. Riesgo declarado: una misma persona puede crear cuentas con DNI y correo
+distintos; el costo de completar cada perfil y los topes acotan el beneficio, y no hay detección de
+duplicados por persona.
+
+### Valores provisionales nuevos de M6
+
+| Ajuste | Valor |
+|---|---|
+| `REWARD_CAP_DAILY_WORKER` / `REWARD_CAP_DAILY_COMPANY` (monedas ganadas por premios por día de Lima) | 100 / 100 |
+| `REWARD_CAP_MONTHLY_WORKER` / `REWARD_CAP_MONTHLY_COMPANY` (por mes de Lima) | 600 / 600 |
+| `REFERRAL_MONTHLY_LIMIT` (referidos premiados por referidor y mes) | 5 |
+| `APPLICANT_RESPONSE_WINDOW_HOURS` (plazo para responder una postulación) | 72 h |
+| `APPLICANT_RESPONSE_MONTHLY_LIMIT` (premios de respuesta por empresa y mes) | 20 |
+| `PROFILE_HIGHLIGHT_DURATION_HOURS` (duración de un perfil destacado) | 168 h (7 días) |
+
+Los umbrales de «perfil completo» (longitudes mínimas de titular y presentación y la lista de
+secciones) son decisiones de diseño del código, no ajustes: cambiarlos requiere un cambio de código.
+
+**Destacar el perfil (`PROFILE_HIGHLIGHT`, cerrado en M6).** El trabajador paga el costo del
+catálogo (10 monedas provisional) y su perfil aparece primero en la búsqueda de talento durante
+la duración configurada. La paginación de la búsqueda usa un cursor que fija el instante de la
+primera página, así que un destacado que vence a mitad de la paginación no repite ni salta perfiles.
+Un perfil oculto no se puede destacar.
+
+**Verificaciones del admin (decisión de diseño).** No existía un flujo de verificación: M6 agrega
+las rutas mínimas del admin para marcar verificado un documento del trabajador o una empresa, con
+autor y fecha, y para quitar la verificación (quitarla no devuelve ni descuenta monedas).
 
 ## Puesto fijo y proceso de contrato
 
@@ -172,7 +229,13 @@ Decisiones de producto del diseño de M3 (detalle técnico en
   el bono por sí solo no retiene el borrado. Una cuenta cuyo único movimiento es
   el `WELCOME_BONUS` se puede borrar desde el superadmin y el bono desaparece con
   ella; cualquier otro movimiento (gasto, otro premio, devolución, ajuste) sigue
-  dando `409 CURRENCY_LEDGER_RETAINED`.
+  dando `409 CURRENCY_LEDGER_RETAINED`. **Consecuencia desde M6** (`CN-20261012-048`):
+  los premios automáticos también son «otro premio», así que basta con completar
+  el perfil, recibir una verificación del admin o responder una invitación para
+  que la cuenta quede retenida. Es coherente con esta decisión, pero amplía mucho
+  el número de cuentas que el superadmin ya no puede borrar; si el dueño necesita
+  atender pedidos de eliminación de datos, la salida es la anonimización
+  (alcance futuro), no el borrado.
 - **Decisiones vigentes aceptadas tal cual (observaciones de `CN-20261007-044`,
   decisión del dueño, sin cambio de comportamiento):** (a) un puesto pagado puede
   reutilizarse: pausar, editar y volver a publicar no cobra de nuevo, porque solo
@@ -213,9 +276,9 @@ con una auditoría `APROBADO`.
 | **M1** | Libro mayor de monedas | Cuenta por usuario y por empresa, movimientos inmutables, saldo derivado, idempotencia, concurrencia sin gasto doble, ajustes del admin, API de saldo y movimientos |
 | **M2** | Catálogo de costos y premios | Tabla configurable por el admin con historial, cuotas gratuitas y reglas de devolución |
 | **M3** | Puestos fijos | Modelo de puesto y embudo de selección con oferta y aceptación |
-| **M4** | Acciones conectadas | Aplicar el catálogo de M2 a publicar, postular, destacar, invitar y desbloquear contacto; cuota gratuita, tope diario, devolución automática y bono de bienvenida (cerrado: `CN-20261007-043`/`045`, auditoría `CN-20261007-046`; `PROFILE_HIGHLIGHT` diferido) |
+| **M4** | Acciones conectadas | Aplicar el catálogo de M2 a publicar, postular, destacar, invitar y desbloquear contacto; cuota gratuita, tope diario, devolución automática y bono de bienvenida (cerrado: `CN-20261007-043`/`045`, auditoría `CN-20261007-046`; `PROFILE_HIGHLIGHT` diferido en M4 y resuelto en M6) |
 | **M5** | Interfaces | Panel web de empresa y trabajador y Flutter con saldo, movimientos y proceso de selección |
-| **M6** | Ganar monedas | Premios por perfil completo, verificaciones, referidos y constancia |
+| **M6** | Ganar monedas | Premios por perfil completo, verificaciones, referidos y constancia (cerrado: `CN-20261012-047`, auditoría `CN-20261012-048`; incluye `PROFILE_HIGHLIGHT` y el cierre de BAJO-A) |
 | **M7** | Compra de monedas | Reutiliza la capa de adaptadores; requiere el pronunciamiento legal sobre la moneda |
 
 M2 y M3 pueden avanzar en paralelo con M1; se unen en M4.

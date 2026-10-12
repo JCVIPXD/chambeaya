@@ -7,6 +7,8 @@ import {
 
 import { Prisma, PrismaClient, type User } from "@prisma/client";
 
+import { normalizeReferralCode } from "../currency/currency.referrals.js";
+
 export type AccountRole = "WORKER" | "BUSINESS" | "ADMIN";
 
 export interface RegisterInput {
@@ -15,6 +17,8 @@ export interface RegisterInput {
   email: string;
   password: string;
   dniOrRuc: string;
+  /** M6: código de referido de otro trabajador (opcional, solo trabajadores). */
+  referralCode?: string | null;
 }
 
 export interface GoogleIdentityInput {
@@ -84,6 +88,7 @@ export class AuthError extends Error {
       | "DUPLICATE_ACCOUNT"
       | "DUPLICATE_IDENTIFIER"
       | "INVALID_REGISTRATION"
+      | "INVALID_REFERRAL_CODE"
       | "INVALID_SESSION"
       | "GOOGLE_EMAIL_ALREADY_REGISTERED"
       | "GOOGLE_PROFILE_SETUP_EXPIRED"
@@ -286,17 +291,29 @@ export class DatabaseAuthService implements AuthService {
   async register(input: RegisterInput): Promise<AuthSession> {
     const normalized = normalizeRegistration(input);
     const salt = randomBytes(16).toString("hex");
+    const data = {
+      email: normalized.email,
+      passwordHash: hashPassword(input.password, salt),
+      salt,
+      role: input.role,
+      name: normalized.name,
+      identifier: normalized.identifier,
+    };
+    // M6: un código de referido válido enlaza la cuenta nueva con su referidor en la misma
+    // transacción (el referido es único y nunca el propio titular del código).
+    const rawCode = typeof input.referralCode === "string" ? input.referralCode.trim() : "";
+    const referralCode = rawCode ? normalizeReferralCode(rawCode) : null;
+    if (rawCode && (!referralCode || input.role !== "WORKER")) throw new AuthError("INVALID_REFERRAL_CODE");
     try {
-      const account = await this.prisma.user.create({
-        data: {
-          email: normalized.email,
-          passwordHash: hashPassword(input.password, salt),
-          salt,
-          role: input.role,
-          name: normalized.name,
-          identifier: normalized.identifier,
-        },
-      });
+      const account = referralCode
+        ? await this.prisma.$transaction(async (tx) => {
+            const referrer = await tx.user.findFirst({ where: { referralCode, role: "WORKER" }, select: { id: true } });
+            if (!referrer) throw new AuthError("INVALID_REFERRAL_CODE");
+            const created = await tx.user.create({ data });
+            await tx.workerReferral.create({ data: { referrerId: referrer.id, referredId: created.id, code: referralCode } });
+            return created;
+          })
+        : await this.prisma.user.create({ data });
       await this.notifyWorkerCreated(account);
       return this.sessionFor(account);
     } catch (error) {
@@ -311,6 +328,10 @@ export class DatabaseAuthService implements AuthService {
         throw new AuthError(
           identifierIsDuplicated ? "DUPLICATE_IDENTIFIER" : "DUPLICATE_ACCOUNT",
         );
+      }
+      // El referidor se borró entre la lectura del código y el enlace.
+      if (referralCode && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        throw new AuthError("INVALID_REFERRAL_CODE");
       }
       throw error;
     }

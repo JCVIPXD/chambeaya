@@ -475,13 +475,12 @@ una pasada.
 `GET /api/admin/currency/settings`, `GET /api/admin/currency/settings/changes` y
 `PATCH /api/admin/currency/settings/:key {value, reason}` para
 `DAILY_SPEND_CAP_WORKER`, `DAILY_SPEND_CAP_COMPANY` y
-`JOB_HIGHLIGHT_DURATION_HOURS`.
+`JOB_HIGHLIGHT_DURATION_HOURS` (los de premios de M6 se listan en su sección).
 
-**Diferido:** `PROFILE_HIGHLIGHT` (destacar el perfil del trabajador) no se
-implementó: la búsqueda de talento usa un orden y un cursor propios sin campo de
-destacado, y cambiarlos excede un cambio acotado. Los premios por perfil
-completo, documentos, referidos, empresa verificada, respuesta a tiempo y
-contratación confirmada son M6.
+**Diferido en M4, resuelto en M6:** `PROFILE_HIGHLIGHT` (destacar el perfil del
+trabajador) y los premios por perfil completo, documentos, referidos, empresa
+verificada, respuesta a tiempo y contratación confirmada se implementaron en M6
+(ver «Ganar monedas: premios automáticos (M6)»).
 
 **Migración `20261007100000_currency_actions`:** agrega `CurrencyActionUse`,
 `CurrencySetting`, `CurrencySettingChange` y `CandidateContactUnlock`; las
@@ -498,12 +497,10 @@ por sí solo no retiene el borrado. `DELETE /api/admin/workers/:id` y
 `DELETE /api/admin/companies/:id` responden `204` para una cuenta cuyo único
 movimiento es el `WELCOME_BONUS`; con cualquier otro movimiento siguen
 respondiendo `409 CURRENCY_LEDGER_RETAINED` (ver «Borrado de titulares»).
-Límite conocido (`CN-20261007-046`): como una cuenta recién registrada ahora sí
-llega al borrado, dos borrados simultáneos del mismo titular, o un borrado
-simultáneo con una acción del propio titular (postular, publicar), pueden
-responder `500` al perdedor (registro ya borrado, interbloqueo o FK). La
-transacción se revierte entera: no se borra nada a medias ni se corrompe el
-libro, y repetir la operación da el resultado correcto (`404`, `204` o `409`).
+Límite conocido de `CN-20261007-046` (BAJO-A), **cerrado en M6
+(`CN-20261012-047`)**: borrados simultáneos del mismo titular o un borrado
+simultáneo con una acción del propio titular ya no responden `500` (ver «Borrado de
+titulares bajo concurrencia» en la sección de M6).
 
 **Postulación con oferta aceptada (CN-20261007-045):** una oferta `ACCEPTED` es
 una constancia inmutable. Si el trabajador se retira después de aceptarla,
@@ -515,6 +512,182 @@ aceptada responde el mismo `409`, nunca `500`.
 **Devolución y concurrencia (CN-20261007-045):** cada devolución se procesa en una
 transacción `Serializable` con reintento; un cobro simultáneo sobre la misma
 cuenta ya no produce `500` por `(accountId, sequence)`.
+
+## Ganar monedas: premios automáticos (M6)
+
+Solo API y datos (las interfaces son M5). Los montos salen siempre del catálogo
+de M2 (entradas `REWARD`, valores provisionales); el código nunca los fija.
+
+**Reglas comunes de todo premio** (`CurrencyRewardService`, `currency.rewards.ts`):
+
+- **Un premio nace de un hecho** con clave estable `{actionKey}:{hecho}` guardada
+  en `CurrencyRewardGrant.factKey` (**único**) y como clave de idempotencia del
+  movimiento (`reward:{factKey}`). El mismo hecho nunca paga dos veces, aunque
+  lo procesen dos transacciones a la vez (la cuenta se bloquea, el único lo
+  garantiza y `Serializable` reintenta al perdedor).
+- **Atómico con el hecho.** El premio se escribe en la misma transacción
+  `Serializable` que el hecho que lo dispara (guardar el perfil, verificar,
+  responder, contratar): si el hecho se revierte no queda premio. Una regla de
+  negocio que impide pagar (entrada inactiva, tope) **no** revierte el hecho; un
+  fallo técnico del premio tampoco: corre dentro de un `SAVEPOINT`, se revierte
+  solo el premio, se registra `REWARD_FAILED` en el log y el hecho se conserva.
+  Los conflictos de serialización y los interbloqueos sí se propagan para que
+  se reintente la transacción completa (hecho y premio juntos).
+- **Catálogo:** una entrada ausente, inactiva o que no sea `REWARD` significa
+  «sin premio» (el hecho ocurre igual). El libro registra `action = REWARD`,
+  `actionKey` y la entidad relacionada del hecho.
+- **Tope de premios** (defensa contra granjas, editable con historial):
+  `REWARD_CAP_DAILY_WORKER`/`REWARD_CAP_DAILY_COMPANY` (provisional 100
+  monedas por día de Lima y titular) y `REWARD_CAP_MONTHLY_WORKER`/
+  `REWARD_CAP_MONTHLY_COMPANY` (600 por mes de Lima). Suma lo ganado por premios
+  (`CurrencyRewardGrant`); excluye el bono de bienvenida. Un premio que no cabe
+  entero **no se otorga** (`CAP_REACHED_DAILY|MONTHLY`). Los premios **no cuentan
+  para el tope de gasto** (`CurrencyActionUse`) ni al revés.
+- **Sin gasto ni saldo negativo:** un premio solo suma (el CHECK del libro y el
+  tope de saldo máximo siguen vigentes).
+- **Reintento natural:** si el hecho puede volver a evaluarse (perfil, documento,
+  empresa verificada, referido), un premio que antes no cupo o no existía en el
+  catálogo se otorga la próxima vez que se repita la evaluación; cada hecho sigue
+  pagando una sola vez.
+
+| Premio (`actionKey`) | Actor | Hecho y clave | Cuándo | Anti-fraude |
+| --- | --- | --- | --- | --- |
+| `PROFILE_COMPLETE` | Trabajador | `PROFILE_COMPLETE:{userId}` | Al guardar el perfil o subir CV/foto y cumplirse **todas** las secciones obligatorias (abajo) | Una sola vez por trabajador aunque borre y vuelva a completar |
+| `DOCUMENT_VERIFIED` | Trabajador | `DOCUMENT_VERIFIED:{userId}:{tipo}` | El admin marca verificado el CV o la foto | **Un premio por tipo** (máximo 2); reemplazar el archivo quita la verificación pero no vuelve a pagar |
+| `INVITATION_RESPONDED` | Trabajador | `INVITATION_RESPONDED:{invitationId}` | Al aceptar **o** rechazar una invitación `PENDING` y no vencida | Una vez por invitación; una anulada, vencida o ya respondida no paga |
+| `REFERRAL` | Trabajador (referidor) | `REFERRAL:{referralId}` | Cuando el referido completa su perfil | Ver «Referidos» |
+| `COMPANY_VERIFIED` | Empresa | `COMPANY_VERIFIED:{companyId}` | El admin marca verificada la empresa | Una vez por empresa; quitar y volver a poner la verificación no repite |
+| `APPLICANTS_RESPONDED_ON_TIME` | Empresa | `APPLICANTS_RESPONDED_ON_TIME:{applicationId}` | La empresa mueve una postulación fuera de `APPLIED` (preseleccionar, entrevista, oferta o rechazo) dentro de `APPLICANT_RESPONSE_WINDOW_HOURS` desde que llegó o se reabrió | Una vez por postulación (mover y devolver, o retirarse y re-postular, no repite) y tope mensual por empresa |
+| `HIRE_CONFIRMED` | Empresa | `HIRE_CONFIRMED:{applicationId}` | Al confirmar `HIRED`, dentro de la transacción de la contratación (gancho `afterHire`) | Una por contratación; si la contratación falla no hay premio |
+
+### Perfil completo (criterio objetivo)
+
+Fuente: `apps/api/src/modules/talent/profile-completeness.ts`. El perfil está
+completo cuando cumple **todas** estas secciones obligatorias (lista fija, no
+un porcentaje): `headline` (≥ 10 caracteres), `bio` (≥ 40), `district`,
+`availability` (al menos un día **y** un periodo), `specialties` (≥ 1),
+`experience` (≥ 1), `cv` y `photo`. Son opcionales (no se exigen) las
+certificaciones, los idiomas, la zona de trabajo y el texto libre de
+disponibilidad; el porcentaje `completion` del perfil no cambia. El criterio
+mide que los datos existan; la calidad de los documentos la valida el
+administrador (`DOCUMENT_VERIFIED`). Se evalúa **dentro de la misma transacción**
+de `PATCH /api/workers/me/profile`, `PUT /api/workers/me/cv` y
+`PUT /api/workers/me/photo`. Dos guardados simultáneos pagan una sola vez.
+
+### Verificaciones del administrador
+
+Solo `ADMIN` (`403` otro rol, `401` sin sesión). Marcar verificado guarda **autor y
+fecha** (`verifiedById`, `verifiedAt`); repetirlo es idempotente (conserva el autor
+y la fecha originales) y reintenta el premio si antes no cupo.
+
+- `POST /api/admin/workers/:workerId/documents/:kind/verification` con `kind` =
+  `CV` o `PROFILE_PHOTO` → `{verified, alreadyVerified, verifiedAt,
+  verifiedById, reward: {granted, amount, reason?}}`. `404 DOCUMENT_NOT_FOUND` si
+  el trabajador no tiene ese documento; `400` si el tipo no existe.
+- `DELETE /api/admin/workers/:workerId/documents/:kind/verification` → `{verified: false}`
+  (no descuenta nada: el libro es solo de suma).
+- `POST /api/admin/companies/:companyId/verification` y
+  `DELETE /api/admin/companies/:companyId/verification` (`404 COMPANY_NOT_FOUND`).
+
+Subir un archivo nuevo (CV o foto) borra su verificación; el premio ya pagado por
+ese tipo no se vuelve a pagar al verificarlo de nuevo.
+
+### Referidos
+
+- `GET /api/workers/me/referral` (sesión `WORKER`) → `{code, referred, rewarded,
+  monthly: {limit, used, remaining}}`. Crea el código propio la primera vez
+  (8 caracteres aleatorios sin ambiguos, `User.referralCode` único); solo datos
+  propios, nunca revela referidos de otros.
+- `POST /api/auth/register` acepta `referralCode` (opcional, no distingue
+  mayúsculas). Un código inexistente o mal formado responde
+  `400 INVALID_REFERRAL_CODE` y **no crea la cuenta**. Con un código válido la
+  cuenta y su `WorkerReferral` se crean en una sola transacción. El registro con
+  Google no admite código en esta entrega.
+- **El premio no se paga al registrarse**: se paga al referidor cuando el referido
+  cumple el criterio de perfil completo (mismo evento que `PROFILE_COMPLETE`),
+  una sola vez por referido.
+
+**Reglas anti-fraude de referidos:** (1) el referido es único (`referredId`
+único): una cuenta cuenta una sola vez y no puede reasignarse a otro referidor;
+(2) sin auto-referido: el código solo existe para una cuenta ya creada, el
+referido es siempre una cuenta nueva y la base lo refuerza con
+`CHECK (referrerId <> referredId)`; (3) pagar exige perfil completo (CV, foto,
+experiencia, etc.), así crear cuentas vacías no rinde nada; (4) límite mensual
+por referidor `REFERRAL_MONTHLY_LIMIT` (provisional 5 por mes de Lima, editable
+con historial): un referido que no cabe queda **pendiente** y se premia la
+próxima vez que guarde su perfil con cupo; (5) los topes diario y mensual de
+premios del referidor; (6) dos registros simultáneos con el mismo código crean dos
+referidos distintos y, con límite 1, solo uno paga. Límite conocido: nada impide
+que una misma persona cree cuentas con DNI y correo distintos; el costo de cada
+cuenta (perfil completo) y los topes acotan el beneficio.
+
+### Lista de premios del actor
+
+- `GET /api/workers/currency/rewards` (sesión `WORKER`) y
+  `GET /api/business/currency/rewards` (sesión `BUSINESS`) →
+  `{currency, items, caps}`. Cada item: `{actionKey, amount, repeatable,
+  earnedCount, earnedAmount, status: EARNED|AVAILABLE, ...}` con datos extra por
+  premio: `PROFILE_COMPLETE` → `requiredSections` y `missingSections`;
+  `DOCUMENT_VERIFIED` → `maxRewards` y `documents[{kind, uploaded, verified,
+  rewarded}]`; `REFERRAL` y `APPLICANTS_RESPONDED_ON_TIME` → `monthly {limit,
+  used, remaining}` (el segundo, además `windowHours`); `COMPANY_VERIFIED` →
+  `verified`. `caps` trae lo ganado y lo que queda hoy y este mes. Solo aparecen los
+  premios activos del catálogo del actor, nunca claves internas de hechos ni
+  movimientos, y cada rol solo ve los suyos.
+
+### Destacar el perfil (`PROFILE_HIGHLIGHT`)
+
+- `POST /api/workers/me/profile/highlight` (sesión `WORKER`) cobra `PROFILE_HIGHLIGHT`
+  (10 monedas provisional, con su cuota gratuita y el tope de gasto diario) y fija
+  `highlightedAt/highlightedUntil` en la misma transacción; duración
+  `PROFILE_HIGHLIGHT_DURATION_HOURS` (168 h provisional, editable). Mientras el
+  destacado esté vigente repetirlo no cobra ni extiende (`idempotent: true`). Un
+  perfil oculto (`isVisible: false`) responde `409 PROFILE_NOT_VISIBLE` sin cobrar;
+  sin saldo, `409 INSUFFICIENT_CURRENCY`. Cotizable con
+  `GET /api/workers/currency/quote?actionKey=PROFILE_HIGHLIGHT&targetId=<perfil propio>`.
+- `GET /api/business/talent` ordena primero los perfiles destacados vigentes
+  (`isHighlighted: true` en la tarjeta) y luego el resto, por `id` ascendente en
+  cada tramo. **El `nextCursor` es opaco** y recuerda tramo, último `id` y el
+  instante de la primera página: la partición destacados/resto se calcula siempre
+  con ese instante (`highlightedAt <= instante < highlightedUntil`), así que un
+  destacado que vence o se compra a mitad de la paginación no repite ni salta filas.
+  Un cursor antiguo (un `id` simple) se acepta y continúa en el tramo resto. El perfil
+  propio devuelve `highlightedUntil`.
+
+### Ajustes nuevos (administrador, con historial, provisionales)
+
+Mismas rutas que M4 (`GET/PATCH /api/admin/currency/settings`): `REWARD_CAP_DAILY_WORKER` 100,
+`REWARD_CAP_MONTHLY_WORKER` 600, `REWARD_CAP_DAILY_COMPANY` 100,
+`REWARD_CAP_MONTHLY_COMPANY` 600, `REFERRAL_MONTHLY_LIMIT` 5,
+`APPLICANT_RESPONSE_WINDOW_HOURS` 72, `APPLICANT_RESPONSE_MONTHLY_LIMIT` 20 (premios de
+respuesta por empresa y mes de Lima) y `PROFILE_HIGHLIGHT_DURATION_HOURS` 168.
+
+### Datos y migración
+
+Migración `20261012100000_currency_rewards` (solo agrega): `CurrencyRewardGrant`
+(único `factKey`), `WorkerReferral`, `User.referralCode`, `WorkerDocument.verifiedAt/
+verifiedById`, `Company.verifiedAt/verifiedById`, `WorkerTalentProfile.highlightedAt/
+highlightedUntil` y las 8 filas de ajustes. No modifica ni borra filas existentes.
+Los ganchos de `JobHooks` nuevos: `afterCompanyResponse` y el contexto de `afterHire` con
+`userId`.
+
+### Borrado de titulares bajo concurrencia (BAJO-A de `CN-20261007-046`, cerrado)
+
+`DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` bloquean **primero**
+la fila de `User` (`FOR UPDATE`) y luego la cuenta de moneda, las postulaciones y el
+borrado, dentro de una transacción `Serializable` con reintento. Resultado: borrados
+simultáneos del mismo titular dan un `204` y el resto `404` (`WORKER_NOT_FOUND` /
+`COMPANY_NOT_FOUND`; el `P2025` ya no llega como `500`); un borrado simultáneo con una
+acción del propio titular termina sin interbloqueo (`40P01` se reintenta) y sin `500`: si
+el borrado gana, la acción responde `404 RESOURCE_NO_LONGER_EXISTS` (la FK `P2003` de un
+puesto o titular ya borrado se traduce en `JobService`); si la acción gana, el borrado
+sigue (`204`) o se bloquea con `409` si dejó un movimiento. No queda borrado parcial ni
+libro corrupto. Límite: la traducción de `P2003` cubre las acciones de puestos fijos. En las
+rutas de talento (perfil, CV, foto, destacar), una acción que llega con la cuenta ya borrada no
+responde `500`, pero cae en el manejador genérico del enrutador de talento y responde
+`400 INVALID_TALENT_REQUEST` (sondas de `CN-20261012-048`). El mismo manejador convierte en
+`400 INVALID_TALENT_REQUEST` un guardado de perfil cuyos reintentos `Serializable` se agotan
+(desde M6 el guardado es `Serializable`); en ambos casos no queda ningún efecto aplicado.
 
 ## Superadmin: cuentas empresariales
 
@@ -921,8 +1094,9 @@ Estados: `AVAILABLE`, `ON_SHIFT`, `UNAVAILABLE`.
 - `GET /api/workers/me/cv/download`: descarga el PDF del trabajador autenticado (`Content-Disposition: attachment`, `Cache-Control: private, no-store`). Una sesión `BUSINESS` recibe `403`. **Ya no es el único acceso al CV**: la empresa dueña de un turno puede leerlo desde `GET /api/business/shifts/:id/applications/:applicationId/cv` cuando se cumple la regla descrita en "CV de un postulante (lectura de la empresa)".
 - `PUT /api/workers/me/photo`: carga o reemplaza una foto privada de perfil JPG, PNG o WebP de hasta 3 MB. Exige `X-File-Name` y devuelve el perfil actualizado.
 - `GET /api/workers/me/photo`: devuelve la foto solo al trabajador autenticado, con `Cache-Control: private, no-store`.
+- `POST /api/workers/me/profile/highlight`: destaca el perfil propio en la búsqueda de talento (`PROFILE_HIGHLIGHT`, con costo; ver M6).
 - `GET /api/specialties`: catálogo activo de especialidades.
-- `GET /api/business/talent`: perfiles visibles; acepta `specialtyId`, `district`, `query`, `availableOnly`, `cursor` y `limit`. `district` filtra por coincidencia exacta insensible a mayúsculas; `query` (hasta 100 caracteres) busca coincidencia parcial insensible a mayúsculas en `user.name`, `headline` y `district` a la vez, combinable con el resto de filtros. El orden es siempre `id` ascendente y la paginación por cursor se mantiene estable con cualquier combinación de filtros. No existe índice específico para `query`: con el volumen del piloto el costo de un `contains` insensible sin índice es aceptable; si el catálogo de talento crece, evaluar un índice `pg_trgm` (requiere extensión y migración).
+- `GET /api/business/talent`: perfiles visibles; acepta `specialtyId`, `district`, `query`, `availableOnly`, `cursor` y `limit`. `district` filtra por coincidencia exacta insensible a mayúsculas; `query` (hasta 100 caracteres) busca coincidencia parcial insensible a mayúsculas en `user.name`, `headline` y `district` a la vez, combinable con el resto de filtros. El orden es: primero los perfiles destacados vigentes (`isHighlighted`, `PROFILE_HIGHLIGHT` de M6) y luego el resto, por `id` ascendente en cada tramo; el `nextCursor` es opaco (tramo, último `id` e instante de la primera página) y la paginación se mantiene estable, sin repetir ni saltar filas, con cualquier combinación de filtros aunque un destacado venza a mitad de la paginación (ver «Destacar el perfil»). No existe índice específico para `query`: con el volumen del piloto el costo de un `contains` insensible sin índice es aceptable; si el catálogo de talento crece, evaluar un índice `pg_trgm` (requiere extensión y migración).
 - `POST /api/assignments/:id/reviews`: crea una reseña con `rating` de 1 a 5 y `comment` opcional.
 
 La reseña requiere una asignación completada. Solo pueden crearla el trabajador asignado y la empresa propietaria; cada autor puede reseñar una vez esa asignación. La respuesta de búsqueda expone solo agregados `reputation.averageRating` y `reputation.reviewCount`; un perfil sin reseñas devuelve `null` y `0`.
@@ -940,6 +1114,8 @@ Persisten el contacto inicial entre una empresa y un perfil del directorio de ta
 Estados: `PENDING`, `ACCEPTED`, `DECLINED`, `EXPIRED`, `CANCELLED`. Esta entrega implementa las transiciones `PENDING → ACCEPTED` y `PENDING → DECLINED` (ambas solo por el trabajador destinatario) y la transición automática `PENDING → EXPIRED`, evaluada siempre en el servidor (nunca a partir de un `expiresAt` calculado en el cliente): al listar o al intentar responder una invitación vencida, el servidor la transiciona primero y luego aplica la regla, de forma que una invitación vencida nunca puede aceptarse. `CANCELLED` queda reservada en el modelo para una cancelación futura iniciada por la empresa; no hay todavía ninguna ruta que la produzca.
 
 **Costo (M4):** crear una invitación cobra `TALENT_INVITE` (`409 INSUFFICIENT_CURRENCY` sin efectos si no alcanza) y se devuelve automáticamente si el trabajador no responde en 72 h.
+
+**Premio (M6):** responder (aceptar o rechazar) una invitación `PENDING` y no vencida otorga al trabajador `INVITATION_RESPONDED`, una vez por invitación, en la misma transacción que la respuesta; una invitación anulada, vencida o ya respondida no paga.
 
 **Duplicados:** no puede existir más de una invitación *activa* (`PENDING` o `ACCEPTED`) para el mismo par empresa/perfil de talento (y turno, si se indicó uno). El intento duplicado responde `409 INVITATION_ALREADY_ACTIVE`, tanto si lo detecta la comprobación previa del servidor como si lo detecta el índice único parcial de la base de datos ante una carrera concurrente; nunca se crea un segundo registro. Tras `DECLINED`, `EXPIRED` o `CANCELLED`, una nueva invitación para el mismo par vuelve a ser posible.
 
@@ -1123,6 +1299,7 @@ La API se niega a arrancar si:
 - `403 MESSAGE_NOT_OWNED`: intento de modificar un mensaje del trabajador.
 - `404 *_NOT_FOUND`: el recurso no existe o pertenece a otra empresa.
 - `409 DUPLICATE_RECORD`: correo, referencia u otro campo único duplicado.
+- M6: `400 INVALID_REFERRAL_CODE` (registro con un código de referido inexistente o mal formado; no crea la cuenta), `404 DOCUMENT_NOT_FOUND` (verificar un documento que el trabajador no tiene), `409 PROFILE_NOT_VISIBLE` (destacar un perfil oculto), `404 RESOURCE_NO_LONGER_EXISTS` (una acción de puestos fijos llegó cuando la cuenta o el puesto ya se había borrado).
 - `429 AUTH_RATE_LIMITED`: se superó el límite de intentos en una ruta de autenticación (ver "Límite de intentos" arriba).
 
 ## CORS

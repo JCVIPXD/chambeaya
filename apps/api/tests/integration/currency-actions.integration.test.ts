@@ -484,8 +484,8 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
     expect(await balanceOf(company)).toBe(10);
     const acceptedBody = await request(app).post(`/api/workers/me/talent-invitations/${answered.created.body.id}/accept`).set(as(answered.candidate.token));
     expect(acceptedBody.status).toBe(200);
-    // La accion basica del trabajador (responder) nunca se cobra ni se bloquea.
-    expect(await balanceOf(answered.candidate)).toBe(0);
+    // La accion basica del trabajador (responder) nunca se cobra ni se bloquea; desde M6 ademas paga INVITATION_RESPONDED (5).
+    expect(await balanceOf(answered.candidate)).toBe(5);
 
     // Antes del plazo no se devuelve nada.
     expect((await new CurrencyRefundService(prisma).sweep()).refunded).toBe(0);
@@ -562,7 +562,11 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
       await request(app).patch('/api/admin/currency/settings/DAILY_SPEND_CAP_COMPANY').set(as(admin.token)).send({ value: 200, reason: 'Restablecer el tope' });
     }
     const settings = await request(app).get('/api/admin/currency/settings').set(as(admin.token));
-    expect(settings.body.items.map((item: { key: string }) => item.key)).toEqual(['DAILY_SPEND_CAP_WORKER', 'DAILY_SPEND_CAP_COMPANY', 'JOB_HIGHLIGHT_DURATION_HOURS']);
+    expect(settings.body.items.map((item: { key: string }) => item.key)).toEqual([
+      'DAILY_SPEND_CAP_WORKER', 'DAILY_SPEND_CAP_COMPANY', 'JOB_HIGHLIGHT_DURATION_HOURS',
+      'REWARD_CAP_DAILY_WORKER', 'REWARD_CAP_MONTHLY_WORKER', 'REWARD_CAP_DAILY_COMPANY', 'REWARD_CAP_MONTHLY_COMPANY',
+      'REFERRAL_MONTHLY_LIMIT', 'APPLICANT_RESPONSE_WINDOW_HOURS', 'APPLICANT_RESPONSE_MONTHLY_LIMIT', 'PROFILE_HIGHLIGHT_DURATION_HOURS',
+    ]);
     const history = await request(app).get('/api/admin/currency/settings/changes').set(as(admin.token)).query({ key: 'DAILY_SPEND_CAP_COMPANY' });
     expect(history.body.items.map((item: { oldValue: string; newValue: string }) => [item.oldValue, item.newValue])).toEqual([['15', '200'], ['200', '15']]);
     expect(history.body.items[1]).toMatchObject({ reason: 'Prueba del tope diario', changedBy: { id: admin.id } });

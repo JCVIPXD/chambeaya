@@ -11,7 +11,7 @@ import { createBusinessRouter } from './modules/business/business.routes.js';
 import type { BusinessOperations } from './modules/business/business.service.js';
 import { createAdminRouter } from './modules/admin/admin.routes.js';
 import { createTalentRouter } from './modules/talent/talent.routes.js';
-import type { TalentOperations } from './modules/talent/talent.service.js';
+import { DatabaseTalentService, type TalentOperations } from './modules/talent/talent.service.js';
 import { DatabaseTalentInvitationService, type TalentInvitationOperations } from './modules/talent/talent_invitation.service.js';
 import { DatabaseCandidateUnlockService, type CandidateUnlockOperations } from './modules/talent/candidate_unlock.service.js';
 import { createRateLimitMiddleware, type RateLimitOptions } from './middleware/rate_limit.js';
@@ -24,6 +24,11 @@ import { CurrencyActionService } from './modules/currency/currency.actions.js';
 import { createJobCurrencyHooks } from './modules/currency/currency.hooks.js';
 import { CurrencyQuoteService } from './modules/currency/currency.quote.js';
 import { CurrencyRefundService } from './modules/currency/currency.refunds.js';
+import { ProfileRewardService } from './modules/currency/currency.profile-rewards.js';
+import { WorkerReferralService } from './modules/currency/currency.referrals.js';
+import { CurrencyRewardService } from './modules/currency/currency.rewards.js';
+import { CurrencyRewardStatusService } from './modules/currency/currency.reward-status.js';
+import { CurrencyVerificationService } from './modules/currency/currency.verification.js';
 import { CurrencySettingsService } from './modules/currency/currency.settings.js';
 import { WelcomeBonusService } from './modules/currency/currency.welcome.js';
 import { createBusinessJobsRouter, createJobEventsRouter, createWorkerJobsRouter } from './modules/jobs/jobs.routes.js';
@@ -135,12 +140,17 @@ export function createApp(options: {
   const welcomeBonus = new WelcomeBonusService(currencyPrisma, currencyActions);
   const authService = options.authService ?? new DatabaseAuthService(undefined, { onWorkerCreated: async (workerId) => { await welcomeBonus.grantForWorker(workerId); } });
   const currencyQuotes = new CurrencyQuoteService(currencyPrisma, currencyActions);
+  // M6: premios automáticos. Comparten reloj y cliente con el resto de la moneda.
+  const currencyRewards = new CurrencyRewardService(options.currencyClock);
+  const referrals = new WorkerReferralService(currencyPrisma, currencyRewards);
+  const rewardStatus = new CurrencyRewardStatusService(currencyPrisma, currencyRewards);
+  const talentService = options.talentService ?? new DatabaseTalentService(currencyPrisma, undefined, new ProfileRewardService(currencyRewards, referrals), currencyActions, options.currencyClock);
   const jobsService = new JobService(options.jobsPrisma ?? new PrismaClient(), {
     storage: options.jobsStorage,
-    hooks: options.jobsHooks ?? createJobCurrencyHooks(currencyActions),
+    hooks: options.jobsHooks ?? createJobCurrencyHooks(currencyActions, currencyRewards),
     events: options.jobsEvents,
   });
-  const talentInvitations = options.talentInvitationService ?? new DatabaseTalentInvitationService(currencyPrisma, currencyActions);
+  const talentInvitations = options.talentInvitationService ?? new DatabaseTalentInvitationService(currencyPrisma, currencyActions, currencyRewards);
   const candidateUnlocks = options.candidateUnlockService ?? new DatabaseCandidateUnlockService(currencyPrisma, currencyActions);
   const legacyShiftsEnabled = options.temporaryShiftsEnabled ?? temporaryShiftsEnabled();
 
@@ -191,11 +201,11 @@ export function createApp(options: {
     feedRefreshIntervalMs: options.marketplaceFeedRefreshIntervalMs,
     temporaryShiftsEnabled: legacyShiftsEnabled,
   }));
-  app.use('/api', createWorkerCurrencyRouter(authService, currencyLedger, currencyCatalog, currencyQuotes));
-  app.use('/api', createTalentRouter(authService, options.talentService, talentInvitations, candidateUnlocks));
+  app.use('/api', createWorkerCurrencyRouter(authService, currencyLedger, currencyCatalog, currencyQuotes, { rewards: rewardStatus, referrals }));
+  app.use('/api', createTalentRouter(authService, talentService, talentInvitations, candidateUnlocks));
   app.use('/api/auth', createAuthRouter(authService, { rateLimiter: authRateLimiter }));
   app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish(), legacyShiftsEnabled));
-  app.use('/api/business', createBusinessCurrencyRouter(authService, currencyLedger, currencyCatalog, currencyQuotes));
+  app.use('/api/business', createBusinessCurrencyRouter(authService, currencyLedger, currencyCatalog, currencyQuotes, { rewards: rewardStatus }));
   app.use('/api/business', createBusinessJobsRouter(authService, jobsService));
   app.use('/api/workers', createWorkerJobsRouter(authService, jobsService));
   app.use('/api', createJobEventsRouter(authService, options.jobsEvents ?? jobEvents));
@@ -206,6 +216,7 @@ export function createApp(options: {
     settings: new CurrencySettingsService(currencyPrisma),
     welcome: welcomeBonus,
     refunds: new CurrencyRefundService(currencyPrisma, options.currencyClock),
+    verification: new CurrencyVerificationService(currencyPrisma, currencyRewards),
   }));
   // Checkout simulado (Alcance E): sesión BUSINESS normal, después de
   // `express.json()` global, a diferencia del webhook de arriba.

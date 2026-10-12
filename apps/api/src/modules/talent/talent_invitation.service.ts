@@ -2,6 +2,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 
 import type { AuthSession } from '../auth/auth.service.js';
 import { CurrencyActionService, instanceKeys } from '../currency/currency.actions.js';
+import type { CurrencyRewardService } from '../currency/currency.rewards.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
 
 export type TalentInvitationInput = {
@@ -66,7 +67,12 @@ export class DatabaseTalentInvitationService implements TalentInvitationOperatio
    * todo-o-nada en una sola transacción. Sin él no se cobra nada (pruebas con un cliente
    * simulado); `createApp` siempre lo inyecta.
    */
-  constructor(private readonly prisma = new PrismaClient(), private readonly charging?: CurrencyActionService) {}
+  constructor(
+    private readonly prisma = new PrismaClient(),
+    private readonly charging?: CurrencyActionService,
+    /** M6: premio `INVITATION_RESPONDED` al trabajador. Sin él no se otorga nada. */
+    private readonly rewards?: CurrencyRewardService,
+  ) {}
 
   async createInvitation(session: AuthSession, input: TalentInvitationInput) {
     this.requireBusiness(session);
@@ -182,11 +188,31 @@ export class DatabaseTalentInvitationService implements TalentInvitationOperatio
 
     // `updateMany` con guarda de estado evita una carrera entre dos
     // respuestas concurrentes (aceptar y rechazar a la vez): sólo una gana.
-    const result = await this.prisma.talentInvitation.updateMany({
-      where: { id: current.id, status: 'PENDING' },
-      data: { status: nextStatus, respondedAt: new Date() },
-    });
-    if (result.count === 0) throw new TalentInvitationError('INVITATION_NOT_PENDING');
+    // M6: responder (aceptar o rechazar) dentro del plazo premia al trabajador, una vez por
+    // invitación. La respuesta y el premio van en la misma transacción; una invitación anulada,
+    // vencida o ya respondida no llega aquí con estado PENDING y por eso nunca premia.
+    const applyResponse = async (client: Prisma.TransactionClient | PrismaClient) => {
+      const respondedAt = new Date();
+      const result = await client.talentInvitation.updateMany({
+        where: { id: current.id, status: 'PENDING', expiresAt: { gt: respondedAt } },
+        data: { status: nextStatus, respondedAt },
+      });
+      return result.count > 0;
+    };
+    const rewards = this.rewards;
+    const responded = rewards
+      ? await withSerializableRetry(() => this.prisma.$transaction(async (tx) => {
+        if (!(await applyResponse(tx))) return false;
+        await rewards.tryGrant(tx, {
+          actor: 'WORKER', userId: session.userId, subjectId: session.userId,
+          actionKey: 'INVITATION_RESPONDED', fact: current.id,
+          related: { type: 'TalentInvitation', id: current.id },
+          reason: 'Invitación respondida a tiempo',
+        });
+        return true;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }))
+      : await applyResponse(this.prisma);
+    if (!responded) throw new TalentInvitationError('INVITATION_NOT_PENDING');
 
     const updated = await this.prisma.talentInvitation.findUniqueOrThrow({
       where: { id: current.id },

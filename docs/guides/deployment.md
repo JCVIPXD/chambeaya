@@ -580,6 +580,27 @@ registrar un trabajador o crear una empresa.
 
 Ver [Acciones conectadas a la moneda virtual](../reference/api.md#acciones-conectadas-a-la-moneda-virtual-m4).
 
+La migración `20261012100000_currency_rewards` (M6, `CN-20261012-047`) solo
+agrega: las tablas `CurrencyRewardGrant` y `WorkerReferral`, las columnas
+`User.referralCode`, `WorkerDocument.verifiedAt/verifiedById`,
+`Company.verifiedAt/verifiedById` y `WorkerTalentProfile.highlightedAt/highlightedUntil`,
+dos `CHECK` y ocho ajustes provisionales (`ON CONFLICT DO NOTHING`, así un ajuste
+ya editado conserva su valor). No modifica ni borra filas y no necesita variables
+de entorno nuevas; la aplica `prisma migrate deploy`. Efectos operativos:
+
+- Desde M6 la API otorga premios automáticos (perfil completo, documentos y
+  empresa verificados por el admin, invitación respondida, referidos, respuesta a
+  tiempo y contratación). Cualquiera de ellos deja un movimiento distinto del bono,
+  así que esa cuenta pasa a responder `409 CURRENCY_LEDGER_RETAINED` al borrado.
+- El `nextCursor` de `GET /api/business/talent` pasa a ser opaco; los cursores
+  antiguos (un `id`) se siguen aceptando, así que no hace falta coordinar el
+  despliegue de la web.
+- Las cuentas anteriores a M6 no reciben premios retroactivos: el de perfil
+  completo se evalúa la próxima vez que el trabajador guarde el perfil o suba el
+  CV o la foto.
+
+Ver [Ganar monedas: premios automáticos](../reference/api.md#ganar-monedas-premios-automáticos-m6).
+
 ## Actualizar una versión
 
 ```bash

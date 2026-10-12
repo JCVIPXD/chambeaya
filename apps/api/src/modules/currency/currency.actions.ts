@@ -221,6 +221,7 @@ export class CurrencyActionService {
 export const instanceKeys = {
   jobPublish: (postingId: string) => `job-publish:${postingId}`,
   jobHighlight: (postingId: string, sequence: number) => `job-highlight:${postingId}:${sequence}`,
+  profileHighlight: (profileId: string, sequence: number) => `profile-highlight:${profileId}:${sequence}`,
   jobApply: (postingId: string, workerId: string) => `job-apply:${postingId}:${workerId}`,
   jobPriority: (applicationId: string) => `job-priority:${applicationId}`,
   talentInvite: (invitationId: string) => `talent-invite:${invitationId}`,

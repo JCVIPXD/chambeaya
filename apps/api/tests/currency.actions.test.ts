@@ -197,7 +197,12 @@ describe('welcome bonus (grantReward)', () => {
 
 describe('currency settings and scheduler configuration', () => {
   it('keeps the provisional defaults documented in the product notes', () => {
-    expect(DEFAULT_CURRENCY_SETTINGS).toEqual({ DAILY_SPEND_CAP_WORKER: 200, DAILY_SPEND_CAP_COMPANY: 200, JOB_HIGHLIGHT_DURATION_HOURS: 168 });
+    expect(DEFAULT_CURRENCY_SETTINGS).toEqual({
+      DAILY_SPEND_CAP_WORKER: 200, DAILY_SPEND_CAP_COMPANY: 200, JOB_HIGHLIGHT_DURATION_HOURS: 168,
+      // M6
+      REWARD_CAP_DAILY_WORKER: 100, REWARD_CAP_MONTHLY_WORKER: 600, REWARD_CAP_DAILY_COMPANY: 100, REWARD_CAP_MONTHLY_COMPANY: 600,
+      REFERRAL_MONTHLY_LIMIT: 5, APPLICANT_RESPONSE_WINDOW_HOURS: 72, APPLICANT_RESPONSE_MONTHLY_LIMIT: 20, PROFILE_HIGHLIGHT_DURATION_HOURS: 168,
+    });
   });
 
   it('rejects out-of-range setting values before touching the database', async () => {

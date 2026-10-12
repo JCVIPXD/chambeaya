@@ -174,7 +174,7 @@ export function createTalentRouter(
         return;
       }
       const code = error instanceof TalentError ? error.code : 'INVALID_TALENT_REQUEST';
-      const status = code === 'WORKER_ACCOUNT_REQUIRED' || code === 'BUSINESS_ACCOUNT_REQUIRED' ? 403 : code === 'SPECIALTY_NOT_FOUND' || code === 'APPLICATION_NOT_FOUND' || code === 'CV_NOT_AVAILABLE' ? 404 : code === 'REVIEW_ALREADY_EXISTS' ? 409 : 400;
+      const status = code === 'WORKER_ACCOUNT_REQUIRED' || code === 'BUSINESS_ACCOUNT_REQUIRED' ? 403 : code === 'SPECIALTY_NOT_FOUND' || code === 'APPLICATION_NOT_FOUND' || code === 'CV_NOT_AVAILABLE' ? 404 : code === 'REVIEW_ALREADY_EXISTS' || code === 'PROFILE_NOT_VISIBLE' ? 409 : 400;
       response.status(status).json({ error: code });
     }
   };
@@ -182,6 +182,8 @@ export function createTalentRouter(
   router.get('/specialties', route(async (_request, response) => { response.json(await service.listSpecialties()); }));
   router.get('/workers/me/profile', route(async (request, response) => { response.json(await service.ownProfile(await workerSession(request))); }));
   router.patch('/workers/me/profile', route(async (request, response) => { response.json(await service.updateOwnProfile(await workerSession(request), profileSchema.parse(request.body))); }));
+  // PROFILE_HIGHLIGHT (M6): destaca el perfil propio en la búsqueda de talento (con costo).
+  router.post('/workers/me/profile/highlight', route(async (request, response) => { response.json(await service.highlightOwnProfile(await workerSession(request))); }));
   router.put('/workers/me/cv', raw({ type: 'application/pdf', limit: '5mb' }), route(async (request, response) => {
     const body = request.body;
     const encodedName = request.header('x-file-name');

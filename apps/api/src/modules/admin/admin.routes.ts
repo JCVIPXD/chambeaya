@@ -15,6 +15,7 @@ import {
   removeWorkerJobRecords,
 } from "../jobs/jobs.retention.js";
 import { CHECK_IN_LATE_LIMIT_MS, resolveAssignmentLifecycle } from "../operations/shift-state.js";
+import { withSerializableRetry } from "../operations/serializable-retry.js";
 
 /**
  * El libro mayor de moneda virtual es inmutable (trigger append-only), así que
@@ -30,6 +31,39 @@ class LedgerRetainedError extends Error {
     super(LEDGER_RETAINED);
   }
 }
+
+/**
+ * El titular ya no existe cuando la transacción de borrado lo busca bajo bloqueo: otro
+ * borrado simultáneo del mismo titular ganó (BAJO-A de CN-20261007-046). Responde 404,
+ * igual que si el borrado llegara después, y no deja ningún efecto.
+ */
+class DeleteTargetGoneError extends Error {
+  constructor(public readonly code: "WORKER_NOT_FOUND" | "COMPANY_NOT_FOUND") {
+    super(code);
+  }
+}
+
+/**
+ * Orden de bloqueo del borrado de una cuenta (BAJO-A de CN-20261007-046): PRIMERO la fila de
+ * `User` (`FOR UPDATE`), después cuenta de moneda, postulaciones y borrado. Bloquear al
+ * usuario primero serializa los borrados simultáneos del mismo titular y espera a que
+ * terminen las acciones del titular que ya tienen su fila referenciada (una FK toma
+ * `KEY SHARE`). Aun así algunas acciones toman sus bloqueos en otro orden (primero la
+ * postulación y luego el usuario por una FK), así que el borrado corre en `Serializable`
+ * con reintento: PostgreSQL aborta a uno de los dos (40P01/40001), el reintento lee el estado
+ * nuevo (cuenta borrada = 404, acción terminada = borra) y ninguno responde 500.
+ */
+/** Borra al usuario ya bloqueado; si otra transacción lo borró igual (P2025) responde 404, nunca 500. */
+async function deleteLockedUser(tx: Prisma.TransactionClient, userId: string, gone: DeleteTargetGoneError["code"]) {
+  try {
+    await tx.user.delete({ where: { id: userId } });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") throw new DeleteTargetGoneError(gone);
+    throw error;
+  }
+}
+
+const DELETE_TX = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 10_000 } as const;
 
 /**
  * El bono de bienvenida por sí solo no retiene el borrado (CN-20261007-045,
@@ -222,6 +256,10 @@ export function createAdminRouter(
         response.status(409).json({ error: "DUPLICATE_RECORD" });
         return;
       }
+      if (error instanceof DeleteTargetGoneError) {
+        response.status(404).json({ error: error.code });
+        return;
+      }
       if (
         error instanceof LedgerRetainedError ||
         isCurrencyForeignKeyViolation(error) ||
@@ -380,15 +418,19 @@ export function createAdminRouter(
         return;
       }
       let jobFiles: string[] = [];
-      await prisma.$transaction(async (tx) => {
+      await withSerializableRetry(() => prisma.$transaction(async (tx) => {
+        // Primero el usuario dueño (ver DELETE_TX): un borrado simultáneo de la misma empresa
+        // espera aquí y, al despertar, ya no la encuentra.
+        const owner = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "User" WHERE "id" = ${company.ownerId} FOR UPDATE`;
+        if (owner.length === 0 || !(await tx.company.findUnique({ where: { id: company.id }, select: { id: true } }))) throw new DeleteTargetGoneError("COMPANY_NOT_FOUND");
         // Bloquea la cuenta antes de contar: un ajuste que ya la tenga bloqueada
         // termina primero y su movimiento se ve en el conteo (BAJO-4).
         const accountIds = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "CurrencyAccount" WHERE "companyId" = ${company.id} FOR UPDATE`;
         await releaseWelcomeOnlyLedger(tx, accountIds[0]?.id ?? null);
         jobFiles = await removeCompanyJobRecords(tx, company.id);
         await tx.currencyAccount.deleteMany({ where: { companyId: company.id } });
-        await tx.user.delete({ where: { id: company.ownerId } });
-      });
+        await deleteLockedUser(tx, company.ownerId, "COMPANY_NOT_FOUND");
+      }, DELETE_TX));
       for (const storageKey of jobFiles) {
         try {
           await documents.remove(storageKey);
@@ -442,13 +484,17 @@ export function createAdminRouter(
       // almacenamiento falla tras confirmar, solo quedan archivos huérfanos
       // sin fila que los referencie, que es el fallo recuperable.
       let jobFiles: string[] = [];
-      await prisma.$transaction(async (tx) => {
+      await withSerializableRetry(() => prisma.$transaction(async (tx) => {
+        // Primero el usuario (ver DELETE_TX): un borrado simultáneo del mismo trabajador espera
+        // aquí y, al despertar, ya no lo encuentra (404, no 500).
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "User" WHERE "id" = ${request.params.id} AND "role" = 'WORKER' FOR UPDATE`;
+        if (locked.length === 0) throw new DeleteTargetGoneError("WORKER_NOT_FOUND");
         const accountIds = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "CurrencyAccount" WHERE "workerId" = ${request.params.id} FOR UPDATE`;
         await releaseWelcomeOnlyLedger(tx, accountIds[0]?.id ?? null);
         jobFiles = await removeWorkerJobRecords(tx, request.params.id);
         await tx.currencyAccount.deleteMany({ where: { workerId: request.params.id } });
-        await tx.user.delete({ where: { id: request.params.id } });
-      });
+        await deleteLockedUser(tx, request.params.id, "WORKER_NOT_FOUND");
+      }, DELETE_TX));
       for (const storageKey of jobFiles) {
         try {
           await documents.remove(storageKey);

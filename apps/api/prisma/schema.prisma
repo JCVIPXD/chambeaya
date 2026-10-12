@@ -204,6 +204,13 @@ model User {
   currencySettingUpdates CurrencySetting[] @relation("CurrencySettingUpdatedBy")
   currencySettingChanges CurrencySettingChange[] @relation("CurrencySettingChangedBy")
   contactUnlocksAsWorker CandidateContactUnlock[] @relation("WorkerContactUnlocks")
+  /// M6: código de referido del trabajador (se genera al pedirlo por primera vez).
+  referralCode  String?             @unique
+  referralsMade WorkerReferral[]    @relation("WorkerReferrer")
+  referralReceived WorkerReferral?  @relation("WorkerReferred")
+  currencyRewardGrants CurrencyRewardGrant[] @relation("CurrencyRewardGrantUser")
+  workerDocumentsVerified WorkerDocument[] @relation("WorkerDocumentVerifiedBy")
+  companiesVerified Company[]       @relation("CompanyVerifiedBy")
   conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
   companyWorkerContacts CompanyWorkerContact[] @relation("CompanyWorkerContactUser")
   talentProfile WorkerTalentProfile?
@@ -244,6 +251,10 @@ model Company {
   talentInvitations TalentInvitation[]
   jobPostings   JobPosting[]
   contactUnlocks CandidateContactUnlock[] @relation("CompanyContactUnlocks")
+  /// M6: verificación de la empresa por el administrador (autor y fecha).
+  verifiedAt    DateTime?
+  verifiedById  String?
+  verifiedBy    User?                @relation("CompanyVerifiedBy", fields: [verifiedById], references: [id], onDelete: SetNull)
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
 }
@@ -478,6 +489,12 @@ model WorkerTalentProfile {
   isCertificationsVisible Boolean          @default(true)
   isLanguagesVisible      Boolean          @default(true)
   isWorkAreaVisible       Boolean          @default(true)
+  /// M6 (PROFILE_HIGHLIGHT): el perfil se muestra primero en la búsqueda de
+  /// talento mientras `highlightedAt <= ahora < highlightedUntil`. `highlightedAt`
+  /// permite fijar la partición destacados/resto con el instante de la primera
+  /// página y que el cursor no duplique ni salte filas.
+  highlightedAt    DateTime?
+  highlightedUntil DateTime?
   specialties      WorkerTalentSpecialty[]
   experiences      WorkerExperience[]
   certifications   WorkerCertification[]
@@ -487,6 +504,7 @@ model WorkerTalentProfile {
   updatedAt        DateTime                @updatedAt
 
   @@index([isVisible, isAvailable, district])
+  @@index([highlightedUntil])
 }
 
 /// Experiencia laboral declarada por el trabajador. Varias entradas por
@@ -612,6 +630,11 @@ model WorkerDocument {
   originalName String
   mediaType    String
   sizeBytes    Int
+  /// M6: verificado por el administrador (autor y fecha). Reemplazar el archivo
+  /// borra la verificación; el premio `DOCUMENT_VERIFIED` es uno por tipo y no se repite.
+  verifiedAt   DateTime?
+  verifiedById String?
+  verifiedBy   User?              @relation("WorkerDocumentVerifiedBy", fields: [verifiedById], references: [id], onDelete: SetNull)
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
 
@@ -997,6 +1020,46 @@ model CurrencySettingChange {
   createdAt   DateTime @default(now())
 
   @@index([key, createdAt])
+}
+
+/// M6: un premio otorgado por un hecho (perfil completo, documento verificado...).
+/// `factKey` (`{actionKey}:{hecho}`) es único: aunque dos transacciones coincidan,
+/// un mismo hecho nunca paga dos veces. Además sirve para el tope diario/mensual de
+/// premios (`occurredAt` usa el reloj de la moneda) y para el estado de cada premio.
+/// El bono de bienvenida no se registra aquí (no cuenta para el tope de premios).
+model CurrencyRewardGrant {
+  id                String                   @id @default(cuid())
+  /// Titular del premio: el trabajador o el usuario dueño de la empresa.
+  userId            String
+  user              User                     @relation("CurrencyRewardGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+  actor             CurrencyAccountOwnerType
+  actionKey         String
+  factKey           String                   @unique
+  amount            Int
+  /// Movimiento del libro (sin FK: el libro es inmutable y se consulta aparte).
+  movementId        String?
+  relatedEntityType String?
+  relatedEntityId   String?
+  occurredAt        DateTime
+
+  @@index([userId, occurredAt])
+  @@index([userId, actionKey, occurredAt])
+}
+
+/// M6: referido de un trabajador. Se crea al registrarse con un código válido y
+/// el referido es único (`referredId`): solo cuenta una vez. El premio al
+/// referidor se otorga cuando el referido completa su perfil (`rewardedAt`).
+model WorkerReferral {
+  id         String    @id @default(cuid())
+  referrerId String
+  referrer   User      @relation("WorkerReferrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referredId String    @unique
+  referred   User      @relation("WorkerReferred", fields: [referredId], references: [id], onDelete: Cascade)
+  code       String
+  rewardedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([referrerId, createdAt])
 }
 
 /// M4: contacto y CV de un candidato que no postuló, desbloqueados por una

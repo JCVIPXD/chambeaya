@@ -7,7 +7,7 @@ import { CurrencyError } from './currency.service.js';
 /** Acciones con costo que el actor puede cotizar antes de ejecutarlas. */
 const QUOTABLE: Readonly<Record<CurrencyAccountOwnerType, readonly string[]>> = {
   COMPANY: ['JOB_PUBLISH_EXTRA', 'JOB_HIGHLIGHT', 'TALENT_INVITE', 'CANDIDATE_CONTACT_UNLOCK'],
-  WORKER: ['APPLICATION_EXTRA', 'APPLICATION_PRIORITY'],
+  WORKER: ['APPLICATION_EXTRA', 'APPLICATION_PRIORITY', 'PROFILE_HIGHLIGHT'],
 };
 
 export function quotableActions(actor: CurrencyAccountOwnerType) {
@@ -54,6 +54,12 @@ export class CurrencyQuoteService {
         case 'JOB_HIGHLIGHT': {
           const posting = companyId ? await tx.jobPosting.findFirst({ where: { id: targetId, companyId }, select: { highlightedUntil: true } }) : null;
           alreadyActive = !!posting?.highlightedUntil && posting.highlightedUntil.getTime() > this.actions.now().getTime();
+          break;
+        }
+        case 'PROFILE_HIGHLIGHT': {
+          // Solo el propio perfil: un perfil ajeno nunca revela su estado.
+          const profile = await tx.workerTalentProfile.findFirst({ where: { id: targetId, userId }, select: { id: true, highlightedUntil: true } });
+          if (profile) alreadyActive = !!profile.highlightedUntil && profile.highlightedUntil.getTime() > this.actions.now().getTime();
           break;
         }
         case 'APPLICATION_EXTRA': {
