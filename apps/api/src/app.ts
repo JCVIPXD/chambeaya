@@ -34,7 +34,7 @@ import { WelcomeBonusService } from './modules/currency/currency.welcome.js';
 import { createBusinessJobsRouter, createJobEventsRouter, createWorkerJobsRouter } from './modules/jobs/jobs.routes.js';
 import { JobService, type JobHooks } from './modules/jobs/jobs.service.js';
 import { jobEvents, type JobEvents } from './modules/jobs/jobs.events.js';
-import type { PrivateDocumentStorage } from './modules/talent/private_document_storage.js';
+import { PrivateDocumentStorage } from './modules/talent/private_document_storage.js';
 
 const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_AUTH_RATE_LIMIT_MAX = 20;
@@ -123,6 +123,8 @@ export function createApp(options: {
   /** Cliente, almacenamiento, ganchos (M4) y bus de avisos de los puestos fijos (M3). */
   jobsPrisma?: PrismaClient;
   jobsStorage?: PrivateDocumentStorage;
+  /** Almacenamiento privado de los documentos del trabajador (talento y revisión del admin); por defecto `DOCUMENT_STORAGE_ROOT`. */
+  documentStorage?: PrivateDocumentStorage;
   jobsHooks?: JobHooks;
   jobsEvents?: JobEvents;
   /** Habilita el flujo legado de turnos temporales. Por defecto se toma de
@@ -133,6 +135,7 @@ export function createApp(options: {
   const shiftEvents = options.marketplaceEvents ?? marketplaceShiftEvents;
   const paymentsPrisma = options.paymentsPrisma ?? new PrismaClient();
   const currencyPrisma = options.currencyPrisma ?? new PrismaClient();
+  const documentStorage = options.documentStorage ?? new PrivateDocumentStorage();
   const currencyLedger = new CurrencyLedgerService(currencyPrisma);
   const currencyCatalog = new CurrencyCatalogService(currencyPrisma, options.currencyUsageCounter, undefined, options.currencyClock);
   // M4: cobro de acciones, bono de bienvenida y devolución comparten un reloj y un cliente.
@@ -144,7 +147,7 @@ export function createApp(options: {
   const currencyRewards = new CurrencyRewardService(options.currencyClock);
   const referrals = new WorkerReferralService(currencyPrisma, currencyRewards);
   const rewardStatus = new CurrencyRewardStatusService(currencyPrisma, currencyRewards);
-  const talentService = options.talentService ?? new DatabaseTalentService(currencyPrisma, undefined, new ProfileRewardService(currencyRewards, referrals), currencyActions, options.currencyClock);
+  const talentService = options.talentService ?? new DatabaseTalentService(currencyPrisma, documentStorage, new ProfileRewardService(currencyRewards, referrals), currencyActions, options.currencyClock);
   const jobsService = new JobService(options.jobsPrisma ?? new PrismaClient(), {
     storage: options.jobsStorage,
     hooks: options.jobsHooks ?? createJobCurrencyHooks(currencyActions, currencyRewards),
@@ -216,7 +219,7 @@ export function createApp(options: {
     settings: new CurrencySettingsService(currencyPrisma),
     welcome: welcomeBonus,
     refunds: new CurrencyRefundService(currencyPrisma, options.currencyClock),
-    verification: new CurrencyVerificationService(currencyPrisma, currencyRewards),
+    verification: new CurrencyVerificationService(currencyPrisma, currencyRewards, documentStorage),
   }));
   // Checkout simulado (Alcance E): sesión BUSINESS normal, después de
   // `express.json()` global, a diferencia del webhook de arriba.

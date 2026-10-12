@@ -1,8 +1,9 @@
 import { raw, Router } from 'express';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
 
 import { AuthError, type AuthService } from '../auth/auth.service.js';
 import { CurrencyError } from '../currency/currency.service.js';
+import { sendTransactionError } from '../operations/transaction-errors.js';
 import {
   CANDIDATE_UNLOCK_ERROR_STATUS,
   CandidateUnlockError,
@@ -173,7 +174,19 @@ export function createTalentRouter(
         response.status(error.statusCode).json({ error: error.code, ...error.details });
         return;
       }
-      const code = error instanceof TalentError ? error.code : 'INVALID_TALENT_REQUEST';
+      // Entrada inválida (zod): el único caso que responde 400 INVALID_TALENT_REQUEST.
+      if (error instanceof ZodError) {
+        response.status(400).json({ error: 'INVALID_TALENT_REQUEST' });
+        return;
+      }
+      // Reintentos `Serializable` agotados -> 503 reintentable; cuenta o registro ya borrado -> 404 (CN-20261012-049, BAJO-2).
+      if (sendTransactionError(response, error, { missingRecordCode: 'RESOURCE_NO_LONGER_EXISTS' })) return;
+      if (!(error instanceof TalentError)) {
+        console.error(error);
+        response.status(500).json({ error: 'INTERNAL_ERROR' });
+        return;
+      }
+      const code = error.code;
       const status = code === 'WORKER_ACCOUNT_REQUIRED' || code === 'BUSINESS_ACCOUNT_REQUIRED' ? 403 : code === 'SPECIALTY_NOT_FOUND' || code === 'APPLICATION_NOT_FOUND' || code === 'CV_NOT_AVAILABLE' ? 404 : code === 'REVIEW_ALREADY_EXISTS' || code === 'PROFILE_NOT_VISIBLE' ? 409 : 400;
       response.status(status).json({ error: code });
     }

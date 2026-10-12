@@ -580,17 +580,50 @@ Solo `ADMIN` (`403` otro rol, `401` sin sesión). Marcar verificado guarda **aut
 fecha** (`verifiedById`, `verifiedAt`); repetirlo es idempotente (conserva el autor
 y la fecha originales) y reintenta el premio si antes no cupo.
 
-- `POST /api/admin/workers/:workerId/documents/:kind/verification` con `kind` =
-  `CV` o `PROFILE_PHOTO` → `{verified, alreadyVerified, verifiedAt,
-  verifiedById, reward: {granted, amount, reason?}}`. `404 DOCUMENT_NOT_FOUND` si
-  el trabajador no tiene ese documento; `400` si el tipo no existe.
-- `DELETE /api/admin/workers/:workerId/documents/:kind/verification` → `{verified: false}`
-  (no descuenta nada: el libro es solo de suma).
-- `POST /api/admin/companies/:companyId/verification` y
-  `DELETE /api/admin/companies/:companyId/verification` (`404 COMPANY_NOT_FOUND`).
+**Revisión del documento (CN-20261012-049, BAJO-3).** La verificación queda ligada al
+archivo concreto que el admin revisó:
 
-Subir un archivo nuevo (CV o foto) borra su verificación; el premio ya pagado por
-ese tipo no se vuelve a pagar al verificarlo de nuevo.
+- `GET /api/admin/workers/:workerId/documents` → `{documents: [{kind, id, version,
+  originalName, mediaType, sizeBytes, uploadedAt, verified, verifiedAt, verifiedById,
+  history: [{action, reason, changedById, documentVersion, createdAt}]}]}` (el más
+  reciente primero; se leen los 40 cambios más recientes del trabajador entre ambos tipos
+  y se muestran hasta 20 por tipo, así que con muchos cambios de un tipo el historial del
+  otro puede salir recortado; no hay paginación todavía). `version` es un identificador opaco
+  (hash de la clave de almacenamiento): cambia con cada archivo nuevo y **nunca se
+  expone la clave de almacenamiento**. `uploadedAt` es la fecha de subida del archivo
+  vigente (en filas anteriores a la migración `20261012200000`, la de creación).
+  `404 WORKER_NOT_FOUND` si la cuenta no es un trabajador.
+- `GET /api/admin/workers/:workerId/documents/:kind/file`: descarga el archivo
+  (`Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `inline`)
+  y devuelve su `version` en `X-Document-Version`. Control estricto de rol `ADMIN`:
+  ni el propio trabajador ni una empresa pueden usarla (`403`); `404 DOCUMENT_NOT_FOUND`
+  / `404 DOCUMENT_FILE_NOT_FOUND`; `409 DOCUMENT_CHANGED` si lo reemplazaron mientras se
+  leía.
+- `POST /api/admin/workers/:workerId/documents/:kind/verification` con `kind` =
+  `CV` o `PROFILE_PHOTO` y cuerpo `{documentVersion}` (obligatorio, la `version` del
+  archivo revisado) → `{verified, alreadyVerified, verifiedAt, verifiedById,
+  documentVersion, reward: {granted, amount, reason?}}`. **`409 DOCUMENT_CHANGED`** si
+  el archivo vigente ya no es el revisado (el trabajador lo reemplazó): no verifica
+  nada, no paga y no escribe historial. `400` si falta la versión, hay campos de más
+  o el tipo no existe; `404 DOCUMENT_NOT_FOUND` si el trabajador no tiene ese
+  documento. La comprobación ocurre bajo el bloqueo de la fila del documento, así que
+  un reemplazo simultáneo nunca deja verificado un archivo distinto del revisado.
+- `DELETE /api/admin/workers/:workerId/documents/:kind/verification` con cuerpo
+  `{reason}` (3 a 500 caracteres, obligatorio) → `{verified: false, alreadyUnverified}`.
+  Guarda autor, fecha y motivo en el historial (`WorkerDocumentVerificationChange`);
+  si no estaba verificado no escribe nada (idempotente). No descuenta nada: el libro es
+  solo de suma, y volver a verificar no vuelve a pagar (un premio por tipo y trabajador,
+  así que verificar y retirar en bucle no permite farmear premios: máximo 2 por trabajador).
+- `POST /api/admin/companies/:companyId/verification` (idempotente) y
+  `DELETE /api/admin/companies/:companyId/verification` con cuerpo `{reason}` →
+  `{verified: false, alreadyUnverified}` (`404 COMPANY_NOT_FOUND`). Mismo historial
+  (`CompanyVerificationChange`, con autor, fecha y motivo al retirar). Todavía no hay ruta
+  para leer el historial de la empresa: se consulta en la base hasta que M5 lo necesite.
+
+El historial no es de solo lectura por trigger: el autor pasa a `null` si la cuenta del
+admin se borra (`ON DELETE SET NULL`); la fila se conserva. Subir un archivo nuevo (CV o
+foto) borra su verificación (sin fila de historial: lo hace el trabajador, no un admin); el
+premio ya pagado por ese tipo no se vuelve a pagar al verificarlo de nuevo.
 
 ### Referidos
 
@@ -671,6 +704,12 @@ highlightedUntil` y las 8 filas de ajustes. No modifica ni borra filas existente
 Los ganchos de `JobHooks` nuevos: `afterCompanyResponse` y el contexto de `afterHire` con
 `userId`.
 
+Migración `20261012200000_verification_history` (`CN-20261012-049`, solo agrega): el tipo
+`VerificationChangeAction` (`VERIFIED`/`UNVERIFIED`), `WorkerDocument.uploadedAt` (nula en filas
+anteriores) y las tablas `WorkerDocumentVerificationChange` y `CompanyVerificationChange`
+(autor `ON DELETE SET NULL`, cascada con el trabajador o la empresa). No modifica ni borra filas
+existentes.
+
 ### Borrado de titulares bajo concurrencia (BAJO-A de `CN-20261007-046`, cerrado)
 
 `DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` bloquean **primero**
@@ -683,11 +722,38 @@ el borrado gana, la acción responde `404 RESOURCE_NO_LONGER_EXISTS` (la FK `P20
 puesto o titular ya borrado se traduce en `JobService`); si la acción gana, el borrado
 sigue (`204`) o se bloquea con `409` si dejó un movimiento. No queda borrado parcial ni
 libro corrupto. Límite: la traducción de `P2003` cubre las acciones de puestos fijos. En las
-rutas de talento (perfil, CV, foto, destacar), una acción que llega con la cuenta ya borrada no
-responde `500`, pero cae en el manejador genérico del enrutador de talento y responde
-`400 INVALID_TALENT_REQUEST` (sondas de `CN-20261012-048`). El mismo manejador convierte en
-`400 INVALID_TALENT_REQUEST` un guardado de perfil cuyos reintentos `Serializable` se agotan
-(desde M6 el guardado es `Serializable`); en ambos casos no queda ningún efecto aplicado.
+rutas de talento (perfil, CV, foto, destacar), una acción que llega con la cuenta ya borrada
+(`P2003`/`P2025`) responde `404 RESOURCE_NO_LONGER_EXISTS` (antes `400 INVALID_TALENT_REQUEST`,
+`CN-20261012-048`, BAJO-2; corregido en `CN-20261012-049`). Un guardado de perfil cuyos
+reintentos `Serializable` se agotan responde `503 SERIALIZATION_RETRY_EXHAUSTED`
+(ver «Reintentos de serialización agotados»); en ambos casos no queda ningún efecto aplicado.
+
+### Reintentos de serialización agotados (`503 SERIALIZATION_RETRY_EXHAUSTED`)
+
+Las rutas de moneda (`/api/workers/currency/*`, `/api/business/currency/*`, `/api/admin/currency/*`
+y las verificaciones), de puestos fijos (`/api/business/job-*`, `/api/workers/job-*`), de talento y
+de administración comparten un único mapeo (`apps/api/src/modules/operations/transaction-errors.ts`,
+`CN-20261012-049`, BAJO-1 y BAJO-2): cuando `withSerializableRetry` agota sus 6 intentos (`P2034`, o
+`40001`/`40P01` sin recuperar) la respuesta es **`503 SERIALIZATION_RETRY_EXHAUSTED`** con
+`Retry-After: 1` y cuerpo `{error, message, retryable: true}` en lugar de un `500`. La transacción se
+revirtió entera: no queda ningún efecto aplicado y repetir la misma petición es seguro (las acciones
+con cobro son idempotentes por su clave). En talento, `400` queda reservado a la validación de
+entrada, `404 RESOURCE_NO_LONGER_EXISTS` a la cuenta o registro ya borrado y `500 INTERNAL_ERROR` a un
+fallo inesperado. Las rutas del trabajador del módulo de turnos conservan su contrato histórico
+`409 CONCURRENT_UPDATE`. La prueba de estrés `currency-actions … (BAJO-1)` acepta ahora `201` o este
+`503` (y comprueba que un `503` no dejó postulación y que el libro queda consistente).
+
+### Límites conocidos de M6 (sin cambio, solo documentados)
+
+- **Oráculo de referidos:** al registrar un correo ya existente, un `referralCode` válido responde
+  `409 DUPLICATE_ACCOUNT` y uno inválido `400 INVALID_REFERRAL_CODE`; permite probar códigos. El
+  espacio es de 32^8 códigos, el registro tiene límite de intentos y el código no expone datos
+  personales.
+- **`referralCode` no textual** (p. ej. un número) se ignora sin error y la cuenta se crea sin
+  referido.
+- **`HIRE_CONFIRMED` sin límite propio:** con cuentas cómplices una empresa puede acumular premios
+  de contratación hasta el tope global `REWARD_CAP_MONTHLY_COMPANY`. Entra en el riesgo declarado de
+  cuentas múltiples por persona.
 
 ## Superadmin: cuentas empresariales
 
@@ -1293,6 +1359,8 @@ La API se niega a arrancar si:
 - `400 INVALID_INPUT`: payload o regla de negocio inválida.
 - `401 INVALID_SESSION`: token ausente, inválido o vencido.
 - `409 CONCURRENT_UPDATE`: (rutas del trabajador) un conflicto de concurrencia agotó los reintentos y la operación no se aplicó; repetirla es seguro.
+- `503 SERIALIZATION_RETRY_EXHAUSTED`: (moneda, puestos, talento y administración) los reintentos de serialización se agotaron; no se aplicó nada, repetir es seguro y se envía `Retry-After`.
+- `409 DOCUMENT_CHANGED`: el documento del trabajador cambió desde que el admin lo revisó (verificación de documentos).
 - `500 INTERNAL_ERROR`: error inesperado del servidor (también en las rutas del trabajador desde `CN-20260923-012`; antes respondían `401`).
 - `403 BUSINESS_ACCOUNT_REQUIRED`: la sesión no corresponde a una empresa.
 - `403 ADMIN_ACCOUNT_REQUIRED`: la sesión no corresponde a un administrador (rutas `/api/admin`).

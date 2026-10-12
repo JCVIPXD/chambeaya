@@ -16,6 +16,7 @@ import {
 } from "../jobs/jobs.retention.js";
 import { CHECK_IN_LATE_LIMIT_MS, resolveAssignmentLifecycle } from "../operations/shift-state.js";
 import { withSerializableRetry } from "../operations/serializable-retry.js";
+import { sendTransactionError } from "../operations/transaction-errors.js";
 
 /**
  * El libro mayor de moneda virtual es inmutable (trigger append-only), así que
@@ -276,6 +277,7 @@ export function createAdminRouter(
         response.status(409).json({ error: "RELATED_RECORDS_EXIST" });
         return;
       }
+      if (sendTransactionError(response, error)) return;
       console.error(error);
       response.status(500).json({ error: "INTERNAL_ERROR" });
     }

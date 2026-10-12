@@ -912,7 +912,20 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
           ...ids.slice(3).map((id) => apply(worker, id, { priority: true })),
         ]);
         expect(sweepA.refunded + sweepB.refunded).toBeGreaterThanOrEqual(0);
-        for (const response of applies as Array<Awaited<ReturnType<typeof apply>>>) expect([response.status, response.body.error], JSON.stringify(response.body)).toEqual([201, undefined]);
+        // Bajo contención extrema los reintentos Serializable pueden agotarse: eso es `503 SERIALIZATION_RETRY_EXHAUSTED`
+        // (reintentable, nunca 500) y la postulación NO debe haberse aplicado. Cualquier otra respuesta es un defecto.
+        const concurrentIds = ids.slice(3);
+        for (const [index, response] of (applies as Array<Awaited<ReturnType<typeof apply>>>).entries()) {
+          if (response.status === 201) {
+            expect(response.body.error, JSON.stringify(response.body)).toBeUndefined();
+          } else {
+            expect([response.status, response.body.error], JSON.stringify(response.body)).toEqual([503, 'SERIALIZATION_RETRY_EXHAUSTED']);
+            expect(response.headers['retry-after']).toBe('1');
+          }
+          // Sin efectos a medias: la postulación existe si y solo si la respuesta fue 201.
+          const stored = await prisma.jobApplication.count({ where: { postingId: concurrentIds[index]!, workerId: worker.id } });
+          expect(stored, `round ${round} application ${index}`).toBe(response.status === 201 ? 1 : 0);
+        }
       }
       await lateSweeper().sweep();
       const movements = await movementsOf(worker);

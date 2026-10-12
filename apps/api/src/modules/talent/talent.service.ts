@@ -339,8 +339,8 @@ export class DatabaseTalentService implements TalentOperations {
       // Reemplazar el archivo borra la verificación del administrador (el premio ya pagado no se repite).
       await this.withProfileRewards(session.userId, (client) => client.workerDocument.upsert({
         where: { userId_kind: { userId: session.userId, kind: 'CV' } },
-        create: { userId: session.userId, kind: 'CV', ...stored },
-        update: { ...stored, verifiedAt: null, verifiedById: null },
+        create: { userId: session.userId, kind: 'CV', ...stored, uploadedAt: this.clock() },
+        update: { ...stored, uploadedAt: this.clock(), verifiedAt: null, verifiedById: null },
       }));
       if (previous && previous.storageKey !== stored.storageKey) {
         await this.documents.remove(previous.storageKey);
@@ -434,8 +434,8 @@ export class DatabaseTalentService implements TalentOperations {
       });
       await this.withProfileRewards(session.userId, (client) => client.workerDocument.upsert({
         where: { userId_kind: { userId: session.userId, kind: 'PROFILE_PHOTO' } },
-        create: { userId: session.userId, kind: 'PROFILE_PHOTO', ...stored },
-        update: { ...stored, verifiedAt: null, verifiedById: null },
+        create: { userId: session.userId, kind: 'PROFILE_PHOTO', ...stored, uploadedAt: this.clock() },
+        update: { ...stored, uploadedAt: this.clock(), verifiedAt: null, verifiedById: null },
       }));
       if (previous && previous.storageKey !== stored.storageKey) {
         await this.documents.remove(previous.storageKey);

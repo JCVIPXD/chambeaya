@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { z, ZodError } from 'zod';
 
+import { sendTransactionError } from '../operations/transaction-errors.js';
 import { AuthError, DatabaseAuthService, type AccountRole, type AuthService } from '../auth/auth.service.js';
 import { CurrencyCatalogService } from './currency.catalog.service.js';
 import { CurrencyQuoteService } from './currency.quote.js';
@@ -31,6 +32,10 @@ const settingPatchSchema = z.object({
 }).strict();
 const settingChangesSchema = pageSchema.extend({ key: z.enum(CURRENCY_SETTING_KEYS).optional() });
 const documentKindSchema = z.enum(['CV', 'PROFILE_PHOTO']);
+/** La versión opaca del archivo que el admin revisó (de `GET .../documents`). */
+const verifyDocumentSchema = z.object({ documentVersion: z.string().trim().min(1).max(64) }).strict();
+/** Retirar una verificación exige motivo: queda en el historial con autor y fecha. */
+const unverifySchema = z.object({ reason: z.string().trim().min(3).max(500) }).strict();
 const catalogPageSchema = pageSchema.extend({ entryId: z.string().trim().min(1).max(128).optional() });
 /** Solo se editan monto, estado, cuota y devolución; clave, actor y tipo son
  * fijos. El motivo es obligatorio para que cada cambio quede explicado. */
@@ -67,6 +72,7 @@ function sendError(response: Response, error: unknown) {
     response.status(error.statusCode).json({ error: error.code, ...error.details });
     return;
   }
+  if (sendTransactionError(response, error)) return;
   console.error(error);
   response.status(500).json({ error: 'INTERNAL_ERROR' });
 }
@@ -194,19 +200,40 @@ export function createAdminCurrencyRouter(
    * Verificaciones que disparan premios (M6). Marcar verificado guarda autor y fecha y otorga el
    * premio (una vez por tipo de documento / por empresa); repetirlo es idempotente.
    */
+  /** Documentos del trabajador (versión opaca, tamaño, fecha, estado e historial). Nunca expone la clave de almacenamiento. */
+  router.get('/workers/:workerId/documents', guarded(authService, 'ADMIN', async (request, response) => {
+    response.json(await verification.listDocuments(routeParam(request, 'workerId')));
+  }));
+  /** Archivo para revisarlo. `guarded(... 'ADMIN')` es el control de rol; `X-Document-Version` es la versión que luego se envía al verificar. */
+  router.get('/workers/:workerId/documents/:kind/file', guarded(authService, 'ADMIN', async (request, response) => {
+    const kind = documentKindSchema.parse(routeParam(request, 'kind'));
+    const document = await verification.downloadDocument(routeParam(request, 'workerId'), kind);
+    const filename = encodeURIComponent(document.originalName).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    response.set({
+      'Cache-Control': 'private, no-store',
+      'Content-Type': document.mediaType,
+      'Content-Disposition': `inline; filename*=UTF-8''${filename}`,
+      'X-Content-Type-Options': 'nosniff',
+      'X-Document-Version': document.version,
+    });
+    response.send(document.bytes);
+  }));
   router.post('/workers/:workerId/documents/:kind/verification', guarded(authService, 'ADMIN', async (request, response, adminId) => {
     const kind = documentKindSchema.parse(routeParam(request, 'kind'));
-    response.json(await verification.verifyDocument(adminId, routeParam(request, 'workerId'), kind));
+    const { documentVersion } = verifyDocumentSchema.parse(request.body);
+    response.json(await verification.verifyDocument(adminId, routeParam(request, 'workerId'), kind, documentVersion));
   }));
-  router.delete('/workers/:workerId/documents/:kind/verification', guarded(authService, 'ADMIN', async (request, response) => {
+  router.delete('/workers/:workerId/documents/:kind/verification', guarded(authService, 'ADMIN', async (request, response, adminId) => {
     const kind = documentKindSchema.parse(routeParam(request, 'kind'));
-    response.json(await verification.unverifyDocument(routeParam(request, 'workerId'), kind));
+    const { reason } = unverifySchema.parse(request.body);
+    response.json(await verification.unverifyDocument(adminId, routeParam(request, 'workerId'), kind, reason));
   }));
   router.post('/companies/:companyId/verification', guarded(authService, 'ADMIN', async (request, response, adminId) => {
     response.json(await verification.verifyCompany(adminId, routeParam(request, 'companyId')));
   }));
-  router.delete('/companies/:companyId/verification', guarded(authService, 'ADMIN', async (request, response) => {
-    response.json(await verification.unverifyCompany(routeParam(request, 'companyId')));
+  router.delete('/companies/:companyId/verification', guarded(authService, 'ADMIN', async (request, response, adminId) => {
+    const { reason } = unverifySchema.parse(request.body);
+    response.json(await verification.unverifyCompany(adminId, routeParam(request, 'companyId'), reason));
   }));
   router.get('/currency/catalog', guarded(authService, 'ADMIN', async (_request, response) => {
     response.json(await catalog.listForAdmin());

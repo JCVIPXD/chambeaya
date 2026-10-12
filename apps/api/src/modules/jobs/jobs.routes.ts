@@ -1,6 +1,7 @@
 import { raw, Router, type ErrorRequestHandler, type Request, type Response } from 'express';
 import { z, ZodError } from 'zod';
 
+import { sendTransactionError } from '../operations/transaction-errors.js';
 import { AuthError, DatabaseAuthService, type AccountRole, type AuthService, type AuthSession } from '../auth/auth.service.js';
 import { JOB_APPLICATION_STATUSES } from './job-state.js';
 import { CurrencyError } from '../currency/currency.service.js';
@@ -118,6 +119,7 @@ function sendError(response: Response, error: unknown) {
     response.status(error.statusCode).json({ error: error.code, ...error.details });
     return;
   }
+  if (sendTransactionError(response, error)) return;
   console.error(error);
   response.status(500).json({ error: 'INTERNAL_ERROR' });
 }

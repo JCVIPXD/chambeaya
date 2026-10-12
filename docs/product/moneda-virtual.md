@@ -173,6 +173,11 @@ Un perfil oculto no se puede destacar.
 **Verificaciones del admin (decisión de diseño).** No existía un flujo de verificación: M6 agrega
 las rutas mínimas del admin para marcar verificado un documento del trabajador o una empresa, con
 autor y fecha, y para quitar la verificación (quitarla no devuelve ni descuenta monedas).
+Desde `CN-20261012-049` la verificación de un documento queda ligada al archivo que el admin
+revisó (el admin puede listar y descargar los documentos y verifica enviando la versión; si el
+trabajador lo reemplazó mientras tanto, la API responde `409 DOCUMENT_CHANGED`) y retirar una
+verificación exige un motivo que queda en un historial con autor y fecha. El premio sigue siendo
+uno por tipo de documento, así que verificar y retirar en bucle no permite farmear premios.
 
 ## Puesto fijo y proceso de contrato
 

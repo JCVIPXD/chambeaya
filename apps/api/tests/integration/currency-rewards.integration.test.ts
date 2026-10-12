@@ -110,8 +110,15 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     if (!except.includes('cv')) expect((await uploadCv(worker)).status).toBe(201);
     if (!except.includes('photo')) expect((await uploadPhoto(worker)).status).toBe(201);
   }
-  const verifyDocument = (worker: Account, kind: 'CV' | 'PROFILE_PHOTO', token = admin.token) =>
-    request(app).post(`/api/admin/workers/${worker.id}/documents/${kind}/verification`).set(as(token));
+  /** Versión opaca del archivo vigente, como la ve el admin al listar los documentos (BAJO-3). */
+  const versionOf = async (worker: Account, kind: 'CV' | 'PROFILE_PHOTO') => {
+    const listing = await request(app).get(`/api/admin/workers/${worker.id}/documents`).set(as(admin.token));
+    return (listing.body.documents as Array<{ kind: string; version: string }> | undefined)?.find((document) => document.kind === kind)?.version ?? 'sin-documento';
+  };
+  const verifyDocument = async (worker: Account, kind: 'CV' | 'PROFILE_PHOTO', token = admin.token, version?: string) =>
+    request(app).post(`/api/admin/workers/${worker.id}/documents/${kind}/verification`).set(as(token)).send({ documentVersion: version ?? await versionOf(worker, kind) });
+  const unverifyDocument = (worker: Account, kind: 'CV' | 'PROFILE_PHOTO', token = admin.token, body: Record<string, unknown> = { reason: 'Documento ilegible' }) =>
+    request(app).delete(`/api/admin/workers/${worker.id}/documents/${kind}/verification`).set(as(token)).send(body);
 
   const postingBody = (over: Record<string, unknown> = {}) => ({
     title: 'Cajera de tienda de ropa',
@@ -239,6 +246,35 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     expect(await balanceOf(worker)).toBe(70);
   });
 
+  it('answers 503 SERIALIZATION_RETRY_EXHAUSTED (not 400) when the profile save runs out of Serializable retries, with no partial effects (BAJO-2)', async () => {
+    const worker = await registered('retry503');
+    await fillProfile(worker, ['experience']);
+    await prisma.$executeRawUnsafe(`
+      CREATE FUNCTION test_force_40001() RETURNS trigger AS $$ BEGIN
+        RAISE EXCEPTION 'TEST_FORCED_SERIALIZATION_FAILURE' USING ERRCODE = '40001';
+      END $$ LANGUAGE plpgsql`);
+    await prisma.$executeRawUnsafe('CREATE TRIGGER test_force_40001 BEFORE INSERT ON "CurrencyRewardGrant" FOR EACH ROW EXECUTE FUNCTION test_force_40001()');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      // Completa el perfil: el premio choca con el disparador, se agotan los reintentos y el guardado entero se revierte.
+      const saved = await patchProfile(worker, { experiences: experience });
+      expect(saved.status, JSON.stringify(saved.body)).toBe(503);
+      expect(saved.headers['retry-after']).toBe('1');
+      expect(saved.body).toMatchObject({ error: 'SERIALIZATION_RETRY_EXHAUSTED', retryable: true });
+      expect(await prisma.workerExperience.count({ where: { profile: { userId: worker.id } } })).toBe(0);
+      expect(await grantsOf(worker)).toHaveLength(0);
+      expect(await balanceOf(worker)).toBe(50);
+    } finally {
+      log.mockRestore();
+      await prisma.$executeRawUnsafe('DROP TRIGGER test_force_40001 ON "CurrencyRewardGrant"');
+      await prisma.$executeRawUnsafe('DROP FUNCTION test_force_40001()');
+    }
+    // Pasada la contención, la misma petición se aplica entera y paga una sola vez.
+    expect((await patchProfile(worker, { experiences: experience })).status).toBe(200);
+    expect(await grantsOf(worker, 'PROFILE_COMPLETE')).toHaveLength(1);
+    expect(await balanceOf(worker)).toBe(70);
+  }, 60_000);
+
   // ---- DOCUMENT_VERIFIED + tope de premios -------------------------------------
 
   it('DOCUMENT_VERIFIED pays one reward per document TYPE, never twice, and replacing the file resets the verification', async () => {
@@ -267,8 +303,8 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     expect(await balanceOf(worker)).toBe(70);
     expect(await grantsOf(worker, 'DOCUMENT_VERIFIED')).toHaveLength(2);
 
-    const unverified = await request(app).delete(`/api/admin/workers/${worker.id}/documents/CV/verification`).set(as(admin.token));
-    expect(unverified.body).toEqual({ verified: false });
+    const unverified = await unverifyDocument(worker, 'CV');
+    expect(unverified.body).toEqual({ verified: false, alreadyUnverified: false });
     expect(await balanceOf(worker)).toBe(70);
   });
 
@@ -278,12 +314,15 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     expect((await uploadCv(worker)).status).toBe(201);
     expect((await verifyDocument(worker, 'CV', worker.token)).status).toBe(403);
     expect((await verifyDocument(worker, 'CV', business.token)).status).toBe(403);
-    expect((await request(app).post(`/api/admin/workers/${worker.id}/documents/CV/verification`)).status).toBe(401);
+    expect((await request(app).post(`/api/admin/workers/${worker.id}/documents/CV/verification`).send({ documentVersion: 'x' })).status).toBe(401);
     expect((await verifyDocument(worker, 'PROFILE_PHOTO')).body).toEqual({ error: 'DOCUMENT_NOT_FOUND' });
-    expect((await request(app).post(`/api/admin/workers/${worker.id}/documents/DNI/verification`).set(as(admin.token))).status).toBe(400);
-    expect((await request(app).post('/api/admin/workers/nobody/documents/CV/verification').set(as(admin.token))).status).toBe(404);
+    expect((await request(app).post(`/api/admin/workers/${worker.id}/documents/DNI/verification`).set(as(admin.token)).send({ documentVersion: 'x' })).status).toBe(400);
+    expect((await request(app).post('/api/admin/workers/nobody/documents/CV/verification').set(as(admin.token)).send({ documentVersion: 'x' })).status).toBe(404);
     expect(await grantsOf(worker)).toHaveLength(0);
-    expect((await request(app).delete(`/api/admin/workers/${worker.id}/documents/CV/verification`).set(as(worker.token))).status).toBe(403);
+    expect((await unverifyDocument(worker, 'CV', worker.token)).status).toBe(403);
+    // Sin la versión revisada no se verifica nada (400) y el cuerpo no admite campos de más.
+    expect((await request(app).post(`/api/admin/workers/${worker.id}/documents/CV/verification`).set(as(admin.token))).status).toBe(400);
+    expect((await request(app).post(`/api/admin/workers/${worker.id}/documents/CV/verification`).set(as(admin.token)).send({ documentVersion: await versionOf(worker, 'CV'), verifiedById: 'otro' })).status).toBe(400);
   });
 
   it('two simultaneous verifications of the same document pay once and keep the first author', async () => {
@@ -466,6 +505,159 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     }
   }, 60_000);
 
+  // ---- Verificación ligada al archivo, revisión del admin e historial (CN-20261012-049, BAJO-3) ----
+
+  it('lists and downloads the worker documents only for an ADMIN, without exposing the storage key', async () => {
+    const worker = await registered('review');
+    const business = await makeAccount('BUSINESS', 'reviewb');
+    const content = pdf('contenido-revisable');
+    expect((await request(app).put('/api/workers/me/cv').set(as(worker.token)).set('Content-Type', 'application/pdf').set('X-File-Name', encodeURIComponent('mi cv.pdf')).send(content)).status).toBe(201);
+    expect((await uploadPhoto(worker)).status).toBe(201);
+    const stored = await prisma.workerDocument.findUniqueOrThrow({ where: { userId_kind: { userId: worker.id, kind: 'CV' } } });
+    expect(stored.uploadedAt).not.toBeNull();
+
+    const listing = await request(app).get(`/api/admin/workers/${worker.id}/documents`).set(as(admin.token));
+    expect(listing.status).toBe(200);
+    expect(listing.body.documents.map((document: { kind: string }) => document.kind)).toEqual(['CV', 'PROFILE_PHOTO']);
+    const cv = listing.body.documents[0];
+    expect(cv).toMatchObject({ kind: 'CV', id: stored.id, originalName: 'mi cv.pdf', mediaType: 'application/pdf', sizeBytes: content.byteLength, verified: false, verifiedAt: null, history: [] });
+    expect(cv.version).toMatch(/^[0-9a-f]{32}$/);
+    expect(Date.parse(cv.uploadedAt)).not.toBeNaN();
+    expect(JSON.stringify(listing.body)).not.toContain(stored.storageKey);
+    expect(JSON.stringify(listing.body)).not.toContain('storageKey');
+
+    const file = await request(app).get(`/api/admin/workers/${worker.id}/documents/CV/file`).set(as(admin.token)).buffer(true).parse((res, done) => {
+      const chunks: Buffer[] = []; res.on('data', (chunk: Buffer) => chunks.push(chunk)); res.on('end', () => done(null, Buffer.concat(chunks)));
+    });
+    expect(file.status).toBe(200);
+    expect(Buffer.from(file.body as Buffer).equals(content)).toBe(true);
+    expect(file.headers['content-type']).toContain('application/pdf');
+    expect(file.headers['x-document-version']).toBe(cv.version);
+    expect(file.headers['cache-control']).toBe('private, no-store');
+    expect(JSON.stringify(file.headers)).not.toContain(stored.storageKey);
+
+    // Solo ADMIN: ni el propio trabajador, ni una empresa, ni sin sesión.
+    for (const path of [`/api/admin/workers/${worker.id}/documents`, `/api/admin/workers/${worker.id}/documents/CV/file`]) {
+      expect((await request(app).get(path).set(as(worker.token))).status).toBe(403);
+      expect((await request(app).get(path).set(as(business.token))).status).toBe(403);
+      expect((await request(app).get(path)).status).toBe(401);
+    }
+    expect((await request(app).get(`/api/admin/workers/${worker.id}/documents/DNI/file`).set(as(admin.token))).status).toBe(400);
+    expect((await request(app).get('/api/admin/workers/nobody/documents').set(as(admin.token))).status).toBe(404);
+    const noPhoto = await registered('reviewnone');
+    expect((await request(app).get(`/api/admin/workers/${noPhoto.id}/documents/CV/file`).set(as(admin.token))).body).toEqual({ error: 'DOCUMENT_NOT_FOUND' });
+    // Una cuenta de empresa no es un trabajador: no hay documentos que listar.
+    expect((await request(app).get(`/api/admin/workers/${business.id}/documents`).set(as(admin.token))).status).toBe(404);
+  }, 40_000);
+
+  it('answers 409 DOCUMENT_CHANGED when the file was replaced after the admin reviewed it, and verifies nothing', async () => {
+    const worker = await registered('stale');
+    expect((await uploadCv(worker, 'v1')).status).toBe(201);
+    const reviewed = await versionOf(worker, 'CV');
+    expect((await uploadCv(worker, 'v2-distinto')).status).toBe(201);
+    const current = await versionOf(worker, 'CV');
+    expect(current).not.toBe(reviewed);
+
+    const stale = await verifyDocument(worker, 'CV', admin.token, reviewed);
+    expect(stale.status).toBe(409);
+    expect(stale.body).toEqual({ error: 'DOCUMENT_CHANGED' });
+    const row = await prisma.workerDocument.findUniqueOrThrow({ where: { userId_kind: { userId: worker.id, kind: 'CV' } } });
+    expect(row.verifiedAt).toBeNull();
+    expect(await grantsOf(worker, 'DOCUMENT_VERIFIED')).toHaveLength(0);
+    expect(await prisma.workerDocumentVerificationChange.count({ where: { userId: worker.id } })).toBe(0);
+
+    const fresh = await verifyDocument(worker, 'CV', admin.token, current);
+    expect(fresh.status).toBe(200);
+    expect(fresh.body).toMatchObject({ verified: true, alreadyVerified: false, documentVersion: current });
+    // Una versión inventada tampoco sirve, y no se paga dos veces.
+    expect((await verifyDocument(worker, 'CV', admin.token, 'a'.repeat(32))).status).toBe(409);
+    expect(await grantsOf(worker, 'DOCUMENT_VERIFIED')).toHaveLength(1);
+  }, 40_000);
+
+  it('never leaves a verified document whose current file is not the one the admin verified (replacement during verification)', async () => {
+    for (let round = 0; round < 6; round += 1) {
+      const worker = await registered(`swap${round}`);
+      expect((await uploadCv(worker, `original-${round}`)).status).toBe(201);
+      const reviewed = await versionOf(worker, 'CV');
+      const [verify, upload] = await Promise.all([
+        verifyDocument(worker, 'CV', admin.token, reviewed),
+        (async () => { await new Promise((resolve) => setTimeout(resolve, round * 12)); return uploadCv(worker, `reemplazo-${round}`); })(),
+      ]);
+      expect([200, 409, 503], JSON.stringify(verify.body)).toContain(verify.status);
+      expect([201, 503], JSON.stringify(upload.body)).toContain(upload.status);
+      const row = await prisma.workerDocument.findUniqueOrThrow({ where: { userId_kind: { userId: worker.id, kind: 'CV' } } });
+      const currentVersion = await versionOf(worker, 'CV');
+      const history = await prisma.workerDocumentVerificationChange.findMany({ where: { userId: worker.id } });
+      expect(history.every((change) => change.documentVersion === reviewed), `round ${round}`).toBe(true);
+      if (upload.status === 201) {
+        // El reemplazo gana al final (borra la verificación) o la verificación nunca se aplicó.
+        expect(row.verifiedAt, `round ${round}`).toBeNull();
+        expect(currentVersion).not.toBe(reviewed);
+        // Y la verificación del archivo viejo no se puede reaplicar al nuevo.
+        expect((await verifyDocument(worker, 'CV', admin.token, reviewed)).status).toBe(409);
+      } else if (row.verifiedAt !== null) {
+        expect(currentVersion).toBe(reviewed);
+      }
+      if (verify.status !== 200) expect(history).toHaveLength(0);
+    }
+  }, 120_000);
+
+  it('records who removed a verification, when and why, keeps the history after re-verifying, and never pays twice', async () => {
+    const worker = await registered('hist');
+    const secondAdmin = await makeAccount('ADMIN', 'admin3');
+    expect((await uploadCv(worker, 'h1')).status).toBe(201);
+    expect((await uploadPhoto(worker)).status).toBe(201);
+
+    expect((await verifyDocument(worker, 'CV')).status).toBe(200);
+    expect((await unverifyDocument(worker, 'CV', admin.token, {})).status).toBe(400);
+    expect((await unverifyDocument(worker, 'CV', admin.token, { reason: 'ab' })).status).toBe(400);
+    expect((await unverifyDocument(worker, 'CV', admin.token, { reason: 'Documento ilegible', verifiedById: 'x' })).status).toBe(400);
+    expect((await unverifyDocument(worker, 'CV', secondAdmin.token, { reason: '  Documento ilegible  ' })).body).toEqual({ verified: false, alreadyUnverified: false });
+    // Retirar de nuevo no escribe otra fila.
+    expect((await unverifyDocument(worker, 'CV')).body).toEqual({ verified: false, alreadyUnverified: true });
+    expect((await unverifyDocument(worker, 'PROFILE_PHOTO')).body).toEqual({ verified: false, alreadyUnverified: true });
+    expect((await unverifyDocument({ ...worker, id: 'nobody' }, 'CV')).status).toBe(404);
+
+    const rows = await prisma.workerDocumentVerificationChange.findMany({ where: { userId: worker.id }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    expect(rows.map((row) => [row.kind, row.action, row.reason, row.changedById])).toEqual([
+      ['CV', 'VERIFIED', null, admin.id], ['CV', 'UNVERIFIED', 'Documento ilegible', secondAdmin.id],
+    ]);
+    expect(rows[1]!.createdAt.getTime()).toBeGreaterThanOrEqual(rows[0]!.createdAt.getTime());
+    expect(rows[0]!.documentVersion).toBe(rows[1]!.documentVersion);
+
+    // Farmeo: verificar y retirar muchas veces sigue pagando UN premio por tipo (máximo 2 en total).
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      expect((await verifyDocument(worker, 'CV')).status).toBe(200);
+      expect((await verifyDocument(worker, 'PROFILE_PHOTO')).status).toBe(200);
+      expect((await unverifyDocument(worker, 'CV')).status).toBe(200);
+      expect((await unverifyDocument(worker, 'PROFILE_PHOTO')).status).toBe(200);
+    }
+    expect(await grantsOf(worker, 'DOCUMENT_VERIFIED')).toHaveLength(2);
+    expect(await rewardMovements(worker, 'DOCUMENT_VERIFIED')).toHaveLength(2);
+    expect(await balanceOf(worker)).toBe(70);
+
+    const listing = await request(app).get(`/api/admin/workers/${worker.id}/documents`).set(as(admin.token));
+    const cv = listing.body.documents.find((document: { kind: string }) => document.kind === 'CV');
+    expect(cv.verified).toBe(false);
+    expect(cv.history[0]).toMatchObject({ action: 'UNVERIFIED', reason: 'Documento ilegible', changedById: admin.id });
+    expect(cv.history.length).toBe(8);
+    expect(JSON.stringify(listing.body)).not.toContain('storageKey');
+  }, 60_000);
+
+  it('keeps the history row (author null) when the admin account is later deleted', async () => {
+    const worker = await registered('histdel');
+    const temporary = await makeAccount('ADMIN', 'admin-temporal');
+    expect((await uploadCv(worker, 'd1')).status).toBe(201);
+    expect((await verifyDocument(worker, 'CV', temporary.token)).status).toBe(200);
+    await prisma.user.delete({ where: { id: temporary.id } });
+    const rows = await prisma.workerDocumentVerificationChange.findMany({ where: { userId: worker.id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'VERIFIED', changedById: null });
+    const row = await prisma.workerDocument.findUniqueOrThrow({ where: { userId_kind: { userId: worker.id, kind: 'CV' } } });
+    expect(row.verifiedAt).not.toBeNull();
+    expect(row.verifiedById).toBeNull();
+  }, 40_000);
+
   // ---- COMPANY_VERIFIED ---------------------------------------------------------
 
   it('COMPANY_VERIFIED pays the company once; the admin route is admin-only and idempotent', async () => {
@@ -473,6 +665,7 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     const other = await makeAccount('BUSINESS', 'verother');
     const worker = await registered('verw');
     const verify = (companyId: string, token = admin.token) => request(app).post(`/api/admin/companies/${companyId}/verification`).set(as(token));
+    const unverify = (companyId: string, body: Record<string, unknown> = { reason: 'Datos desactualizados' }) => request(app).delete(`/api/admin/companies/${companyId}/verification`).set(as(admin.token)).send(body);
     expect((await verify(company.companyId!, company.token)).status).toBe(403);
     expect((await verify(company.companyId!, worker.token)).status).toBe(403);
     expect((await request(app).post(`/api/admin/companies/${company.companyId}/verification`)).status).toBe(401);
@@ -491,12 +684,19 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     expect(movement).toMatchObject({ quantity: 20, relatedEntityType: 'Company', relatedEntityId: company.companyId });
 
     // Quitar y volver a poner la verificación no paga otra vez; la otra empresa no se ve afectada.
-    expect((await request(app).delete(`/api/admin/companies/${company.companyId}/verification`).set(as(admin.token))).body).toEqual({ verified: false });
+    expect((await unverify(company.companyId!, {})).status).toBe(400);
+    expect((await unverify(company.companyId!)).body).toEqual({ verified: false, alreadyUnverified: false });
+    expect((await unverify(company.companyId!)).body).toEqual({ verified: false, alreadyUnverified: true });
     expect((await verify(company.companyId!)).body).toMatchObject({ alreadyVerified: false });
     expect(await grantsOf(company, 'COMPANY_VERIFIED')).toHaveLength(1);
     expect(await balanceOf(company)).toBe(20);
     expect(await balanceOf(other)).toBe(0);
-    expect((await request(app).delete('/api/admin/companies/no-existe/verification').set(as(admin.token))).status).toBe(404);
+    expect((await unverify('no-existe')).status).toBe(404);
+    // Historial: verificar y retirar dejan autor, fecha y (al retirar) motivo; repetir no duplica filas.
+    const changes = await prisma.companyVerificationChange.findMany({ where: { companyId: company.companyId! }, orderBy: { createdAt: 'asc' } });
+    expect(changes.map((change) => [change.action, change.reason, change.changedById])).toEqual([
+      ['VERIFIED', null, admin.id], ['UNVERIFIED', 'Datos desactualizados', admin.id], ['VERIFIED', null, admin.id],
+    ]);
   }, 40_000);
 
   // ---- APPLICANTS_RESPONDED_ON_TIME + HIRE_CONFIRMED ----------------------------

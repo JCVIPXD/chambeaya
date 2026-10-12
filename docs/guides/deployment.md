@@ -601,6 +601,17 @@ de entorno nuevas; la aplica `prisma migrate deploy`. Efectos operativos:
 
 Ver [Ganar monedas: premios automáticos](../reference/api.md#ganar-monedas-premios-automáticos-m6).
 
+La migración `20261012200000_verification_history` (`CN-20261012-049`) solo agrega:
+el tipo `VerificationChangeAction`, la columna nula `WorkerDocument.uploadedAt` y las
+tablas `WorkerDocumentVerificationChange` y `CompanyVerificationChange` (historial de
+verificaciones con autor, fecha y motivo). No modifica ni borra filas ni necesita
+variables nuevas; la aplica `prisma migrate deploy`. Cambios de contrato para quien
+integre el panel del admin: `POST .../documents/:kind/verification` exige ahora
+`{documentVersion}` (obtenida de `GET /api/admin/workers/:id/documents`), y los
+`DELETE .../verification` exigen `{reason}`. Las rutas de moneda, puestos, talento y
+administración responden `503 SERIALIZATION_RETRY_EXHAUSTED` (con `Retry-After`) cuando se
+agotan los reintentos de serialización; un balanceador o cliente puede reintentar.
+
 ## Actualizar una versión
 
 ```bash

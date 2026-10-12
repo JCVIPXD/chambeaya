@@ -159,6 +159,12 @@ enum WorkerDocumentKind {
   PROFILE_PHOTO
 }
 
+/// CN-20261012-049: acción registrada en el historial de verificaciones del administrador.
+enum VerificationChangeAction {
+  VERIFIED
+  UNVERIFIED
+}
+
 enum ExternalIdentityProvider {
   GOOGLE
 }
@@ -211,6 +217,9 @@ model User {
   currencyRewardGrants CurrencyRewardGrant[] @relation("CurrencyRewardGrantUser")
   workerDocumentsVerified WorkerDocument[] @relation("WorkerDocumentVerifiedBy")
   companiesVerified Company[]       @relation("CompanyVerifiedBy")
+  documentVerificationChangesMade WorkerDocumentVerificationChange[] @relation("DocumentVerificationChangedBy")
+  documentVerificationHistory WorkerDocumentVerificationChange[] @relation("DocumentVerificationSubject")
+  companyVerificationChangesMade CompanyVerificationChange[] @relation("CompanyVerificationChangedBy")
   conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
   companyWorkerContacts CompanyWorkerContact[] @relation("CompanyWorkerContactUser")
   talentProfile WorkerTalentProfile?
@@ -249,6 +258,7 @@ model Company {
   subscription  CompanySubscription?
   currencyAccount CurrencyAccount? @relation("CompanyCurrencyAccount")
   talentInvitations TalentInvitation[]
+  verificationChanges CompanyVerificationChange[]
   jobPostings   JobPosting[]
   contactUnlocks CandidateContactUnlock[] @relation("CompanyContactUnlocks")
   /// M6: verificación de la empresa por el administrador (autor y fecha).
@@ -630,6 +640,8 @@ model WorkerDocument {
   originalName String
   mediaType    String
   sizeBytes    Int
+  /// Instante en que se subió el archivo vigente (el reemplazo lo renueva; `updatedAt` también cambia al verificar). Nulo en filas anteriores: el API usa `createdAt`.
+  uploadedAt   DateTime?
   /// M6: verificado por el administrador (autor y fecha). Reemplazar el archivo
   /// borra la verificación; el premio `DOCUMENT_VERIFIED` es uno por tipo y no se repite.
   verifiedAt   DateTime?
@@ -640,6 +652,39 @@ model WorkerDocument {
 
   @@unique([userId, kind])
   @@index([userId, createdAt])
+}
+
+/// CN-20261012-049: historial de verificaciones de documentos del trabajador. Cada
+/// verificación y cada retiro guardan autor (nulo si la cuenta del admin se borra), fecha
+/// y, en el retiro, el motivo; `documentVersion` identifica el archivo revisado. Sin trigger
+/// de solo lectura: el autor puede volverse nulo (`ON DELETE SET NULL`).
+model WorkerDocumentVerificationChange {
+  id              String                   @id @default(cuid())
+  userId          String
+  user            User                     @relation("DocumentVerificationSubject", fields: [userId], references: [id], onDelete: Cascade)
+  kind            WorkerDocumentKind
+  documentVersion String
+  action          VerificationChangeAction
+  reason          String?
+  changedById     String?
+  changedBy       User?                    @relation("DocumentVerificationChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt       DateTime                 @default(now())
+
+  @@index([userId, kind, createdAt])
+}
+
+/// CN-20261012-049: mismo patrón para la verificación de la empresa.
+model CompanyVerificationChange {
+  id          String                   @id @default(cuid())
+  companyId   String
+  company     Company                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  action      VerificationChangeAction
+  reason      String?
+  changedById String?
+  changedBy   User?                    @relation("CompanyVerificationChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime                 @default(now())
+
+  @@index([companyId, createdAt])
 }
 
 model ExternalIdentity {
