@@ -281,6 +281,8 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
         '/api/business/payments': paymentRecords,
         '/api/business/applications/pending': { count: 0, shiftIds: [] },
         '/api/business/talent-invitations': [],
+        // El saldo de la moneda virtual se lee al abrir el panel (barra superior); el nombre lo da la API.
+        '/api/business/currency/balance': { currency: 'Chambitas', balance: 50 },
       };
       if (method === 'GET' && Object.hasOwn(data, path)) {
         await route.fulfill({ json: data[path] });

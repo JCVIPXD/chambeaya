@@ -62,14 +62,18 @@ function resolveAuthRateLimitOptions(): RateLimitOptions {
  *   visible (se registra un error y no se permite ningún origen) en lugar de
  *   abrir el acceso en silencio.
  */
-function resolveCorsOptions(): CorsOptions | undefined {
+// `Retry-After` (503 SERIALIZATION_RETRY_EXHAUSTED) no es una cabecera visible para el navegador entre
+// orígenes distintos salvo que se exponga: el panel web la lee para ofrecer el reintento.
+const EXPOSED_HEADERS = ['Retry-After'];
+
+function resolveCorsOptions(): CorsOptions {
   const raw = process.env.CORS_ALLOWED_ORIGINS;
   const origins = raw
     ? raw.split(',').map((origin) => origin.trim()).filter((origin) => origin.length > 0)
     : [];
 
   if (origins.length > 0) {
-    return { origin: origins };
+    return { origin: origins, exposedHeaders: EXPOSED_HEADERS };
   }
 
   if (process.env.NODE_ENV === 'production') {
@@ -77,10 +81,10 @@ function resolveCorsOptions(): CorsOptions | undefined {
     console.error(
       '[cors] CORS_ALLOWED_ORIGINS no está definida en producción; se bloquean todos los orígenes de navegador.',
     );
-    return { origin: false };
+    return { origin: false, exposedHeaders: EXPOSED_HEADERS };
   }
 
-  return undefined;
+  return { exposedHeaders: EXPOSED_HEADERS };
 }
 
 export function createApp(options: {

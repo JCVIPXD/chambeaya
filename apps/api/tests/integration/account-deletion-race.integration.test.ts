@@ -79,7 +79,17 @@ describe('account deletion under concurrency (BAJO-A)', () => {
   const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
   /** Desfases (ms) entre el inicio de las acciones y el del borrado: recorren los entrelazados posibles. */
   const DELAYS = [0, 2, 5, 9, 14, 20, 30, 45];
-  const statuses = (responses: Array<{ status: number }>) => responses.map((response) => response.status).sort();
+  /**
+   * Resultado válido de contención: ni `500` ni un `503` cualquiera. `503 SERIALIZATION_RETRY_EXHAUSTED`
+   * (con `retryable: true`) es la respuesta contractual cuando los reintentos `Serializable` se agotan:
+   * la transacción se revirtió entera y repetir es seguro.
+   */
+  const isContentionRetry = (response: { status: number; body: unknown }) => response.status === 503
+    && (response.body as { error?: string }).error === 'SERIALIZATION_RETRY_EXHAUSTED'
+    && (response.body as { retryable?: boolean }).retryable === true;
+  const expectNoServerError = (response: { status: number; body: unknown }) => {
+    expect(response.status < 500 || isContentionRetry(response), `${response.status} ${JSON.stringify(response.body)}`).toBe(true);
+  };
 
   /** Las cadenas `sequence`/`balanceAfter` de todas las cuentas siguen siendo consistentes. */
   async function assertLedgerChains() {
@@ -116,10 +126,21 @@ describe('account deletion under concurrency (BAJO-A)', () => {
     for (let round = 0; round < 4; round += 1) {
       const worker = await registered(`dw${round}`);
       const responses = await Promise.all([1, 2, 3, 4, 5].map(() => deleteWorker(worker.id)));
-      expect(statuses(responses)).toEqual([204, 404, 404, 404, 404]);
+      responses.forEach(expectNoServerError);
+      const deleted = responses.filter((candidate) => candidate.status === 204).length;
+      expect(deleted).toBeLessThanOrEqual(1);
       for (const response of responses.filter((candidate) => candidate.status === 404)) expect(response.body).toEqual({ error: 'WORKER_NOT_FOUND' });
-      expect(await prisma.user.count({ where: { id: worker.id } })).toBe(0);
-      expect(await prisma.currencyAccount.count({ where: { workerId: worker.id } })).toBe(0);
+      // Todo lo demás es contención reintentable (nada a medias): o se borró entero, o sigue entero.
+      expect(responses.filter((candidate) => ![204, 404].includes(candidate.status)).every(isContentionRetry)).toBe(true);
+      if (deleted === 1) {
+        expect(await prisma.user.count({ where: { id: worker.id } })).toBe(0);
+        expect(await prisma.currencyAccount.count({ where: { workerId: worker.id } })).toBe(0);
+      } else {
+        // Ninguno ganó: la cuenta sigue completa y borrarla de nuevo funciona.
+        expect(await prisma.user.count({ where: { id: worker.id } })).toBe(1);
+        expect(await prisma.currencyAccount.count({ where: { workerId: worker.id } })).toBe(1);
+        expect((await deleteWorker(worker.id)).status).toBe(204);
+      }
     }
     await assertLedgerChains();
   }, 60_000);
@@ -129,11 +150,21 @@ describe('account deletion under concurrency (BAJO-A)', () => {
       const company = await makeAccount('BUSINESS', `dc${round}`);
       await published(company);
       const responses = await Promise.all([1, 2, 3, 4, 5].map(() => deleteCompany(company.companyId!)));
-      expect(statuses(responses)).toEqual([204, 404, 404, 404, 404]);
+      responses.forEach(expectNoServerError);
+      const deleted = responses.filter((candidate) => candidate.status === 204).length;
+      expect(deleted).toBeLessThanOrEqual(1);
       for (const response of responses.filter((candidate) => candidate.status === 404)) expect(response.body).toEqual({ error: 'COMPANY_NOT_FOUND' });
-      expect(await prisma.company.count({ where: { id: company.companyId! } })).toBe(0);
-      expect(await prisma.user.count({ where: { id: company.id } })).toBe(0);
-      expect(await prisma.jobPosting.count({ where: { companyId: company.companyId! } })).toBe(0);
+      expect(responses.filter((candidate) => ![204, 404].includes(candidate.status)).every(isContentionRetry)).toBe(true);
+      if (deleted === 1) {
+        expect(await prisma.company.count({ where: { id: company.companyId! } })).toBe(0);
+        expect(await prisma.user.count({ where: { id: company.id } })).toBe(0);
+        expect(await prisma.jobPosting.count({ where: { companyId: company.companyId! } })).toBe(0);
+      } else {
+        // Ninguno ganó: la empresa sigue entera (con su puesto) y borrarla de nuevo funciona.
+        expect(await prisma.company.count({ where: { id: company.companyId! } })).toBe(1);
+        expect(await prisma.jobPosting.count({ where: { companyId: company.companyId! } })).toBeGreaterThan(0);
+        expect((await deleteCompany(company.companyId!)).status).toBe(204);
+      }
     }
     await assertLedgerChains();
   }, 60_000);
@@ -158,10 +189,10 @@ describe('account deletion under concurrency (BAJO-A)', () => {
         request(app).post(`/api/workers/job-applications/${applicationId}/priority`).set(as(worker.token)),
       ]);
       outcomes.push(`${deletion.status}|${actions.map((action) => action.status).join(',')}`);
-      expect(deletion.status, JSON.stringify(deletion.body)).toBeLessThan(500);
-      expect([204, 404, 409]).toContain(deletion.status);
-      for (const action of actions) expect(action.status, JSON.stringify(action.body)).toBeLessThan(500);
-      // Sin parcial: el trabajador se borró entero o sigue entero.
+      expectNoServerError(deletion);
+      expect(deletion.status === 503 ? isContentionRetry(deletion) : [204, 404, 409].includes(deletion.status), JSON.stringify(deletion.body)).toBe(true);
+      actions.forEach(expectNoServerError);
+      // Sin parcial: el trabajador se borró entero o sigue entero (también tras un 503 del borrado).
       const exists = await prisma.user.count({ where: { id: worker.id } });
       if (deletion.status === 204) {
         expect(exists).toBe(0);
@@ -169,6 +200,8 @@ describe('account deletion under concurrency (BAJO-A)', () => {
         expect(await prisma.currencyAccount.count({ where: { workerId: worker.id } })).toBe(0);
       } else {
         expect(exists).toBe(1);
+        expect(await prisma.currencyAccount.count({ where: { workerId: worker.id } })).toBe(1);
+        expect(await prisma.jobApplication.count({ where: { id: applicationId } })).toBe(1);
       }
     }
     if (process.env.RACE_LOG) appendFileSync(process.env.RACE_LOG, `RACE_OUTCOMES ${JSON.stringify(outcomes)}\n`);
@@ -193,14 +226,16 @@ describe('account deletion under concurrency (BAJO-A)', () => {
         request(app).post(`/api/business/job-applications/${applied.body.id}/stage`).set(as(company.token)).send({ status: 'SHORTLISTED' }),
       ]);
       outcomes.push(`${deletion.status}|${actions.map((action) => action.status).join(',')}`);
-      expect(deletion.status, JSON.stringify(deletion.body)).toBeLessThan(500);
-      for (const action of actions) expect(action.status, JSON.stringify(action.body)).toBeLessThan(500);
+      expectNoServerError(deletion);
+      actions.forEach(expectNoServerError);
       const exists = await prisma.user.count({ where: { id: company.id } });
       if (deletion.status === 204) {
         expect(exists).toBe(0);
         expect(await prisma.jobPosting.count({ where: { companyId: company.companyId! } })).toBe(0);
       } else {
+        // Un 503 (o un 409) del borrado no deja nada a medias: la empresa y su puesto original siguen.
         expect(exists).toBe(1);
+        expect(await prisma.jobPosting.count({ where: { id: posting } })).toBe(1);
       }
     }
     if (process.env.RACE_LOG) appendFileSync(process.env.RACE_LOG, `RACE_OUTCOMES_COMPANY ${JSON.stringify(outcomes)}\n`);

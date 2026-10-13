@@ -55,16 +55,19 @@ export class CurrencyVerificationService {
     private readonly storage: PrivateDocumentStorage = new PrivateDocumentStorage(),
   ) {}
 
-  /** Documentos del trabajador con su versión, tamaño, fecha, estado de verificación y últimos cambios. Sin la clave de almacenamiento. */
+  /**
+   * Documentos del trabajador con su versión, tamaño, fecha, estado de verificación y la PRIMERA página de su
+   * historial (hasta `HISTORY_PAGE` cambios por documento, del más reciente al más antiguo). Cada documento
+   * trae `historyNextCursor` (nulo si no hay más) para seguir con `documentHistory`. Sin la clave de almacenamiento.
+   */
   async listDocuments(workerId: string) {
     const worker = await this.prisma.user.findFirst({ where: { id: workerId, role: 'WORKER' }, select: { id: true } });
     if (!worker) throw new CurrencyError('WORKER_NOT_FOUND', 404);
     const documents = await this.prisma.workerDocument.findMany({ where: { userId: workerId }, orderBy: { kind: 'asc' } });
-    const history = await this.prisma.workerDocumentVerificationChange.findMany({
-      where: { userId: workerId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: HISTORY_PAGE * 2,
-    });
-    return {
-      documents: documents.map((document) => ({
+    const result = [];
+    for (const document of documents) {
+      const page = await this.documentHistory(workerId, document.kind, { limit: HISTORY_PAGE });
+      result.push({
         kind: document.kind,
         id: document.id,
         version: documentVersion(document),
@@ -75,11 +78,49 @@ export class CurrencyVerificationService {
         verified: document.verifiedAt !== null,
         verifiedAt: document.verifiedAt,
         verifiedById: document.verifiedById,
-        history: history.filter((change) => change.kind === document.kind).slice(0, HISTORY_PAGE).map((change) => ({
-          action: change.action, reason: change.reason, changedById: change.changedById, documentVersion: change.documentVersion, createdAt: change.createdAt,
-        })),
-      })),
-    };
+        history: page.items,
+        historyNextCursor: page.nextCursor,
+      });
+    }
+    return { documents: result };
+  }
+
+  /** Historial de verificaciones de un tipo de documento del trabajador, paginado (más reciente primero). */
+  async documentHistory(workerId: string, kind: WorkerDocumentKind, page: { limit: number; cursor?: string }) {
+    const worker = await this.prisma.user.findFirst({ where: { id: workerId, role: 'WORKER' }, select: { id: true } });
+    if (!worker) throw new CurrencyError('WORKER_NOT_FOUND', 404);
+    if (page.cursor) {
+      const known = await this.prisma.workerDocumentVerificationChange.findFirst({ where: { id: page.cursor, userId: workerId, kind }, select: { id: true } });
+      if (!known) throw new CurrencyError('INVALID_CURSOR', 400);
+    }
+    const rows = await this.prisma.workerDocumentVerificationChange.findMany({
+      where: { userId: workerId, kind },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: page.limit + 1,
+      ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}),
+    });
+    const items = rows.slice(0, page.limit).map((change) => ({
+      action: change.action, reason: change.reason, changedById: change.changedById, documentVersion: change.documentVersion, createdAt: change.createdAt,
+    }));
+    return { items, nextCursor: rows.length > page.limit ? rows[page.limit - 1]!.id : null };
+  }
+
+  /** Historial de verificaciones de una empresa, paginado (más reciente primero). */
+  async companyHistory(companyId: string, page: { limit: number; cursor?: string }) {
+    const company = await this.prisma.company.findUnique({ where: { id: companyId }, select: { id: true } });
+    if (!company) throw new CurrencyError('COMPANY_NOT_FOUND', 404);
+    if (page.cursor) {
+      const known = await this.prisma.companyVerificationChange.findFirst({ where: { id: page.cursor, companyId }, select: { id: true } });
+      if (!known) throw new CurrencyError('INVALID_CURSOR', 400);
+    }
+    const rows = await this.prisma.companyVerificationChange.findMany({
+      where: { companyId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: page.limit + 1,
+      ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}),
+    });
+    const items = rows.slice(0, page.limit).map((change) => ({ action: change.action, reason: change.reason, changedById: change.changedById, createdAt: change.createdAt }));
+    return { items, nextCursor: rows.length > page.limit ? rows[page.limit - 1]!.id : null };
   }
 
   /** Archivo del trabajador para que el admin lo revise. Solo se llama desde una ruta `ADMIN`; la clave de almacenamiento no sale de aquí. */

@@ -148,7 +148,7 @@ export type WorkerRecord = {
   availability: string | null;
 };
 export type SpecialtyRecord = { id: string; slug: string; name: string; category: string };
-export type TalentCardRecord = { id: string; name: string; headline: string | null; district: string | null; availabilityText: string | null; isAvailable: boolean; specialties: SpecialtyRecord[]; completion: number; reputation: { averageRating: number | null; reviewCount: number } };
+export type TalentCardRecord = { id: string; isHighlighted?: boolean; name: string; headline: string | null; district: string | null; availabilityText: string | null; isAvailable: boolean; specialties: SpecialtyRecord[]; completion: number; reputation: { averageRating: number | null; reviewCount: number } };
 export type TalentSearchResult = { items: TalentCardRecord[]; nextCursor: string | null };
 
 export type TalentInvitationStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED' | 'EXPIRED' | 'CANCELLED';
@@ -235,9 +235,35 @@ export type SimulatedCheckoutRecord = {
 };
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, public readonly code: string) {
+  // `details` conserva el resto del cuerpo del error (por ejemplo `{cost, balance}` de
+  // `409 INSUFFICIENT_CURRENCY`) y `retryAfterSeconds` la cabecera `Retry-After` del
+  // `503 SERIALIZATION_RETRY_EXHAUSTED`. Ambos son opcionales: el resto del panel solo lee
+  // `status` y `code`.
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    public readonly details: Record<string, unknown> = {},
+    public readonly retryAfterSeconds: number | null = null,
+  ) {
     super(code);
   }
+}
+
+export function apiOrigin() {
+  return apiUrl;
+}
+
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(Math.ceil(seconds), 120) : null;
+}
+
+/** Convierte una respuesta no exitosa en un `ApiError` con el cuerpo y `Retry-After`. */
+export async function apiErrorFrom(response: Response): Promise<ApiError> {
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const { error, ...details } = payload;
+  return new ApiError(response.status, typeof error === 'string' ? error : 'REQUEST_FAILED', details, parseRetryAfter(response.headers.get('Retry-After')));
 }
 
 // Tiempo máximo de una petición (incluida la lectura del cuerpo). Sin un tope,
@@ -246,7 +272,7 @@ export class ApiError extends Error {
 // Al vencer se aborta y se lanza `ApiError(0, 'REQUEST_TIMEOUT')`.
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-async function request<T>(path: string, options: RequestInit & { token?: string } = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestInit & { token?: string } = {}): Promise<T> {
   const { token, headers, signal: callerSignal, ...init } = options;
   const controller = new AbortController();
   let timedOut = false;
@@ -267,10 +293,7 @@ async function request<T>(path: string, options: RequestInit & { token?: string 
         ...headers,
       },
     });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as { error?: string };
-      throw new ApiError(response.status, payload.error ?? 'REQUEST_FAILED');
-    }
+    if (!response.ok) throw await apiErrorFrom(response);
     // `await` a propósito: el temporizador también cubre la lectura del cuerpo.
     return response.status === 204 ? undefined as T : await (response.json() as Promise<T>);
   } catch (error) {

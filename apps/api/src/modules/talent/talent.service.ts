@@ -4,6 +4,7 @@ import type { AuthSession } from '../auth/auth.service.js';
 import { instanceKeys, type CurrencyActionService } from '../currency/currency.actions.js';
 import type { ProfileRewardService } from '../currency/currency.profile-rewards.js';
 import { readCurrencySetting } from '../currency/currency.settings.js';
+import { documentVersion } from '../currency/currency.verification.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
 import { companyCanViewApplicantCv } from './cv_access.js';
 import { PrivateDocumentStorage } from './private_document_storage.js';
@@ -132,6 +133,9 @@ const profileInclude = {
   languages: { orderBy: { language: 'asc' as const } },
 };
 
+/** Motivo del historial cuando reemplazar el archivo retira una verificación (autor nulo: lo hace el sistema). */
+export const REPLACEMENT_UNVERIFY_REASON = 'verificación retirada por reemplazo';
+
 export class DatabaseTalentService implements TalentOperations {
   constructor(
     private readonly prisma = new PrismaClient(),
@@ -156,6 +160,28 @@ export class DatabaseTalentService implements TalentOperations {
       await rewards.evaluate(tx, userId);
       return result;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000, maxWait: 10_000 }));
+  }
+
+
+  /**
+   * Guarda (crea o reemplaza) un documento del trabajador. Si el archivo reemplazado estaba verificado,
+   * la verificación se retira y queda una fila de historial (`UNVERIFIED`, sin autor: lo hizo el sistema al
+   * reemplazar, no un admin) con la versión del archivo que se verificó y el motivo. Corre en el mismo
+   * cliente (transacción) que el resto del guardado.
+   */
+  private async replaceDocument(client: Prisma.TransactionClient | PrismaClient, userId: string, kind: 'CV' | 'PROFILE_PHOTO', stored: { originalName: string; mediaType: string; sizeBytes: number; storageKey: string }) {
+    const previous = await client.workerDocument.findUnique({ where: { userId_kind: { userId, kind } } });
+    const document = await client.workerDocument.upsert({
+      where: { userId_kind: { userId, kind } },
+      create: { userId, kind, ...stored, uploadedAt: this.clock() },
+      update: { ...stored, uploadedAt: this.clock(), verifiedAt: null, verifiedById: null },
+    });
+    if (previous?.verifiedAt && previous.storageKey !== stored.storageKey) {
+      await client.workerDocumentVerificationChange.create({
+        data: { userId, kind, documentVersion: documentVersion(previous), action: 'UNVERIFIED', reason: REPLACEMENT_UNVERIFY_REASON, changedById: null },
+      });
+    }
+    return document;
   }
 
   async ownProfile(session: AuthSession) {
@@ -337,11 +363,7 @@ export class DatabaseTalentService implements TalentOperations {
         select: { storageKey: true },
       });
       // Reemplazar el archivo borra la verificación del administrador (el premio ya pagado no se repite).
-      await this.withProfileRewards(session.userId, (client) => client.workerDocument.upsert({
-        where: { userId_kind: { userId: session.userId, kind: 'CV' } },
-        create: { userId: session.userId, kind: 'CV', ...stored, uploadedAt: this.clock() },
-        update: { ...stored, uploadedAt: this.clock(), verifiedAt: null, verifiedById: null },
-      }));
+      await this.withProfileRewards(session.userId, (client) => this.replaceDocument(client, session.userId, 'CV', stored));
       if (previous && previous.storageKey !== stored.storageKey) {
         await this.documents.remove(previous.storageKey);
       }
@@ -432,11 +454,7 @@ export class DatabaseTalentService implements TalentOperations {
         where: { userId_kind: { userId: session.userId, kind: 'PROFILE_PHOTO' } },
         select: { storageKey: true },
       });
-      await this.withProfileRewards(session.userId, (client) => client.workerDocument.upsert({
-        where: { userId_kind: { userId: session.userId, kind: 'PROFILE_PHOTO' } },
-        create: { userId: session.userId, kind: 'PROFILE_PHOTO', ...stored, uploadedAt: this.clock() },
-        update: { ...stored, uploadedAt: this.clock(), verifiedAt: null, verifiedById: null },
-      }));
+      await this.withProfileRewards(session.userId, (client) => this.replaceDocument(client, session.userId, 'PROFILE_PHOTO', stored));
       if (previous && previous.storageKey !== stored.storageKey) {
         await this.documents.remove(previous.storageKey);
       }

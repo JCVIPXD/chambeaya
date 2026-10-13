@@ -658,6 +658,121 @@ describe('automatic rewards (M6) under PostgreSQL', () => {
     expect(row.verifiedById).toBeNull();
   }, 40_000);
 
+  it('replacing a verified file leaves a "verificación retirada por reemplazo" history row (system author, date, reason)', async () => {
+    const worker = await registered('replace');
+    expect((await uploadCv(worker, 'r1')).status).toBe(201);
+    expect((await uploadPhoto(worker)).status).toBe(201);
+    const firstVersion = await versionOf(worker, 'CV');
+    expect((await verifyDocument(worker, 'CV')).status).toBe(200);
+
+    // Reemplazar un archivo que NO estaba verificado (la foto) no deja fila de retiro.
+    expect((await uploadPhoto(worker)).status).toBe(201);
+    expect(await prisma.workerDocumentVerificationChange.count({ where: { userId: worker.id, kind: 'PROFILE_PHOTO' } })).toBe(0);
+
+    expect((await uploadCv(worker, 'r2')).status).toBe(201);
+    const rows = await prisma.workerDocumentVerificationChange.findMany({ where: { userId: worker.id, kind: 'CV' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    expect(rows.map((row) => [row.action, row.reason, row.changedById])).toEqual([
+      ['VERIFIED', null, admin.id], ['UNVERIFIED', 'verificación retirada por reemplazo', null],
+    ]);
+    // La fila de retiro apunta al archivo que sí se verificó (el anterior), no al nuevo.
+    expect(rows[1]!.documentVersion).toBe(firstVersion);
+    expect(await versionOf(worker, 'CV')).not.toBe(firstVersion);
+    expect(rows[1]!.createdAt.getTime()).toBeGreaterThanOrEqual(rows[0]!.createdAt.getTime());
+    const stored = await prisma.workerDocument.findUniqueOrThrow({ where: { userId_kind: { userId: worker.id, kind: 'CV' } } });
+    expect(stored.verifiedAt).toBeNull();
+
+    // El historial que lee el admin lo muestra y reemplazar otra vez (sin verificación) no escribe más.
+    expect((await uploadCv(worker, 'r3')).status).toBe(201);
+    expect(await prisma.workerDocumentVerificationChange.count({ where: { userId: worker.id, kind: 'CV' } })).toBe(2);
+    const listing = await request(app).get(`/api/admin/workers/${worker.id}/documents`).set(as(admin.token));
+    const cv = listing.body.documents.find((document: { kind: string }) => document.kind === 'CV');
+    expect(cv.history[0]).toMatchObject({ action: 'UNVERIFIED', reason: 'verificación retirada por reemplazo', changedById: null });
+    // El premio ya pagado no se repite al volver a verificar.
+    expect((await verifyDocument(worker, 'CV')).status).toBe(200);
+    expect(await grantsOf(worker, 'DOCUMENT_VERIFIED')).toHaveLength(1);
+  }, 60_000);
+
+  it('paginates the verification history per document and exposes the company history (admin only)', async () => {
+    const worker = await registered('page');
+    expect((await uploadCv(worker, 'p1')).status).toBe(201);
+    expect((await uploadPhoto(worker)).status).toBe(201);
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      expect((await verifyDocument(worker, 'CV')).status).toBe(200);
+      expect((await unverifyDocument(worker, 'CV', admin.token, { reason: `Ciclo ${cycle}` })).status).toBe(200);
+    }
+    expect((await verifyDocument(worker, 'PROFILE_PHOTO')).status).toBe(200);
+    const history = (kind: string, query = '', token = admin.token) => request(app).get(`/api/admin/workers/${worker.id}/documents/${kind}/history${query}`).set(as(token));
+
+    // El listado trae la primera página de cada documento y su cursor; el historial de uno no recorta el del otro.
+    const listing = await request(app).get(`/api/admin/workers/${worker.id}/documents`).set(as(admin.token));
+    const cv = listing.body.documents.find((document: { kind: string }) => document.kind === 'CV');
+    const photo = listing.body.documents.find((document: { kind: string }) => document.kind === 'PROFILE_PHOTO');
+    expect(cv.history).toHaveLength(8);
+    expect(cv.historyNextCursor).toBeNull();
+    expect(photo.history).toHaveLength(1);
+    expect(photo.historyNextCursor).toBeNull();
+
+    const first = await history('CV', '?limit=3');
+    expect(first.status).toBe(200);
+    expect(first.body.items).toHaveLength(3);
+    expect(first.body.nextCursor).toEqual(expect.any(String));
+    const second = await history('CV', `?limit=3&cursor=${first.body.nextCursor}`);
+    const third = await history('CV', `?limit=3&cursor=${second.body.nextCursor}`);
+    expect(second.body.items).toHaveLength(3);
+    expect(third.body.items).toHaveLength(2);
+    expect(third.body.nextCursor).toBeNull();
+    const all = [...first.body.items, ...second.body.items, ...third.body.items] as Array<{ action: string; reason: string | null; createdAt: string }>;
+    expect(all).toHaveLength(8);
+    expect(all[0]).toMatchObject({ action: 'UNVERIFIED', reason: 'Ciclo 3' });
+    expect(all[7]).toMatchObject({ action: 'VERIFIED', reason: null });
+    const times = all.map((item) => Date.parse(item.createdAt));
+    expect([...times].sort((a, b) => b - a)).toEqual(times);
+    expect(JSON.stringify(first.body)).not.toContain('storageKey');
+
+    // Sin saltos ni repeticiones: coincide con la página única.
+    const whole = await history('CV', '?limit=100');
+    expect(whole.body.items).toEqual(all);
+    expect(whole.body.nextCursor).toBeNull();
+    // Cursor de otro documento o inexistente y límites inválidos.
+    const photoPage = await history('PROFILE_PHOTO', '?limit=1');
+    expect(photoPage.body.items).toHaveLength(1);
+    expect((await history('CV', `?cursor=${first.body.nextCursor}`, admin.token)).status).toBe(200);
+    expect((await history('PROFILE_PHOTO', `?cursor=${first.body.nextCursor}`)).status).toBe(400);
+    expect((await history('CV', '?cursor=no-existe')).body).toEqual({ error: 'INVALID_CURSOR' });
+    expect((await history('CV', '?limit=0')).status).toBe(400);
+    expect((await history('CV', '?limit=101')).status).toBe(400);
+    expect((await history('OTHER')).status).toBe(400);
+    expect((await request(app).get(`/api/admin/workers/no-existe/documents/CV/history`).set(as(admin.token))).status).toBe(404);
+    // Solo ADMIN.
+    expect((await history('CV', '', worker.token)).status).toBe(403);
+    const business = await makeAccount('BUSINESS', 'pageb');
+    expect((await history('CV', '', business.token)).status).toBe(403);
+    expect((await request(app).get(`/api/admin/workers/${worker.id}/documents/CV/history`)).status).toBe(401);
+
+    // Historial de la empresa: paginado, más reciente primero, autor/motivo/fecha, solo ADMIN.
+    const company = await makeAccount('BUSINESS', 'pagec');
+    const companyHistory = (query = '', token = admin.token, id = company.companyId) => request(app).get(`/api/admin/companies/${id}/verification/history${query}`).set(as(token));
+    expect((await companyHistory()).body).toEqual({ items: [], nextCursor: null });
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      expect((await request(app).post(`/api/admin/companies/${company.companyId}/verification`).set(as(admin.token))).status).toBe(200);
+      expect((await request(app).delete(`/api/admin/companies/${company.companyId}/verification`).set(as(admin.token)).send({ reason: `Revisión ${cycle}` })).status).toBe(200);
+    }
+    const page1 = await companyHistory('?limit=4');
+    expect(page1.body.items).toHaveLength(4);
+    expect(page1.body.items[0]).toMatchObject({ action: 'UNVERIFIED', reason: 'Revisión 2', changedById: admin.id });
+    const page2 = await companyHistory(`?limit=4&cursor=${page1.body.nextCursor}`);
+    expect(page2.body.items).toHaveLength(2);
+    expect(page2.body.nextCursor).toBeNull();
+    expect(page2.body.items[1]).toMatchObject({ action: 'VERIFIED', reason: null });
+    expect((await companyHistory('?cursor=no-existe')).status).toBe(400);
+    const other = await makeAccount('BUSINESS', 'pagec2');
+    expect((await companyHistory(`?cursor=${page1.body.nextCursor}`, admin.token, other.companyId)).status).toBe(400);
+    expect((await companyHistory('', admin.token, 'no-existe')).status).toBe(404);
+    expect((await companyHistory('', company.token)).status).toBe(403);
+    expect((await companyHistory('', worker.token)).status).toBe(403);
+    expect((await request(app).get(`/api/admin/companies/${company.companyId}/verification/history`)).status).toBe(401);
+  }, 90_000);
+
   // ---- COMPANY_VERIFIED ---------------------------------------------------------
 
   it('COMPANY_VERIFIED pays the company once; the admin route is admin-only and idempotent', async () => {

@@ -45,7 +45,7 @@ export function BusinessAuth({ onAuthenticated }: { onAuthenticated: (session: B
         <div className="auth-promise">
           <p>Operación empresarial</p>
           <h1>Tu equipo temporal, bajo control.</h1>
-          <span>Planifica turnos, coordina talento y supervisa pagos con información centralizada.</span>
+          <span>{process.env.NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED === 'true' ? 'Planifica turnos, coordina talento y supervisa pagos con información centralizada.' : 'Publica puestos fijos, selecciona talento y administra tu saldo con información centralizada.'}</span>
         </div>
         <div className="auth-benefits">
           <div><CheckCircle2 size={17} /><span><strong>Cobertura visible</strong><small>Detecta necesidades antes del inicio.</small></span></div>

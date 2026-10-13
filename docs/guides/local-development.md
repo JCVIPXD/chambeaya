@@ -138,7 +138,7 @@ propio `.env`, si usas uno junto a `docker-compose.yml`); con `manual`,
 
 Desde `CN-20261001-032` los turnos temporales están apagados por defecto: la
 API responde `503 TEMPORARY_SHIFTS_DISABLED` al publicar un turno o postular,
-el panel oculta "Publicar turno"/"Nuevo turno" y Flutter oculta "Postular". Lo
+el panel de empresa se centra en puestos fijos (ver «Panel de empresa de puestos fijos», abajo) y Flutter oculta "Postular". Lo
 ya sembrado por `npm run demo:seed` (la postulación pendiente, aceptar,
 check-in, pagos) sigue funcionando. Para reactivar el flujo legado en tu
 máquina hacen falta las tres banderas: `TEMPORARY_SHIFTS_ENABLED=true` en la
@@ -154,7 +154,7 @@ El nombre de la moneda virtual se toma de `VIRTUAL_CURRENCY_NAME`
 (predeterminado `Chambitas`). Las rutas de saldo, movimientos y ajustes del
 administrador están en [API y reglas operativas](../reference/api.md#moneda-virtual-m1).
 El catálogo de costos y premios (M2) se siembra al aplicar las migraciones
-y se edita por API (todavía no tiene pantalla). En una base de pruebas,
+y se edita por API (el admin todavía no tiene pantalla; la empresa lee el catálogo en su Billetera). En una base de pruebas,
 `TRUNCATE "User" CASCADE` de las suites de integración también lo vacía. Si
 necesitas los valores sembrados, aplica de nuevo las migraciones en una base
 limpia. Ver [Catálogo de costos y premios](../reference/api.md#catálogo-de-costos-y-premios-m2).
@@ -233,6 +233,22 @@ $env:NODE_ENV = 'development'
 $env:CHAMBEAYA_ALLOW_DEMO_SEED = 'true'
 npm run demo:seed --workspace=@chambeaya/api
 ```
+
+### Panel de empresa de puestos fijos (M5a)
+
+Con la bandera de turnos apagada (lo normal), el panel web de la empresa (`http://127.0.0.1:3000`) ofrece:
+**Resumen, Puestos, Postulantes, Talento, Billetera y Perfil de empresa**. No muestra ni consulta nada del flujo de
+turnos. Con `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` (se fija al compilar) vuelven Turnos, Trabajadores,
+Mensajes, Pagos y Membresía debajo de las vistas nuevas. El nombre de la moneda sale siempre de la API
+(`VIRTUAL_CURRENCY_NAME`); el panel nunca lo fija.
+
+Para probarlo a mano con datos reales: levanta API y PostgreSQL, crea o siembra una cuenta `BUSINESS`
+(`npm run demo:seed` o el superadmin), entra al panel, crea un puesto en **Puestos**, publícalo (las 3 primeras
+publicaciones del mes son gratis) y, con una cuenta de trabajador (registro público o app móvil), postula al
+puesto para verlo aparecer en vivo en **Postulantes**. Las pruebas automáticas del panel están en
+[`apps/web/e2e/README.md`](../../apps/web/e2e/README.md): la suite rápida simula la API en el navegador (compila dos
+paneles, uno con la bandera encendida en el puerto 3100 y otro apagado en el 3101), y `apps/web/e2e-real/` recorre
+publicar, postular y contratar contra la API real y PostgreSQL desechable.
 
 ## Aplicación Flutter (fuera de Docker)
 

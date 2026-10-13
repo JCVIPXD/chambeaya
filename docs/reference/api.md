@@ -585,14 +585,20 @@ archivo concreto que el admin revisó:
 
 - `GET /api/admin/workers/:workerId/documents` → `{documents: [{kind, id, version,
   originalName, mediaType, sizeBytes, uploadedAt, verified, verifiedAt, verifiedById,
-  history: [{action, reason, changedById, documentVersion, createdAt}]}]}` (el más
-  reciente primero; se leen los 40 cambios más recientes del trabajador entre ambos tipos
-  y se muestran hasta 20 por tipo, así que con muchos cambios de un tipo el historial del
-  otro puede salir recortado; no hay paginación todavía). `version` es un identificador opaco
+  history: [{action, reason, changedById, documentVersion, createdAt}], historyNextCursor}]}`
+  (por tipo de documento). `history` es la **primera página** (hasta 20 cambios, del más
+  reciente al más antiguo) **de ese documento**: el historial de un tipo ya no recorta el del
+  otro (`CN-20261013-051`). `historyNextCursor` es `null` si no hay más; para seguir se usa
+  `GET .../documents/:kind/history`. `version` es un identificador opaco
   (hash de la clave de almacenamiento): cambia con cada archivo nuevo y **nunca se
   expone la clave de almacenamiento**. `uploadedAt` es la fecha de subida del archivo
   vigente (en filas anteriores a la migración `20261012200000`, la de creación).
   `404 WORKER_NOT_FOUND` si la cuenta no es un trabajador.
+- `GET /api/admin/workers/:workerId/documents/:kind/history?limit=25&cursor=<id>` (solo `ADMIN`;
+  `limit` 1 a 100) → `{items: [{action, reason, changedById, documentVersion, createdAt}],
+  nextCursor}`, del más reciente al más antiguo y sin saltos ni repeticiones. `400 INVALID_CURSOR` si
+  el cursor no es un cambio de ese documento; `400` si `kind` no es `CV` o `PROFILE_PHOTO`; `404
+  WORKER_NOT_FOUND`.
 - `GET /api/admin/workers/:workerId/documents/:kind/file`: descarga el archivo
   (`Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `inline`)
   y devuelve su `version` en `X-Document-Version`. Control estricto de rol `ADMIN`:
@@ -617,13 +623,17 @@ archivo concreto que el admin revisó:
 - `POST /api/admin/companies/:companyId/verification` (idempotente) y
   `DELETE /api/admin/companies/:companyId/verification` con cuerpo `{reason}` →
   `{verified: false, alreadyUnverified}` (`404 COMPANY_NOT_FOUND`). Mismo historial
-  (`CompanyVerificationChange`, con autor, fecha y motivo al retirar). Todavía no hay ruta
-  para leer el historial de la empresa: se consulta en la base hasta que M5 lo necesite.
+  (`CompanyVerificationChange`, con autor, fecha y motivo al retirar).
+- `GET /api/admin/companies/:companyId/verification/history?limit=25&cursor=<id>` (solo `ADMIN`) →
+  `{items: [{action, reason, changedById, createdAt}], nextCursor}`, del más reciente al más antiguo
+  (`CN-20261013-051`). `400 INVALID_CURSOR` si el cursor no es de esa empresa; `404 COMPANY_NOT_FOUND`.
 
 El historial no es de solo lectura por trigger: el autor pasa a `null` si la cuenta del
 admin se borra (`ON DELETE SET NULL`); la fila se conserva. Subir un archivo nuevo (CV o
-foto) borra su verificación (sin fila de historial: lo hace el trabajador, no un admin); el
-premio ya pagado por ese tipo no se vuelve a pagar al verificarlo de nuevo.
+foto) borra su verificación y, **si estaba verificada**, deja en el historial una fila `UNVERIFIED` con
+`changedById` nulo (lo hizo el sistema, no un admin), el motivo «verificación retirada por reemplazo», la fecha y
+la `documentVersion` del archivo que sí se había verificado (`CN-20261013-051`); reemplazar un archivo no
+verificado no escribe nada. El premio ya pagado por ese tipo no se vuelve a pagar al verificarlo de nuevo.
 
 ### Referidos
 
@@ -735,13 +745,15 @@ y las verificaciones), de puestos fijos (`/api/business/job-*`, `/api/workers/jo
 de administración comparten un único mapeo (`apps/api/src/modules/operations/transaction-errors.ts`,
 `CN-20261012-049`, BAJO-1 y BAJO-2): cuando `withSerializableRetry` agota sus 6 intentos (`P2034`, o
 `40001`/`40P01` sin recuperar) la respuesta es **`503 SERIALIZATION_RETRY_EXHAUSTED`** con
-`Retry-After: 1` y cuerpo `{error, message, retryable: true}` en lugar de un `500`. La transacción se
+`Retry-After: 1` y cuerpo `{error, message, retryable: true}` en lugar de un `500`. La API expone `Retry-After` a los navegadores entre orígenes (`Access-Control-Expose-Headers`, `CN-20261013-051`) para que el panel web ofrezca el reintento con cuenta regresiva. La transacción se
 revirtió entera: no queda ningún efecto aplicado y repetir la misma petición es seguro (las acciones
 con cobro son idempotentes por su clave). En talento, `400` queda reservado a la validación de
 entrada, `404 RESOURCE_NO_LONGER_EXISTS` a la cuenta o registro ya borrado y `500 INTERNAL_ERROR` a un
 fallo inesperado. Las rutas del trabajador del módulo de turnos conservan su contrato histórico
 `409 CONCURRENT_UPDATE`. La prueba de estrés `currency-actions … (BAJO-1)` acepta ahora `201` o este
-`503` (y comprueba que un `503` no dejó postulación y que el libro queda consistente).
+`503` (y comprueba que un `503` no dejó postulación y que el libro queda consistente). Las pruebas de borrado simultáneo
+(`account-deletion-race`) también aceptan ese `503` (con `retryable: true`) como resultado válido de contención y comprueban que no
+queda nada a medias (el titular, su cuenta de moneda y sus datos siguen enteros, o se borraron del todo).
 
 ### Límites conocidos de M6 (sin cambio, solo documentados)
 

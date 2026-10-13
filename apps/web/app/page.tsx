@@ -81,6 +81,13 @@ import { BusinessAuth } from "../components/business-auth";
 import { ApplicantCvButton } from "../components/applicant-cv";
 import { CrudModal } from "../components/crud-modal";
 import { ChangePasswordModal } from "../components/change-password-modal";
+import { JobsProvider } from "../features/jobs/jobs-context";
+import { OverviewView as FixedOverview } from "../features/jobs/overview-view";
+import { PostingsView } from "../features/jobs/postings-view";
+import { ApplicantsView } from "../features/jobs/applicants-view";
+import { TalentView } from "../features/jobs/talent-view";
+import { WalletView } from "../features/jobs/wallet-view";
+import { CompanyProfileView } from "../features/jobs/company-profile-view";
 
 // Los turnos temporales son un flujo legado. La API aplica la misma bandera;
 // ocultar estos controles evita ofrecer una acción que el servidor rechazaría.
@@ -88,6 +95,11 @@ const temporaryShiftsEnabled = process.env.NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED 
 
 type ViewName =
   | "Resumen"
+  | "Puestos"
+  | "Postulantes"
+  | "Talento"
+  | "Billetera"
+  | "Perfil de empresa"
   | "Turnos"
   | "Trabajadores"
   | "Mensajes"
@@ -179,18 +191,25 @@ type Transaction = {
 // confirmación aparte, no un formulario).
 type ModalKind = "worker" | "conversation" | "company" | null;
 
-const navigation: {
-  label: ViewName;
-  icon: typeof LayoutDashboard;
-  badge?: string;
-}[] = [
-    { label: "Resumen", icon: LayoutDashboard },
-    { label: "Turnos", icon: CalendarDays },
-    { label: "Trabajadores", icon: Users },
-    { label: "Mensajes", icon: MessageSquareText },
-    { label: "Pagos", icon: CircleDollarSign },
-    { label: "Membresía", icon: BadgeCheck },
-  ];
+type NavItem = { label: ViewName; icon: typeof LayoutDashboard };
+
+// Navegación principal: puestos fijos y moneda virtual. Los turnos temporales (flujo legado) solo
+// aparecen con la bandera NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED; apagada no hay rastro de ellos.
+const fixedNavigation: NavItem[] = [
+  { label: "Resumen", icon: LayoutDashboard },
+  { label: "Puestos", icon: BriefcaseBusiness },
+  { label: "Postulantes", icon: UserCheck },
+  { label: "Talento", icon: Search },
+  { label: "Billetera", icon: WalletCards },
+  { label: "Perfil de empresa", icon: Building2 },
+];
+const legacyNavigation: NavItem[] = [
+  { label: "Turnos", icon: CalendarDays },
+  { label: "Trabajadores", icon: Users },
+  { label: "Mensajes", icon: MessageSquareText },
+  { label: "Pagos", icon: CircleDollarSign },
+  { label: "Membresía", icon: BadgeCheck },
+];
 
 const initialShifts: Shift[] = [];
 const initialWorkers: Worker[] = [];
@@ -466,6 +485,9 @@ export default function HomePage() {
   const [saving, setSaving] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const [createRequest, setCreateRequest] = useState(0);
+  const [wallet, setWallet] = useState<{ currency: string; balance: number | null }>({ currency: "", balance: null });
 
   useEffect(() => {
     const stored = window.localStorage.getItem(businessSessionKey);
@@ -499,7 +521,7 @@ export default function HomePage() {
   }, [session]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || !temporaryShiftsEnabled) return;
     let cancelled = false;
     const refreshPending = async () => {
       try {
@@ -833,6 +855,23 @@ export default function HomePage() {
   }
   async function loadData(token: string) {
     setDataLoading(true);
+    if (!temporaryShiftsEnabled) {
+      // Sin turnos temporales solo hacen falta la empresa y el plan; nada del flujo de turnos se consulta.
+      try {
+        const [companyData, subscriptionData] = await Promise.all([
+          businessApi.company.get(token),
+          businessApi.subscription.get(token),
+        ]);
+        setCompany(companyData);
+        setSubscription(subscriptionData);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) await logout();
+        else showToast("No se pudieron cargar los datos. Intenta nuevamente.");
+      } finally {
+        setDataLoading(false);
+      }
+      return;
+    }
     void loadPaymentSettings(token);
     try {
       const [
@@ -998,7 +1037,9 @@ export default function HomePage() {
   }
   function showToast(message: string) {
     setToast(message);
-    window.setTimeout(() => setToast(null), 3200);
+    // Un aviso nuevo reinicia el reloj: el temporizador del anterior no debe cortarlo antes de tiempo.
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 3200);
   }
   function authenticated(nextSession: BusinessSession) {
     window.localStorage.setItem(
@@ -1678,9 +1719,12 @@ export default function HomePage() {
             <X size={19} />
           </button>
         </div>
-        <div className="nav-label">Operaciones</div>
+        <div className="nav-label">{temporaryShiftsEnabled ? "Puestos fijos" : "Operaciones"}</div>
         <nav className="nav">
-          {navigation.map(({ label, icon: Icon }) => {
+          {(temporaryShiftsEnabled
+            ? [...fixedNavigation.slice(0, 5), ...legacyNavigation, fixedNavigation[5]!]
+            : fixedNavigation
+          ).map(({ label, icon: Icon }) => {
             const badge =
               label === "Turnos"
                 ? pendingApplications.count
@@ -1760,7 +1804,31 @@ export default function HomePage() {
             </div>
           </div>
           <div className="topbar-actions">
-            <label className="period-control">
+            {wallet.balance !== null && (
+              <button
+                className="fx-balance-chip"
+                type="button"
+                aria-label={`Saldo: ${wallet.balance} ${wallet.currency}. Ver billetera`}
+                onClick={() => navigate("Billetera")}
+              >
+                <WalletCards size={16} aria-hidden="true" />
+                <span>{wallet.balance} {wallet.currency}</span>
+              </button>
+            )}
+            {!temporaryShiftsEnabled && (
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => {
+                  setCreateRequest((n) => n + 1);
+                  navigate("Puestos");
+                }}
+              >
+                <Plus size={18} />
+                <span>Nuevo puesto</span>
+              </button>
+            )}
+            {temporaryShiftsEnabled && <label className="period-control">
               <span>Periodo</span>
               <select
                 value={period}
@@ -1770,7 +1838,7 @@ export default function HomePage() {
                 <option>Este mes</option>
                 <option>Últimos 30 días</option>
               </select>
-            </label>
+            </label>}
             <button
               className="icon-button"
               type="button"
@@ -1782,13 +1850,15 @@ export default function HomePage() {
                 <span className="notification-dot" />
               )}
             </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => navigate("Trabajadores")}
-            >
-              <Users size={17} /> Equipo
-            </button>
+            {temporaryShiftsEnabled && (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => navigate("Trabajadores")}
+              >
+                <Users size={17} /> Equipo
+              </button>
+            )}
             {temporaryShiftsEnabled && (
               <button
                 className="primary-button"
@@ -1805,7 +1875,38 @@ export default function HomePage() {
           </div>
         </header>
 
-        {activeNav === "Resumen" && (
+        <JobsProvider
+          token={session.token}
+          onUnauthorized={() => void logout()}
+          toast={showToast}
+          goTo={(view) => navigate(view)}
+          createRequest={createRequest}
+          onBalance={setWallet}
+        >
+          {activeNav === "Resumen" && !temporaryShiftsEnabled && (
+            <FixedOverview
+              companyName={company?.name ?? session.name}
+              requestCreate={() => {
+                setCreateRequest((n) => n + 1);
+                navigate("Puestos");
+              }}
+            />
+          )}
+          {activeNav === "Puestos" && <PostingsView />}
+          {activeNav === "Postulantes" && <ApplicantsView />}
+          {activeNav === "Talento" && <TalentView />}
+          {activeNav === "Billetera" && <WalletView />}
+          {activeNav === "Perfil de empresa" && (
+            <CompanyProfileView
+              company={company}
+              planLabel={hasActivatedPlan(subscription) ? sidebarPlanLabel(subscription) : "Sin plan activado"}
+              onEdit={() => openCrud("company")}
+              onChangePassword={() => setPasswordModalOpen(true)}
+            />
+          )}
+        </JobsProvider>
+
+        {activeNav === "Resumen" && temporaryShiftsEnabled && (
           <Overview
             companyName={company?.name ?? session.name}
             shifts={shifts}
@@ -1829,7 +1930,7 @@ export default function HomePage() {
           />
         )}
 
-        {activeNav === "Turnos" && (
+        {activeNav === "Turnos" && temporaryShiftsEnabled && (
           <div className="workspace view-workspace">
             <ViewHeader
               eyebrow="Planificación operativa"
@@ -2955,7 +3056,7 @@ export default function HomePage() {
           </div>
         )}
 
-        {activeNav === "Membresía" && (
+        {activeNav === "Membresía" && temporaryShiftsEnabled && (
           <MembershipView
             subscription={subscription}
             onToast={showToast}

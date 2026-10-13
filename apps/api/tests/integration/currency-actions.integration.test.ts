@@ -13,6 +13,7 @@ import { DEFAULT_CURRENCY_CATALOG } from '../../src/modules/currency/currency.ca
 import { CurrencyRefundService } from '../../src/modules/currency/currency.refunds.js';
 import { DEFAULT_CURRENCY_SETTINGS } from '../../src/modules/currency/currency.settings.js';
 import { WelcomeBonusService } from '../../src/modules/currency/currency.welcome.js';
+import { isRetryableTransactionError } from '../../src/modules/operations/serializable-retry.js';
 import { DatabaseCandidateUnlockService } from '../../src/modules/talent/candidate_unlock.service.js';
 import { PrivateDocumentStorage } from '../../src/modules/talent/private_document_storage.js';
 import { DatabaseTalentService } from '../../src/modules/talent/talent.service.js';
@@ -907,8 +908,16 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
         for (let index = 0; index < 6; index += 1) ids.push(await published(company, { vacancies: 5 }));
         // Cobros que el reloj adelantado ya considera vencidos (con prioridad).
         for (const id of ids.slice(0, 3)) expect((await apply(worker, id, { priority: true })).status).toBe(201);
+        // El barrido es una tarea periódica: si sus reintentos Serializable se agotan por contención, no queda
+        // nada a medias y la siguiente pasada lo vuelve a intentar (mismo criterio que el 503 de las rutas).
+        const tolerantSweep = async () => {
+          try { return await lateSweeper().sweep(); } catch (error) {
+            if (isRetryableTransactionError(error)) return { refunded: 0, notEligible: 0, amount: 0 };
+            throw error;
+          }
+        };
         const [sweepA, sweepB, ...applies] = await Promise.all([
-          lateSweeper().sweep(), lateSweeper().sweep(),
+          tolerantSweep(), tolerantSweep(),
           ...ids.slice(3).map((id) => apply(worker, id, { priority: true })),
         ]);
         expect(sweepA.refunded + sweepB.refunded).toBeGreaterThanOrEqual(0);
@@ -927,7 +936,12 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
           expect(stored, `round ${round} application ${index}`).toBe(response.status === 201 ? 1 : 0);
         }
       }
-      await lateSweeper().sweep();
+      // Barrido final sin competencia: debe terminar sin error (con unos reintentos por si aún hay contención).
+      for (let attempt = 0; ; attempt += 1) {
+        try { await lateSweeper().sweep(); break; } catch (error) {
+          if (!isRetryableTransactionError(error) || attempt >= 4) throw error;
+        }
+      }
       const movements = await movementsOf(worker);
       let running = 0;
       movements.forEach((movement, index) => {

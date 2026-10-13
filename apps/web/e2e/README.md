@@ -168,7 +168,32 @@ siempre con Chromium; no es una prueba en un teléfono físico):
     en la API (`apps/api/tests/applicant_cv.routes.test.ts` y
     `apps/api/tests/integration/applicant-cv.integration.test.ts`).
 
-104 ejecuciones en total según `npx playwright test --list` (52 casos × escritorio y móvil; una se omite en móvil). Cada una tiene su navegador aislado y su estado de
+11. Panel de puestos fijos y moneda virtual (M5a, `fixed-jobs-*.spec.ts`). La API simulada con estado vive en
+    `fixtures/fixed-jobs-api.ts` (`installFixedJobsApi`, `page.route` sobre el fixture base): puestos con
+    cuota gratuita, costos, saldo y tope diario, embudo con ofertas y constancia, talento y el aviso SSE
+    (`server.workerAccepts`, `server.pushEvent`; la conexión `/api/job-events` queda abierta hasta que la prueba
+    publica un aviso). `server.failNext(/METHOD \/ruta/, {...})` programa errores (409 de saldo o tope, 503 con
+    `Retry-After`). Cubre: crear y validar un puesto (espejo de la API), publicar dentro de la cuota (sin
+    confirmación) y fuera de ella (costo, saldo y cuota; solo cobra al confirmar), saldo insuficiente (acciones
+    gratuitas no se bloquean), 409 `INSUFFICIENT_CURRENCY` y `DAILY_SPEND_CAP_REACHED`, 503 con reintento, destacar,
+    editar, pausar y cerrar; el embudo hasta contratar (preseleccionar, entrevista, oferta con PDF y versiones,
+    aceptación en vivo, constancia con DNI, contratación y premio); privacidad (ni correo, teléfono ni documento
+    fuera de la constancia); puesto cerrado con una aceptada; Billetera (nombre de la moneda de la API, cuota,
+    tope, catálogo, premios, movimientos paginados y errores por sección); talento (invitar y desbloquear con
+    costo, idempotencia, ya invitado); y teclado/foco del diálogo.
+    **Dos paneles compilados:** `playwright.config.ts` levanta el panel con la bandera de turnos ENCENDIDA en
+    `http://127.0.0.1:3100` (toda la suite anterior) y otro con la bandera APAGADA en `http://127.0.0.1:3101`
+    (carpeta `.next-flag-off`, `NEXT_DIST_DIR`). Los specs de puestos fijos usan el segundo con
+    `test.use({ baseURL: FLAG_OFF_URL })`; `fixed-jobs-flag.spec.ts` comprueba que, apagada, no hay ni una petición
+    ni un texto del flujo de turnos y que, encendida, conviven las vistas viejas y las nuevas. Los puertos 3100 y
+    3101 deben estar libres.
+    **Ojo al terminar:** compilar con otro `distDir` hace que Next.js reescriba `apps/web/tsconfig.json` (agrega
+    `.next-flag-off/types/**/*.ts` al `include`) y `apps/web/next-env.d.ts` (importa los tipos de `.next-flag-off`).
+    Son archivos versionados: tras `npm run test:web` restáuralos con
+    `git checkout -- apps/web/tsconfig.json apps/web/next-env.d.ts` y no los incluyas en un commit (BAJO-1 de
+    `CN-20261013-052`).
+
+188 ejecuciones en total según `npx playwright test --list` (94 casos × escritorio y móvil; una se omite en móvil). Cada una tiene su navegador aislado y su estado de
 API propio. Una petición API no prevista, una petición externa o un error
 JavaScript sin capturar hacen fallar la prueba. No se permiten reintentos que
 oculten fallos.
@@ -307,6 +332,15 @@ filas** (turno, trabajador, postulación y pago) en la base `_test`. Si la base
 es un clúster efímero, apagarlo al terminar descarta también las dos cuentas
 sembradas y esas filas.
 
+### Recorrido real de puestos fijos (`fixed-jobs-hire.spec.ts`)
+
+Publicar un puesto desde el panel, postular a un trabajador POR API, preseleccionar y ofertar en el panel, aceptar
+por API (el panel se actualiza solo por el aviso en vivo) y confirmar la contratación; después lee por API que la
+postulación quedó `HIRED`, el puesto `FILLED` y que la Billetera tiene el premio. La configuración
+`playwright.admin-real.config.ts` enciende ahora `TEMPORARY_SHIFTS_ENABLED` en la API y
+`NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED` en el panel para que sigan funcionando los specs de turnos; el spec de puestos
+fijos abona 100 monedas con el admin sembrado para no depender de la cuota gratuita del mes.
+
 ### Estado de esta suite
 
 `CN-20260916-094` documenta la primera ejecución real de esta suite completa
@@ -318,8 +352,8 @@ de `docs/PROGRESO.md` para el detalle exacto del bloqueo o del éxito.
 
 ## Siguiente cobertura
 
-Publicar turnos y seleccionar postulantes requieren sus propios escenarios en
-`apps/web/e2e/`. La suite real de arriba cubre un recorrido del panel
+Publicar turnos temporales requiere sus propios escenarios en
+`apps/web/e2e/` (los de puestos fijos ya están en `fixed-jobs-*.spec.ts`). La suite real de arriba cubre un recorrido del panel
 superadmin y el cierre manual de una asignación `NO_SHOW` desde el panel de la
 empresa; el resto del panel (publicación de turnos, selección de postulantes,
 pagos, y todo el lado trabajador) sigue sin esa cobertura de extremo a extremo

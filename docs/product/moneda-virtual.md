@@ -179,6 +179,25 @@ trabajador lo reemplazó mientras tanto, la API responde `409 DOCUMENT_CHANGED`)
 verificación exige un motivo que queda en un historial con autor y fecha. El premio sigue siendo
 uno por tipo de documento, así que verificar y retirar en bucle no permite farmear premios.
 
+## Qué cubre M5a (panel web de empresa)
+
+Panel web de la empresa sobre la API de M2 a M6, con la bandera de turnos temporales apagada por defecto (encendida,
+el flujo de turnos sigue igual debajo de las vistas nuevas):
+
+- **Puestos:** crear y editar borradores con todos los campos, publicar, pausar, cerrar y destacar.
+- **Postulantes:** embudo por etapas con filtros, prioridad primero, acciones según la máquina de estados, ofertas con PDF y
+  versiones, constancia de aceptación (el DNI solo aparece ahí), contratación y avisos en vivo.
+- **Talento:** buscar, invitar y desbloquear contacto y CV.
+- **Billetera:** saldo, movimientos, catálogo, cuota gratuita, tope diario y premios.
+- **Resumen y Perfil de empresa.**
+- Antes de toda acción con costo se muestra el costo previo; solo se pide confirmar cuando de verdad se cobra, y una
+  acción gratuita nunca se bloquea por falta de saldo. Los errores de saldo, tope diario y contención (`503`) tienen
+  mensaje claro y un camino siguiente.
+
+Decisiones: solo se confirma cuando el costo es mayor que cero; el nombre de la moneda lo da la API; el panel es solo en tema
+claro (no hay tema oscuro en el panel actual). Quedan fuera: panel web del trabajador, Flutter, chat de la postulación, panel
+del admin para el historial de verificaciones y la compra de monedas (M7).
+
 ## Puesto fijo y proceso de contrato
 
 Estados del proceso de selección:
@@ -248,7 +267,7 @@ Decisiones de producto del diseño de M3 (detalle técnico en
   postulación se conserva al re-postular, sin nuevo cobro; (c) el desbloqueo de
   contacto de un candidato es permanente, aunque después la empresa rechace la
   postulación que lo originó.
-- El chat de la postulación y las interfaces quedan para M5.
+- El chat de la postulación y las interfaces quedan para M5 (el panel web de empresa es M5a; ver «Qué cubre M5a»).
 
 **Riesgo legal a validar antes de operar:** al intermediar empleo formal,
 Chambeaya puede quedar bajo el marco peruano de agencias y bolsas de empleo y

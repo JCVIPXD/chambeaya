@@ -204,6 +204,11 @@ export function createAdminCurrencyRouter(
   router.get('/workers/:workerId/documents', guarded(authService, 'ADMIN', async (request, response) => {
     response.json(await verification.listDocuments(routeParam(request, 'workerId')));
   }));
+  /** Historial de verificaciones de un tipo de documento, paginado (`limit`, `cursor`). */
+  router.get('/workers/:workerId/documents/:kind/history', guarded(authService, 'ADMIN', async (request, response) => {
+    const kind = documentKindSchema.parse(routeParam(request, 'kind'));
+    response.json(await verification.documentHistory(routeParam(request, 'workerId'), kind, pageSchema.parse(request.query)));
+  }));
   /** Archivo para revisarlo. `guarded(... 'ADMIN')` es el control de rol; `X-Document-Version` es la versión que luego se envía al verificar. */
   router.get('/workers/:workerId/documents/:kind/file', guarded(authService, 'ADMIN', async (request, response) => {
     const kind = documentKindSchema.parse(routeParam(request, 'kind'));
@@ -227,6 +232,10 @@ export function createAdminCurrencyRouter(
     const kind = documentKindSchema.parse(routeParam(request, 'kind'));
     const { reason } = unverifySchema.parse(request.body);
     response.json(await verification.unverifyDocument(adminId, routeParam(request, 'workerId'), kind, reason));
+  }));
+  /** Historial de verificaciones de la empresa (verificada/retirada, motivo, autor, fecha), paginado. */
+  router.get('/companies/:companyId/verification/history', guarded(authService, 'ADMIN', async (request, response) => {
+    response.json(await verification.companyHistory(routeParam(request, 'companyId'), pageSchema.parse(request.query)));
   }));
   router.post('/companies/:companyId/verification', guarded(authService, 'ADMIN', async (request, response, adminId) => {
     response.json(await verification.verifyCompany(adminId, routeParam(request, 'companyId')));
