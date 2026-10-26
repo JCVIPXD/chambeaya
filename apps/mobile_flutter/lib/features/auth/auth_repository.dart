@@ -56,12 +56,17 @@ class AuthRepository {
     required String email,
     required String password,
     required String identifier,
+    String? referralCode,
   }) => _post('register', {
     'role': 'WORKER',
     'name': name,
     'email': email,
     'password': password,
     'dniOrRuc': identifier,
+    // Opcional: un código inexistente responde 400 INVALID_REFERRAL_CODE y no
+    // crea la cuenta.
+    if (referralCode != null && referralCode.trim().isNotEmpty)
+      'referralCode': referralCode.trim().toUpperCase(),
   });
 
   Future<AuthSession> login({

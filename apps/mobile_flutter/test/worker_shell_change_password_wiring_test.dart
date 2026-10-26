@@ -29,7 +29,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          home: WorkerShell(
+          home: WorkerShell(temporaryShiftsEnabled: true, 
             repository: DemoWorkerMarketplaceRepository(),
             authRepository: authRepository,
             sessionToken: 'token-de-sesion-real',
@@ -63,7 +63,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
-          home: WorkerShell(repository: DemoWorkerMarketplaceRepository()),
+          home: WorkerShell(temporaryShiftsEnabled: true, repository: DemoWorkerMarketplaceRepository()),
         ),
       );
       await tester.pumpAndSettle();

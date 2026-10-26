@@ -2,10 +2,17 @@ import 'package:flutter/material.dart';
 
 import '../../core/config/temporary_shifts.dart' as feature_flags;
 import '../../core/navigation/adaptive_worker_scaffold.dart';
+import '../../core/navigation/worker_destination.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/theme_mode_controller.dart';
 import '../auth/auth_repository.dart';
 import '../discovery/worker_discovery_page.dart';
+import '../jobs/job_postings_page.dart';
+import '../jobs/jobs_hub_page.dart';
+import '../jobs/jobs_services.dart';
+import '../jobs/my_applications_page.dart';
+import '../wallet/profile_completion_card.dart';
+import '../wallet/wallet_page.dart';
 import 'marketplace_repository.dart';
 import '../profile/profile_home_page.dart';
 import '../profile/talent_invitation_repository.dart';
@@ -29,6 +36,7 @@ class WorkerShell extends StatefulWidget {
     this.sessionToken,
     this.googleOnlyAccount = false,
     this.temporaryShiftsEnabled = feature_flags.temporaryShiftsEnabled,
+    this.jobsServices,
   }) : talentProfileRepository =
            talentProfileRepository ??
            DemoTalentProfileRepository(name: workerName ?? 'Trabajador'),
@@ -48,7 +56,14 @@ class WorkerShell extends StatefulWidget {
   final AuthRepository? authRepository;
   final String? sessionToken;
   final bool googleOnlyAccount;
+  /// Con `false` (valor por defecto) la aplicación es solo de puestos fijos y
+  /// moneda: no hay ninguna pantalla ni texto del flujo de turnos temporales.
+  /// Con `true` se conservan las pestañas heredadas y se añaden las nuevas.
   final bool temporaryShiftsEnabled;
+
+  /// Servicios de puestos fijos y billetera. Sin ellos (pruebas, demo aislado)
+  /// la pantalla usa los servicios en memoria.
+  final JobsServices? jobsServices;
 
   /// Optional: lets the profile tab expose a "Modo oscuro" toggle. Widget
   /// tests that build `WorkerShell` directly (without the app's
@@ -64,6 +79,23 @@ class _WorkerShellState extends State<WorkerShell> {
   late int selected = widget.initialIndex;
   var _applicationRevision = 0;
   var _contentVisible = true;
+  late final JobsServices _jobs;
+  late final bool _ownsJobs;
+
+  bool get _shifts => widget.temporaryShiftsEnabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _ownsJobs = widget.jobsServices == null;
+    _jobs = widget.jobsServices ?? JobsServices.demo();
+  }
+
+  @override
+  void dispose() {
+    if (_ownsJobs) _jobs.dispose();
+    super.dispose();
+  }
 
   void _selectTab(int value) {
     // Re-tapping the already active tab keeps the prior behavior exactly
@@ -96,32 +128,74 @@ class _WorkerShellState extends State<WorkerShell> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
-      WorkerDiscoveryPage(
-        repository: widget.repository,
-        alertStore: widget.alertStore,
-        workerName: widget.workerName,
-        temporaryShiftsEnabled: widget.temporaryShiftsEnabled,
-        onApplicationChanged: () => setState(() => _applicationRevision++),
+    final profilePage = ProfileHomePage(
+      showNavigation: false,
+      onLogout: widget.onLogout,
+      talentProfileRepository: widget.talentProfileRepository,
+      themeModeController: widget.themeModeController,
+      authRepository: widget.authRepository,
+      sessionToken: widget.sessionToken,
+      googleOnlyAccount: widget.googleOnlyAccount,
+      marketplaceRepository: _shifts ? widget.repository : null,
+      temporaryShiftsEnabled: _shifts,
+      completionBuilder: (context, profile) => ProfileCompletionCard(
+        // Se vuelve a leer cuando cambia algo que cuenta para el criterio.
+        key: ValueKey(
+          '${profile.headline}|${profile.bio}|${profile.district}|'
+          '${profile.availabilityDays.length}|${profile.availabilityPeriods.length}|'
+          '${profile.specialties.length}|${profile.experiences.length}|'
+          '${profile.cv != null}|${profile.photo != null}',
+        ),
+        wallet: _jobs.wallet,
+        currencyName: _jobs.walletController.currencyName,
       ),
-      WorkerApplicationsPage(
-        repository: widget.repository,
-        applicationRevision: _applicationRevision,
-      ),
-      WorkerMessagesPage(repository: widget.repository),
-      ProfileHomePage(
-        showNavigation: false,
-        onLogout: widget.onLogout,
-        talentProfileRepository: widget.talentProfileRepository,
-        themeModeController: widget.themeModeController,
-        authRepository: widget.authRepository,
-        sessionToken: widget.sessionToken,
-        googleOnlyAccount: widget.googleOnlyAccount,
-        marketplaceRepository: widget.repository,
-      ),
-      WorkerInvitationsPage(repository: widget.talentInvitationRepository),
-    ];
+    );
+    final invitationsPage = WorkerInvitationsPage(
+      repository: widget.talentInvitationRepository,
+      showShiftInfo: _shifts,
+      wallet: _jobs.wallet,
+      onResponded: _jobs.walletController.refresh,
+    );
+    final pages = _shifts
+        ? [
+            WorkerDiscoveryPage(
+              repository: widget.repository,
+              alertStore: widget.alertStore,
+              workerName: widget.workerName,
+              temporaryShiftsEnabled: widget.temporaryShiftsEnabled,
+              onApplicationChanged: () => setState(() => _applicationRevision++),
+            ),
+            WorkerApplicationsPage(
+              repository: widget.repository,
+              applicationRevision: _applicationRevision,
+            ),
+            WorkerMessagesPage(repository: widget.repository),
+            profilePage,
+            invitationsPage,
+            JobsHubPage(services: _jobs),
+            WalletPage(
+              services: _jobs,
+              profileRepository: widget.talentProfileRepository,
+            ),
+          ]
+        : [
+            JobPostingsPage(
+              services: _jobs,
+              onApplicationChanged: () => setState(() => _applicationRevision++),
+            ),
+            MyApplicationsPage(
+              services: _jobs,
+              revision: _applicationRevision,
+            ),
+            WalletPage(
+              services: _jobs,
+              profileRepository: widget.talentProfileRepository,
+            ),
+            profilePage,
+            invitationsPage,
+          ];
     final scaffold = AdaptiveWorkerScaffold(
+      destinations: _shifts ? legacyAndJobsDestinations : fixedJobsDestinations,
       selectedIndex: selected,
       onDestinationSelected: _selectTab,
       // IndexedStack keeps every tab mounted (so background polling in

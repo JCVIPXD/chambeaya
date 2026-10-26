@@ -5,6 +5,7 @@ import 'features/auth/auth_repository.dart';
 import 'features/auth/auth_session.dart';
 import 'features/auth/auth_session_store.dart';
 import 'features/company/company_dashboard_page.dart';
+import 'features/jobs/jobs_services.dart';
 import 'features/marketplace/http_worker_marketplace_repository.dart';
 import 'features/profile/talent_invitation_repository.dart';
 import 'features/profile/talent_profile_repository.dart';
@@ -69,6 +70,7 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
   WorkerMarketplaceRepository? _workerRepository;
   TalentProfileRepository? _talentProfileRepository;
   TalentInvitationRepository? _talentInvitationRepository;
+  JobsServices? _jobsServices;
   String? _workerDependenciesKey;
   AppAudience? _audience;
   AuthSession? _session;
@@ -101,6 +103,10 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     final key = '$_usesLiveApi|${_session?.token}|${_session?.name}';
     if (_workerDependenciesKey == key && _workerRepository != null) return;
     _workerDependenciesKey = key;
+    _jobsServices?.dispose();
+    _jobsServices = _usesLiveApi
+        ? JobsServices.http(token: _session?.token)
+        : JobsServices.demo();
     _workerRepository = _usesLiveApi
         ? HttpWorkerMarketplaceRepository(token: _session?.token)
         : DemoWorkerMarketplaceRepository();
@@ -125,6 +131,7 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
   @override
   void dispose() {
     if (widget.themeModeController == null) _themeMode.dispose();
+    _jobsServices?.dispose();
     super.dispose();
   }
 
@@ -240,6 +247,7 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
       repository: _workerRepository!,
       talentProfileRepository: _talentProfileRepository!,
       talentInvitationRepository: _talentInvitationRepository!,
+      jobsServices: _jobsServices,
       // Solo con la API real hay una sesión de verdad cuya contraseña se
       // pueda cambiar; en modo demo `_session!.token` no corresponde a
       // ninguna cuenta del backend.

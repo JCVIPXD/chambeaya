@@ -31,6 +31,8 @@ class _AuthPageState extends State<AuthPage> {
   final _email = TextEditingController();
   final _password = TextEditingController();
   final _identifier = TextEditingController();
+  final _referral = TextEditingController();
+  var _showReferral = false;
   // Existing workers should be able to access the app immediately. Registration
   // remains available through the explicit toggle below.
   var _isRegistering = false;
@@ -47,8 +49,7 @@ class _AuthPageState extends State<AuthPage> {
       !widget.demoMode && _canRegister && _googleClientId.isNotEmpty;
   bool get _isCompletingGoogleProfile =>
       _pendingGoogleProfileSetupToken != null;
-  bool get _isCompletingGooglePassword =>
-      _pendingGooglePasswordSession != null;
+  bool get _isCompletingGooglePassword => _pendingGooglePasswordSession != null;
   bool get _isInGoogleOnboarding =>
       _isCompletingGoogleProfile || _isCompletingGooglePassword;
 
@@ -64,6 +65,7 @@ class _AuthPageState extends State<AuthPage> {
     _email.dispose();
     _password.dispose();
     _identifier.dispose();
+    _referral.dispose();
     super.dispose();
   }
 
@@ -97,6 +99,7 @@ class _AuthPageState extends State<AuthPage> {
               email: _email.text,
               password: _password.text,
               identifier: _identifier.text,
+              referralCode: _referral.text,
             )
           : await repository.login(
               email: _email.text,
@@ -215,6 +218,9 @@ class _AuthPageState extends State<AuthPage> {
     }
     if (_isRegistering && failure.code == 'INVALID_REGISTRATION') {
       return 'Revisa nombre, correo, contraseña y DNI: deben cumplir los requisitos indicados.';
+    }
+    if (_isRegistering && failure.code == 'INVALID_REFERRAL_CODE') {
+      return 'Ese código de referido no existe. Revísalo o déjalo vacío para crear tu cuenta sin código.';
     }
     if (failure.code == 'DUPLICATE_IDENTIFIER') {
       return 'Ese DNI ya está asociado a otra cuenta. Usa un DNI distinto o inicia sesión.';
@@ -562,8 +568,7 @@ class _AuthPageState extends State<AuthPage> {
                         return null;
                       },
                     ),
-                  ]
-                  else ...[
+                  ] else ...[
                     if (_isRegistering && _canRegister)
                       TextFormField(
                         key: const ValueKey('auth-name'),
@@ -637,6 +642,30 @@ class _AuthPageState extends State<AuthPage> {
                             ? 'El DNI debe tener exactamente 8 dígitos'
                             : null,
                       ),
+                      if (_showReferral) ...[
+                        SizedBox(height: fieldGap),
+                        TextFormField(
+                          key: const ValueKey('auth-referral'),
+                          controller: _referral,
+                          textCapitalization: TextCapitalization.characters,
+                          autocorrect: false,
+                          maxLength: 8,
+                          decoration: InputDecoration(
+                            labelText: 'Código de referido (opcional)',
+                            helperText:
+                                'Si alguien te invitó, escribe su código de 8 caracteres.',
+                            counterText: '',
+                            contentPadding: fieldContentPadding,
+                          ),
+                          validator: (value) {
+                            final code = (value ?? '').trim();
+                            if (code.isEmpty) return null;
+                            return RegExp(r'^[A-Za-z0-9]{8}$').hasMatch(code)
+                                ? null
+                                : 'El código tiene 8 letras o números';
+                          },
+                        ),
+                      ],
                     ],
                   ],
                 ],
@@ -683,6 +712,17 @@ class _AuthPageState extends State<AuthPage> {
                 ),
               ),
             ],
+            if (_canRegister &&
+                _isRegistering &&
+                !_isInGoogleOnboarding &&
+                !_showReferral)
+              Center(
+                child: TextButton(
+                  key: const ValueKey('auth-show-referral'),
+                  onPressed: () => setState(() => _showReferral = true),
+                  child: const Text('Tengo un código de referido'),
+                ),
+              ),
             if (_canRegister && !_isInGoogleOnboarding)
               Center(
                 child: TextButton(

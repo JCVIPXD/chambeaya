@@ -61,7 +61,7 @@ Future<(_Cost, ThemeModeController)> _toggleFromTab(
   await tester.pumpWidget(
     MaterialApp(
       theme: buildAppTheme(Brightness.light),
-      home: WorkerShell(
+      home: WorkerShell(temporaryShiftsEnabled: true, 
         repository: DemoWorkerMarketplaceRepository(),
         initialIndex: initialIndex,
         themeModeController: controller,
@@ -154,7 +154,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: WorkerShell(repository: DemoWorkerMarketplaceRepository()),
+        home: WorkerShell(temporaryShiftsEnabled: true, repository: DemoWorkerMarketplaceRepository()),
       ),
     );
     await tester.pumpAndSettle();

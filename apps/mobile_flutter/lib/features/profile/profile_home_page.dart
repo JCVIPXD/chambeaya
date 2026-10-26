@@ -20,8 +20,20 @@ class ProfileHomePage extends StatefulWidget {
     this.sessionToken,
     this.googleOnlyAccount = false,
     this.marketplaceRepository,
+    this.temporaryShiftsEnabled = true,
+    this.completionBuilder,
     super.key,
   });
+
+  /// Con `false` los textos hablan de puestos (no de turnos) y no hay rastro
+  /// del flujo de turnos temporales. El valor por defecto conserva el texto
+  /// heredado para las pruebas aisladas de esta pantalla.
+  final bool temporaryShiftsEnabled;
+
+  /// Sección opcional bajo el encabezado del perfil (indicador de
+  /// completitud); recibe el perfil vigente para poder refrescarse al editarlo.
+  final Widget Function(BuildContext context, TalentProfile profile)?
+  completionBuilder;
 
   final TalentProfileRepository talentProfileRepository;
   final bool showNavigation;
@@ -217,6 +229,8 @@ class _ProfileHomePageState extends State<ProfileHomePage> {
             sessionToken: widget.sessionToken,
             googleOnlyAccount: widget.googleOnlyAccount,
             marketplaceRepository: widget.marketplaceRepository,
+            temporaryShiftsEnabled: widget.temporaryShiftsEnabled,
+            completionBuilder: widget.completionBuilder,
             uploadingCv: _uploadingCv,
             onUploadCv: () => _uploadCv(data),
             uploadingPhoto: _uploadingPhoto,
@@ -226,6 +240,7 @@ class _ProfileHomePageState extends State<ProfileHomePage> {
                 context: context,
                 isScrollControlled: true,
                 builder: (_) => _EditProfileSheet(
+                  shifts: widget.temporaryShiftsEnabled,
                   profile: data.profile,
                   specialties: data.specialties,
                   repository: widget.talentProfileRepository,
@@ -308,7 +323,12 @@ class _ProfileContent extends StatelessWidget {
     this.sessionToken,
     this.googleOnlyAccount = false,
     this.marketplaceRepository,
+    this.temporaryShiftsEnabled = true,
+    this.completionBuilder,
   });
+  final bool temporaryShiftsEnabled;
+  final Widget Function(BuildContext context, TalentProfile profile)?
+  completionBuilder;
   final _ProfileScreenData data;
   final VoidCallback onEdit;
   final VoidCallback onUploadCv;
@@ -375,7 +395,10 @@ class _ProfileContent extends StatelessWidget {
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      _TopBar(onLogout: onLogout),
+                      _TopBar(
+                        onLogout: onLogout,
+                        shifts: temporaryShiftsEnabled,
+                      ),
                       if (themeModeController != null) ...[
                         const SizedBox(height: 14),
                         _AppearanceCard(controller: themeModeController!),
@@ -388,6 +411,10 @@ class _ProfileContent extends StatelessWidget {
                         onUploadPhoto: onUploadPhoto,
                         uploadingPhoto: uploadingPhoto,
                       ),
+                      if (completionBuilder != null) ...[
+                        const SizedBox(height: 18),
+                        completionBuilder!(context, profile),
+                      ],
                       const SizedBox(height: 18),
                       if (isWide)
                         Row(
@@ -413,10 +440,11 @@ class _ProfileContent extends StatelessWidget {
                                 profile.bio!,
                                 style: Theme.of(context).textTheme.bodyLarge,
                               )
-                            : const _EmptyProfileDetail(
+                            : _EmptyProfileDetail(
                                 icon: Icons.edit_note_rounded,
-                                text:
-                                    'Cuenta brevemente tu experiencia y el tipo de turnos que buscas.',
+                                text: temporaryShiftsEnabled
+                                    ? 'Cuenta brevemente tu experiencia y el tipo de turnos que buscas.'
+                                    : 'Cuenta brevemente tu experiencia y el tipo de puestos que buscas.',
                               ),
                       ),
                       const SizedBox(height: 18),
@@ -426,7 +454,9 @@ class _ProfileContent extends StatelessWidget {
                         subtitle: profile.cv == null
                             ? 'Aún no has cargado tu CV'
                             : profile.isVisible
-                            ? 'Lo abren solo las empresas a cuyos turnos te postulas'
+                            ? (temporaryShiftsEnabled
+                                  ? 'Lo abren solo las empresas a cuyos turnos te postulas'
+                                  : 'Lo abren solo las empresas a cuyos puestos te postulas')
                             : 'Solo tú puedes abrirlo mientras tu perfil esté oculto',
                         child: _CvDetail(
                           document: profile.cv,
@@ -438,8 +468,13 @@ class _ProfileContent extends StatelessWidget {
                       _ProfileCard(
                         icon: Icons.map_outlined,
                         title: 'Radio y distritos de trabajo',
-                        subtitle: 'Dónde aceptas turnos',
-                        child: _WorkAreaDetail(profile: profile),
+                        subtitle: temporaryShiftsEnabled
+                            ? 'Dónde aceptas turnos'
+                            : 'Dónde aceptas trabajar',
+                        child: _WorkAreaDetail(
+                          profile: profile,
+                          shifts: temporaryShiftsEnabled,
+                        ),
                       ),
                       const SizedBox(height: 18),
                       _ProfileCard(
@@ -487,7 +522,7 @@ class _ProfileContent extends StatelessWidget {
                         ),
                       ],
                       const SizedBox(height: 18),
-                      const _PrivacyNote(),
+                      _PrivacyNote(shifts: temporaryShiftsEnabled),
                     ],
                   );
                 },
@@ -501,8 +536,9 @@ class _ProfileContent extends StatelessWidget {
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({this.onLogout});
+  const _TopBar({this.onLogout, this.shifts = true});
   final VoidCallback? onLogout;
+  final bool shifts;
 
   @override
   Widget build(BuildContext context) => Row(
@@ -521,7 +557,9 @@ class _TopBar extends StatelessWidget {
             ),
             const SizedBox(height: 3),
             Text(
-              'Tu carta de presentación para nuevos turnos.',
+              shifts
+                  ? 'Tu carta de presentación para nuevos turnos.'
+                  : 'Tu carta de presentación para nuevos puestos.',
               style: TextStyle(color: context.palette.muted),
             ),
           ],
@@ -988,7 +1026,8 @@ class _SectionVisibilityBadge extends StatelessWidget {
 }
 
 class _WorkAreaDetail extends StatelessWidget {
-  const _WorkAreaDetail({required this.profile});
+  const _WorkAreaDetail({required this.profile, this.shifts = true});
+  final bool shifts;
   final TalentProfile profile;
 
   @override
@@ -1001,10 +1040,11 @@ class _WorkAreaDetail extends StatelessWidget {
         _SectionVisibilityBadge(visible: profile.isWorkAreaVisible),
         const SizedBox(height: 12),
         if (!hasArea)
-          const _EmptyProfileDetail(
+          _EmptyProfileDetail(
             icon: Icons.pin_drop_outlined,
-            text:
-                'Aún no defines un radio ni distritos adicionales donde aceptas turnos.',
+            text: shifts
+                ? 'Aún no defines un radio ni distritos adicionales donde aceptas turnos.'
+                : 'Aún no defines un radio ni distritos adicionales donde aceptas trabajar.',
           )
         else
           Wrap(
@@ -1441,7 +1481,8 @@ class _ChangePasswordSheetState extends State<_ChangePasswordSheet> {
 }
 
 class _PrivacyNote extends StatelessWidget {
-  const _PrivacyNote();
+  const _PrivacyNote({this.shifts = true});
+  final bool shifts;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -1462,7 +1503,9 @@ class _PrivacyNote extends StatelessWidget {
         const SizedBox(width: 10),
         Expanded(
           child: Text(
-            'Tu CV se guarda en almacenamiento privado y nunca se muestra en el directorio empresarial. Una empresa solo puede abrirlo, en modo lectura, si te postulas a uno de sus turnos y tu perfil está visible; si lo ocultas, deja de verlo.',
+            shifts
+                ? 'Tu CV se guarda en almacenamiento privado y nunca se muestra en el directorio empresarial. Una empresa solo puede abrirlo, en modo lectura, si te postulas a uno de sus turnos y tu perfil está visible; si lo ocultas, deja de verlo.'
+                : 'Tu CV se guarda en almacenamiento privado y nunca se muestra en el directorio empresarial. Una empresa solo puede abrirlo, en modo lectura, si te postulas a uno de sus puestos y tu perfil está visible; si lo ocultas, deja de verlo.',
             style: TextStyle(
               color: context.palette.muted,
               fontSize: 12,
@@ -1532,10 +1575,12 @@ class _CvDetail extends StatelessWidget {
 
 class _EditProfileSheet extends StatefulWidget {
   const _EditProfileSheet({
+    this.shifts = true,
     required this.profile,
     required this.specialties,
     required this.repository,
   });
+  final bool shifts;
   final TalentProfile profile;
   final List<Specialty> specialties;
   final TalentProfileRepository repository;
@@ -1767,7 +1812,9 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
             ),
             const SizedBox(height: 4),
             Text(
-              'Solo comparte información que ayude a encontrar turnos adecuados.',
+              widget.shifts
+                  ? 'Solo comparte información que ayude a encontrar turnos adecuados.'
+                  : 'Solo comparte información que ayude a encontrar puestos adecuados.',
               style: TextStyle(color: context.palette.muted),
             ),
             const SizedBox(height: 18),
@@ -1902,7 +1949,11 @@ class _EditProfileSheetState extends State<_EditProfileSheet> {
             ],
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Disponible para nuevos turnos'),
+              title: Text(
+                widget.shifts
+                    ? 'Disponible para nuevos turnos'
+                    : 'Disponible para nuevas oportunidades',
+              ),
               value: _available,
               onChanged: (value) => setState(() => _available = value),
             ),
