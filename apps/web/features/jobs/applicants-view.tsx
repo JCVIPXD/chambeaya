@@ -17,8 +17,9 @@ type StageFilter = ApplicationStatus | 'ALL';
 
 export function ApplicantsView() {
   const { token, currency, onUnauthorized, goTo, selectedPostingId, setSelectedPostingId } = useJobs();
-  const postings = useResource(() => jobsApi.postings.list(token, { limit: 100 }), 'postings', { onUnauthorized, currency });
+  const postings = useResource(() => jobsApi.postings.listAll(token), 'postings', { onUnauthorized, currency });
   const publishedOrPast = useMemo(() => (postings.data?.items ?? []).filter((posting) => posting.status !== 'DRAFT'), [postings.data]);
+  const postingsTruncated = postings.data?.truncated ?? false;
   const postingId = publishedOrPast.some((posting) => posting.id === selectedPostingId) ? selectedPostingId : (publishedOrPast[0]?.id ?? '');
 
   const [stage, setStage] = useState<StageFilter>('ALL');
@@ -101,6 +102,7 @@ export function ApplicantsView() {
                 {publishedOrPast.map((item) => <option key={item.id} value={item.id}>{item.title} · {POSTING_STATUS_LABEL[item.status]}</option>)}
               </select>
             </div>
+            {postingsTruncated && <p className="fx-muted">Mostramos tus {publishedOrPast.length} puestos más recientes.</p>}
             {current && <p className="fx-muted">Vacantes cubiertas: <strong>{current.filledVacancies}/{current.vacancies}</strong> · {POSTING_STATUS_LABEL[current.status]}</p>}
           </div>
 

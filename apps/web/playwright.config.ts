@@ -25,7 +25,9 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: 'npm run build && npm run start -- --hostname 127.0.0.1 --port 3100',
+      // Ambos builds pasan por un script que restaura tsconfig.json y next-env.d.ts: `next build` los reescribe
+      // (tipos de producción en el de siempre, y otro distDir en el segundo panel).
+      command: 'node scripts/build-keeping-tracked-files.mjs && npm run start -- --hostname 127.0.0.1 --port 3100',
       url: baseURL,
       reuseExistingServer: false,
       timeout: 180_000,
@@ -38,7 +40,7 @@ export default defineConfig({
       },
     },
     {
-      command: 'npm run build && npm run start -- --hostname 127.0.0.1 --port 3101',
+      command: 'node scripts/build-keeping-tracked-files.mjs && npm run start -- --hostname 127.0.0.1 --port 3101',
       url: flagOffURL,
       reuseExistingServer: false,
       timeout: 180_000,

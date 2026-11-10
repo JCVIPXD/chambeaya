@@ -136,6 +136,10 @@ export function CostActionDialog({ spec, token, currency, onClose, onDone, onFai
                   No tienes saldo suficiente: te faltan <strong>{formatCoins(phase.quote.cost - phase.quote.balance, currency)}</strong>. No se cobró nada.
                   Revisa en tu Billetera cómo ganar más {currency} (por ejemplo, verificando tu empresa o confirmando contrataciones).
                 </p>
+              ) : phase.quote.withinDailyCap ? (
+                <p>
+                  Esta acción no está disponible por ahora. No se cobró nada. Inténtalo más tarde o escribe a soporte si el problema continúa.
+                </p>
               ) : (
                 <p>
                   Alcanzaste el tope diario de gasto: hoy gastaste <strong>{formatCoins(phase.quote.dailyCap.spentToday, currency)}</strong> de {formatCoins(phase.quote.dailyCap.limit, currency)}.
@@ -202,7 +206,7 @@ export function QuoteDetails({ quote, currency }: { quote: Quote; currency: stri
       <div><dt>{actionLabel(quote.actionKey)}</dt><dd><strong>{formatCoins(quote.cost, currency)}</strong></dd></div>
       <div><dt>Tu saldo</dt><dd>{formatCoins(quote.balance, currency)}</dd></div>
       {quote.sufficientBalance && <div><dt>Saldo después</dt><dd>{formatCoins(after, currency)}</dd></div>}
-      {quote.freeQuota && (
+      {quote.freeQuota && quote.freeQuota.monthlyLimit > 0 && (
         <div>
           <dt>Cuota gratuita del mes</dt>
           <dd>{quote.freeQuota.remaining > 0 ? `${quote.freeQuota.remaining} de ${quote.freeQuota.monthlyLimit} disponibles` : `Agotada (${quote.freeQuota.monthlyLimit} de ${quote.freeQuota.monthlyLimit} usadas)`}</dd>

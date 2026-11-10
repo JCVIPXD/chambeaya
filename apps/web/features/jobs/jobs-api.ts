@@ -233,10 +233,25 @@ async function pdfBlob(path: string, token: string, signal?: AbortSignal): Promi
   return blob;
 }
 
+/** Tope de seguridad de `listAllPostings`: 20 páginas de 100 (2000 puestos). */
+export const ALL_POSTINGS_MAX_PAGES = 20;
+
 export const jobsApi = {
   postings: {
     list: (token: string, input: { status?: PostingStatus; cursor?: string | null; limit?: number } = {}) =>
       request<Page<PostingRecord>>(`/business/job-postings${pageQuery({ status: input.status, cursor: input.cursor, limit: input.limit ?? 25 })}`, { token }),
+    /** Recorre todas las páginas de puestos (más recientes primero) para el selector y los conteos del Resumen. */
+    listAll: async (token: string): Promise<{ items: PostingRecord[]; truncated: boolean }> => {
+      const items: PostingRecord[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < ALL_POSTINGS_MAX_PAGES; page += 1) {
+        const result: Page<PostingRecord> = await jobsApi.postings.list(token, { cursor, limit: 100 });
+        items.push(...result.items);
+        if (!result.nextCursor) return { items, truncated: false };
+        cursor = result.nextCursor;
+      }
+      return { items, truncated: true };
+    },
     get: (token: string, id: string) => request<PostingRecord>(`/business/job-postings/${encodeURIComponent(id)}`, { token }),
     create: (token: string, input: PostingInput) => request<PostingRecord>('/business/job-postings', { method: 'POST', token, body: json(input) }),
     update: (token: string, id: string, patch: Partial<PostingInput>) =>

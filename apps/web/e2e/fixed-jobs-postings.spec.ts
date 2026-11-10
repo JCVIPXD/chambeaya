@@ -70,7 +70,8 @@ test('publicar fuera de la cuota muestra costo, cuota y saldo, y solo cobra al c
   await expect(dialog.locator('strong', { hasText: '10 Chambitas' })).toBeVisible();
   await expect(dialog.getByText('25 Chambitas')).toBeVisible(); // saldo actual
   await expect(dialog.getByText('15 Chambitas')).toBeVisible(); // saldo después
-  await expect(dialog.getByText('Agotada (0 de 0 usadas)')).toBeVisible();
+  // Sin cuota gratuita (límite 0) no se muestra «Agotada (0 de 0 usadas)» (BAJO-5 de CN-20261013-052).
+  await expect(dialog.getByText('Cuota gratuita del mes')).toHaveCount(0);
   expect(server.state.balance).toBe(25); // consultar el costo no cobra
 
   // Cancelar no cobra.
@@ -163,6 +164,8 @@ test('destacar un puesto publicado muestra el costo, edita un borrador, pausa y 
 
   await page.getByRole('button', { name: 'Destacar Cocinero' }).click();
   await expect(page.getByRole('dialog').locator('strong', { hasText: '10 Chambitas' })).toBeVisible();
+  // BAJO-5 de CN-20261013-052: destacar no tiene cuota gratuita (la API la manda con límite 0): no se muestra «Agotada (0 de 0)».
+  await expect(page.getByRole('dialog')).not.toContainText('Cuota gratuita del mes');
   await page.getByRole('dialog').getByRole('button', { name: 'Destacar por 10 Chambitas' }).click();
   await expect(page.getByText(/«Cocinero» destacado hasta el/)).toBeVisible();
   await expect(page.getByText(/Destacado hasta el/)).toBeVisible();
@@ -204,4 +207,31 @@ test('el diálogo se maneja con teclado: Escape cierra y el foco vuelve al botó
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
   await expect(edit).toBeFocused();
+});
+
+test('con la cuota gratuita en uso la tarjeta la muestra, y una acción bloqueada por otra causa no culpa al tope diario', async ({ page, isMobile }) => {
+  await installFixedJobsApi(page, { balance: 50, postings: [samplePosting({ id: 'p-live', title: 'Mozo', status: 'PUBLISHED', publishedAt: new Date().toISOString() }), samplePosting({ id: 'p-draft', title: 'Cocinera' })] });
+  // La API dice que no se puede ejecutar aunque alcanza el saldo y se está dentro del tope (p. ej. la acción está desactivada).
+  await page.route('**/api/business/currency/quote**', async (route) => {
+    const url = new URL(route.request().url());
+    const free = url.searchParams.get('actionKey') === 'JOB_PUBLISH_EXTRA';
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        currency: 'Chambitas', actionKey: url.searchParams.get('actionKey'), actor: 'COMPANY', active: false, cost: 10, catalogAmount: 10, reason: 'CHARGE',
+        freeQuota: free ? { monthlyLimit: 3, used: 3, remaining: 0, periodStart: new Date().toISOString(), periodEnd: new Date().toISOString() } : null,
+        balance: 50, sufficientBalance: true, dailyCap: { limit: 200, spentToday: 0, remaining: 200 }, withinDailyCap: true, canExecute: false, refundWindowHours: null,
+      }),
+    });
+  });
+  await login(page);
+  await openView(page, isMobile, 'Puestos');
+  await page.getByRole('button', { name: 'Publicar Cocinera' }).click();
+  const dialog = page.getByRole('dialog');
+  // Con límite mayor que 0 la cuota se sigue mostrando (agotada).
+  await expect(dialog).toContainText('Agotada (3 de 3 usadas)');
+  await expect(dialog.getByRole('alert')).toContainText('Esta acción no está disponible por ahora');
+  await expect(dialog).not.toContainText('tope diario de gasto');
+  await expect(dialog).not.toContainText('No tienes saldo suficiente');
 });

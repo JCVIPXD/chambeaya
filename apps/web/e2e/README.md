@@ -20,7 +20,8 @@ con `npm run test:web`. El comando compila el panel para producción, arranca un
 servidor temporal en `http://127.0.0.1:3100`, ejecuta las pruebas y lo cierra.
 El puerto 3100 debe estar libre. Como se utiliza la carpeta `.next` habitual,
 detén el servidor de desarrollo y no ejecutes otro build al mismo tiempo.
-Next.js puede regenerar `next-env.d.ts` con rutas de tipos de producción.
+Next.js puede regenerar `next-env.d.ts` con rutas de tipos de producción; la suite
+deja `tsconfig.json` y `next-env.d.ts` intactos (ver el punto 11).
 
 ## Casos cubiertos
 
@@ -187,13 +188,22 @@ siempre con Chromium; no es una prueba en un teléfono físico):
     `test.use({ baseURL: FLAG_OFF_URL })`; `fixed-jobs-flag.spec.ts` comprueba que, apagada, no hay ni una petición
     ni un texto del flujo de turnos y que, encendida, conviven las vistas viejas y las nuevas. Los puertos 3100 y
     3101 deben estar libres.
-    **Ojo al terminar:** compilar con otro `distDir` hace que Next.js reescriba `apps/web/tsconfig.json` (agrega
-    `.next-flag-off/types/**/*.ts` al `include`) y `apps/web/next-env.d.ts` (importa los tipos de `.next-flag-off`).
-    Son archivos versionados: tras `npm run test:web` restáuralos con
-    `git checkout -- apps/web/tsconfig.json apps/web/next-env.d.ts` y no los incluyas en un commit (BAJO-1 de
-    `CN-20261013-052`).
+    **Archivos versionados:** compilar con otro `distDir` hace que Next.js reescriba `apps/web/tsconfig.json` (agrega
+    `.next-flag-off/types/**/*.ts` al `include`) y `apps/web/next-env.d.ts`. Ya no hay paso manual: el segundo panel
+    se compila con `apps/web/scripts/build-keeping-tracked-files.mjs`, que guarda esos dos archivos antes del build y
+    los restaura byte a byte al terminar (también si el build falla, conservando su código de salida, o con Ctrl+C).
+    Si el proceso se mata a la fuerza durante el build (Playwright detiene sus servidores con `taskkill /T /F` en
+    Windows o `SIGKILL`, por ejemplo al vencer el `timeout` de 180 s del `webServer`), no hay restauración: en ese
+    caso revisa `git status` y restáuralos con `git checkout -- apps/web/tsconfig.json apps/web/next-env.d.ts`.
+    Tras una corrida normal de `npm run test:web`, `git status` no debe mostrarlos modificados (BAJO-1 de
+    `CN-20261013-052`, corregido en `CN-20261110-054`).
+    Con la bandera apagada la campana de notificaciones se oculta y no se muestra el plan (BAJO-6); el selector de
+    puesto y el Resumen recorren todas las páginas de puestos (BAJO-7, 105 puestos en `fixed-jobs-applicants.spec.ts`);
+    el doble clic en «Emitir oferta» emite una sola oferta (BAJO-3), «Nuevo puesto» tiene nombre accesible en móvil
+    (BAJO-4) y la cuota gratuita con límite 0 no se muestra y un bloqueo ajeno al tope no lo menciona (BAJO-5, con
+    `page.route` sobre `/api/business/currency/quote`).
 
-188 ejecuciones en total según `npx playwright test --list` (94 casos × escritorio y móvil; una se omite en móvil). Cada una tiene su navegador aislado y su estado de
+196 ejecuciones en total según `npx playwright test --list` (98 casos × escritorio y móvil; una se omite en móvil). Cada una tiene su navegador aislado y su estado de
 API propio. Una petición API no prevista, una petición externa o un error
 JavaScript sin capturar hacen fallar la prueba. No se permiten reintentos que
 oculten fallos.

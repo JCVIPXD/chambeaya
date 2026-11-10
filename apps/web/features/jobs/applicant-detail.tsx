@@ -407,6 +407,7 @@ function OfferForm({ applicationId, last, posting, onIssued, onFailure, onCancel
   const [uploaded, setUploaded] = useState<UploadedOfferDocument | null>(null);
   const [step, setStep] = useState<'idle' | 'uploading' | 'sending'>('idle');
   const fileInput = useRef<HTMLInputElement>(null);
+  const inFlight = useRef(false);
   const working = step !== 'idle';
 
   function pickFile(next: File | null) {
@@ -424,12 +425,15 @@ function OfferForm({ applicationId, last, posting, onIssued, onFailure, onCancel
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (working) return;
+    // `step` solo cambia tras el primer `await`: la guarda real contra el doble envío es este ref, que se
+    // marca en el mismo turno del clic (BAJO-3 de CN-20261013-052).
+    if (working || inFlight.current) return;
     const result = validateOffer(values);
     if (!result.input) {
       setErrors(result.errors);
       return;
     }
+    inFlight.current = true;
     onFailure(null);
     try {
       let document = uploaded;
@@ -467,6 +471,7 @@ function OfferForm({ applicationId, last, posting, onIssued, onFailure, onCancel
       }
       onFailure(described);
     } finally {
+      inFlight.current = false;
       setStep('idle');
     }
   }

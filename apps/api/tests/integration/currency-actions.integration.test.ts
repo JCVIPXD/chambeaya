@@ -902,6 +902,10 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
     await fund(company, 1000);
     const caps = await prisma.currencySetting.findMany({ where: { key: { in: ['DAILY_SPEND_CAP_WORKER', 'DAILY_SPEND_CAP_COMPANY'] } } });
     await prisma.currencySetting.updateMany({ where: { key: { in: ['DAILY_SPEND_CAP_WORKER', 'DAILY_SPEND_CAP_COMPANY'] } }, data: { value: 100_000 } });
+    // BAJO-2 de CN-20261013-052: se cuentan los barridos que terminaron y los que agotaron sus reintentos, para que
+    // la parte concurrente del escenario no pueda quedar vacía sin aviso.
+    let sweepsCompleted = 0;
+    let sweepsTolerated = 0;
     try {
       for (let round = 0; round < 4; round += 1) {
         const ids = [] as string[];
@@ -911,8 +915,15 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
         // El barrido es una tarea periódica: si sus reintentos Serializable se agotan por contención, no queda
         // nada a medias y la siguiente pasada lo vuelve a intentar (mismo criterio que el 503 de las rutas).
         const tolerantSweep = async () => {
-          try { return await lateSweeper().sweep(); } catch (error) {
-            if (isRetryableTransactionError(error)) return { refunded: 0, notEligible: 0, amount: 0 };
+          try {
+            const result = await lateSweeper().sweep();
+            sweepsCompleted += 1;
+            return result;
+          } catch (error) {
+            if (isRetryableTransactionError(error)) {
+              sweepsTolerated += 1;
+              return { refunded: 0, notEligible: 0, amount: 0 };
+            }
             throw error;
           }
         };
@@ -921,6 +932,8 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
           ...ids.slice(3).map((id) => apply(worker, id, { priority: true })),
         ]);
         expect(sweepA.refunded + sweepB.refunded).toBeGreaterThanOrEqual(0);
+        // Cada barrido concurrente terminó o fue tolerado: ninguno desapareció sin contarse.
+        expect(sweepsCompleted + sweepsTolerated, `round ${round}`).toBe(2 * (round + 1));
         // Bajo contención extrema los reintentos Serializable pueden agotarse: eso es `503 SERIALIZATION_RETRY_EXHAUSTED`
         // (reintentable, nunca 500) y la postulación NO debe haberse aplicado. Cualquier otra respuesta es un defecto.
         const concurrentIds = ids.slice(3);
@@ -936,6 +949,10 @@ describe('currency-connected actions (M4) under PostgreSQL', () => {
           expect(stored, `round ${round} application ${index}`).toBe(response.status === 201 ? 1 : 0);
         }
       }
+      // Si ambos barridos concurrentes agotaran sus reintentos en todas las rondas, la contención que prueba este
+      // escenario no habría existido: se exige que al menos uno termine por corrida y se deja el conteo a la vista.
+      console.info(`[BAJO-1 stress] barridos concurrentes: ${sweepsCompleted} terminados, ${sweepsTolerated} tolerados (reintentos agotados)`);
+      expect(sweepsCompleted, `sweeps tolerated: ${sweepsTolerated}`).toBeGreaterThanOrEqual(1);
       // Barrido final sin competencia: debe terminar sin error (con unos reintentos por si aún hay contención).
       for (let attempt = 0; ; attempt += 1) {
         try { await lateSweeper().sweep(); break; } catch (error) {

@@ -14,12 +14,13 @@ import { useResource } from './use-resource';
 /** Resumen de la empresa cuando los turnos temporales están apagados: puestos, postulantes y saldo. */
 export function OverviewView({ companyName, requestCreate }: { companyName: string; requestCreate: () => void }) {
   const { token, currency, balance, balanceError, onUnauthorized, goTo, setSelectedPostingId } = useJobs();
-  const postings = useResource(() => jobsApi.postings.list(token, { limit: 100 }), 'overview', { onUnauthorized, currency });
+  const postings = useResource(() => jobsApi.postings.listAll(token), 'overview', { onUnauthorized, currency });
   const { reload } = postings;
   const onEvent = useCallback(() => void reload({ silent: true }), [reload]);
   useJobEvents(token, true, onEvent, onUnauthorized);
 
   const items = postings.data?.items ?? [];
+  const truncated = postings.data?.truncated ?? false;
   const count = (status: PostingRecord['status']) => items.filter((item) => item.status === status).length;
   const applications = items.reduce((sum, item) => sum + (item.applicationsCount ?? 0), 0);
   const recent = items.filter((item) => item.status !== 'DRAFT').slice(0, 5);
@@ -55,6 +56,7 @@ export function OverviewView({ companyName, requestCreate }: { companyName: stri
 
       <section className="panel fx-panel" aria-label="Puestos recientes" aria-busy={postings.loading}>
         <h2 className="fx-h2">Tus puestos</h2>
+        {truncated && <p className="fx-muted" role="status">Hay muchos puestos: los totales cuentan solo los {items.length} más recientes.</p>}
         {postings.loading && <LoadingBlock label="Cargando tus puestos…" />}
         {!postings.loading && postings.error && <ErrorBlock error={postings.error} onRetry={() => void postings.reload()} title="No pudimos cargar tus puestos" />}
         {postings.data && items.length === 0 && (

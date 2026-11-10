@@ -173,3 +173,51 @@ test('un 409 por cambio de etapa actualiza el detalle y un 503 ofrece reintentar
   await retry.click();
   await expect(page.getByText('Mario Ruiz quedó preseleccionado.')).toBeVisible();
 });
+
+test('el selector de puesto y los conteos del Resumen no se limitan a los 100 puestos más recientes (BAJO-7)', async ({ page, isMobile }) => {
+  const recent = Array.from({ length: 104 }, (_, index) => published({ id: `p-${index}`, title: `Puesto reciente ${index}`, vacancies: 1 }));
+  const oldest = published({ id: 'p-oldest', title: 'Puesto más antiguo', vacancies: 1 });
+  const server = await installFixedJobsApi(page, { postings: [...recent, oldest] });
+  server.addApplicant({ postingId: 'p-oldest', name: 'Rosa Antigua' });
+  await login(page);
+
+  // Resumen: 105 publicados, no 100.
+  await expect(page.getByRole('heading', { name: /^Hola, / })).toBeVisible();
+  await expect(page.locator('.fx-stat').filter({ hasText: 'Puestos publicados' }).locator('strong')).toHaveText('105');
+  await expect(page.locator('.fx-stat').filter({ hasText: 'Postulaciones recibidas' }).locator('strong')).toHaveText('1');
+  const pages = server.calls.filter((call) => call.method === 'GET' && call.path === '/business/job-postings');
+  expect(pages.length).toBeGreaterThanOrEqual(2);
+
+  // Postulantes: el puesto más antiguo aparece en el selector y se puede elegir.
+  await openView(page, isMobile, 'Postulantes');
+  const select = page.getByLabel('Puesto', { exact: true });
+  await expect(select.locator('option')).toHaveCount(105);
+  await select.selectOption('p-oldest');
+  await expect(page.getByRole('heading', { name: 'Rosa Antigua', level: 3 })).toBeVisible();
+});
+
+test('el botón «Nuevo puesto» tiene nombre accesible también en móvil (BAJO-4)', async ({ page }) => {
+  await installFixedJobsApi(page, { postings: [] });
+  await login(page);
+  const button = page.locator('.topbar').getByRole('button', { name: 'Nuevo puesto', exact: true });
+  await expect(button).toBeVisible();
+  expect(await button.getAttribute('aria-label')).toBe('Nuevo puesto');
+});
+
+test('un doble clic en «Emitir oferta» con un PDF adjunto emite una sola oferta y sube un solo archivo (BAJO-3)', async ({ page, isMobile }) => {
+  const server = await installFixedJobsApi(page, { postings: [published()] });
+  server.addApplicant({ postingId: 'p-open', name: 'Ana Quispe', status: 'SHORTLISTED' });
+  await login(page);
+  await openView(page, isMobile, 'Postulantes');
+  await page.getByRole('button', { name: 'Revisar a Ana Quispe' }).click();
+  const detail = page.getByRole('dialog', { name: 'Ana Quispe' });
+  await detail.getByRole('button', { name: 'Emitir oferta' }).click();
+  await detail.getByLabel('Sueldo mensual (S/)').fill('2200');
+  await detail.getByLabel('Fecha de ingreso').fill(new Date(Date.now() + 14 * DAY_MS).toISOString().slice(0, 10));
+  await detail.getByLabel('Documento de la oferta (PDF, opcional)').setInputFiles({ name: 'oferta.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 oferta') });
+  // Dos clics en el mismo turno de eventos, antes de que se resuelva la lectura del PDF (la ventana del defecto).
+  await detail.getByRole('button', { name: 'Emitir oferta' }).last().evaluate((element) => { (element as HTMLButtonElement).click(); (element as HTMLButtonElement).click(); });
+  await expect(page.getByText('Oferta emitida a Ana Quispe.')).toBeVisible();
+  expect(server.calls.filter((call) => call.method === 'PUT' && call.path.endsWith('/offer-documents'))).toHaveLength(1);
+  expect(server.calls.filter((call) => call.method === 'POST' && call.path.endsWith('/offers'))).toHaveLength(1);
+});

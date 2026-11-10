@@ -36,9 +36,15 @@ test.describe('bandera de turnos temporales apagada', () => {
       expect(text, `vista ${name}`).not.toMatch(/\bturnos?\b|rescate|check-in|asignaci[oó]n|Membres[ií]a|Mensajes|Pagos\b|Trabajadores/i);
     }
 
-    // El drawer de notificaciones tampoco habla de turnos.
-    await page.getByRole('button', { name: 'Ver notificaciones' }).click();
-    expect(await page.getByRole('complementary', { name: 'Notificaciones' }).innerText()).not.toMatch(/turno/i);
+    // La campana no queda como control muerto (BAJO-6 de CN-20261013-052): sin turnos se oculta.
+    await expect(page.getByRole('button', { name: 'Ver notificaciones' })).toHaveCount(0);
+    // Y sin camino a Membresía no se muestra ningún plan (ni «Sin plan activado») en la barra lateral ni en el Perfil.
+    if (isMobile) await page.getByRole('button', { name: 'Abrir menú', exact: true }).click();
+    await expect(page.locator('.company-card')).not.toContainText(/plan/i);
+    await nav.getByRole('button', { name: 'Perfil de empresa', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Perfil de empresa', exact: true })).toBeVisible();
+    await expect(page.getByText('Plan', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Sin plan activado')).toHaveCount(0);
 
     // Y el panel jamás consulta la API del flujo de turnos.
     const touched = browserApi.calls.filter((call) => SHIFT_PATHS.includes(call.path));

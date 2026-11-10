@@ -1765,7 +1765,8 @@ export default function HomePage() {
           </span>
           <span className="company-copy">
             <strong>{company?.name ?? session.name}</strong>
-            <span>{sidebarPlanLabel(subscription)}</span>
+            {/* Sin turnos temporales la Membresía está oculta: no se muestra un plan sin camino a ella. */}
+            {temporaryShiftsEnabled && <span>{sidebarPlanLabel(subscription)}</span>}
           </span>
           <Pencil size={15} color="#718096" />
         </button>
@@ -1819,12 +1820,13 @@ export default function HomePage() {
               <button
                 className="primary-button"
                 type="button"
+                aria-label="Nuevo puesto"
                 onClick={() => {
                   setCreateRequest((n) => n + 1);
                   navigate("Puestos");
                 }}
               >
-                <Plus size={18} />
+                <Plus size={18} aria-hidden="true" />
                 <span>Nuevo puesto</span>
               </button>
             )}
@@ -1839,17 +1841,21 @@ export default function HomePage() {
                 <option>Últimos 30 días</option>
               </select>
             </label>}
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Ver notificaciones"
-              onClick={() => setNotificationsOpen(true)}
-            >
-              <Bell size={18} />
-              {pendingApplications.count + unreadMessages > 0 && (
-                <span className="notification-dot" />
-              )}
-            </button>
+            {/* Sin turnos temporales no hay postulaciones ni mensajes de turnos que avisar: la campana se oculta
+                en vez de quedar como un control muerto (los avisos de puestos fijos viven en Postulantes). */}
+            {temporaryShiftsEnabled && (
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="Ver notificaciones"
+                onClick={() => setNotificationsOpen(true)}
+              >
+                <Bell size={18} />
+                {pendingApplications.count + unreadMessages > 0 && (
+                  <span className="notification-dot" />
+                )}
+              </button>
+            )}
             {temporaryShiftsEnabled && (
               <button
                 className="secondary-button"
@@ -1899,7 +1905,7 @@ export default function HomePage() {
           {activeNav === "Perfil de empresa" && (
             <CompanyProfileView
               company={company}
-              planLabel={hasActivatedPlan(subscription) ? sidebarPlanLabel(subscription) : "Sin plan activado"}
+              planLabel={temporaryShiftsEnabled ? (hasActivatedPlan(subscription) ? sidebarPlanLabel(subscription) : "Sin plan activado") : null}
               onEdit={() => openCrud("company")}
               onChangePassword={() => setPasswordModalOpen(true)}
             />

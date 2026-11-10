@@ -11,7 +11,8 @@ import { useResource } from './use-resource';
 /** Perfil de empresa: datos de la cuenta, verificación y plan. La edición reutiliza el formulario existente. */
 export function CompanyProfileView({ company, planLabel, onEdit, onChangePassword }: {
   company: CompanyRecord | null;
-  planLabel: string;
+  /** `null` oculta la fila (sin turnos temporales no existe la vista de Membresía). */
+  planLabel: string | null;
   onEdit: () => void;
   onChangePassword: () => void;
 }) {
@@ -40,7 +41,7 @@ export function CompanyProfileView({ company, planLabel, onEdit, onChangePasswor
         {!company ? <p className="fx-muted" role="status">Cargando los datos de tu empresa…</p> : (
           <dl className="fx-facts">
             {rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || <span className="fx-muted">Sin completar</span>}</dd></div>)}
-            <div><dt>Plan</dt><dd>{planLabel}</dd></div>
+            {planLabel !== null && <div><dt>Plan</dt><dd>{planLabel}</dd></div>}
             {verification && (
               <div>
                 <dt>Verificación</dt>

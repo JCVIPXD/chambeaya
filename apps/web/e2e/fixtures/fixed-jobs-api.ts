@@ -151,6 +151,8 @@ export async function installFixedJobsApi(page: Page, options: FixedJobsOptions 
       const posting = targetId ? find(targetId) : undefined;
       if (posting?.publishedAt) { cost = 0; reason = 'ALREADY_REGISTERED'; } else if (remaining > 0) { cost = 0; reason = 'FREE_QUOTA'; }
     }
+    // Como la API real: las acciones sin cuota gratuita traen la cuota con límite 0 (el panel no debe mostrarla).
+    if (actionKey === 'JOB_HIGHLIGHT') quota = { monthlyLimit: 0, used: 0, remaining: 0, periodStart: isoFromNow(-10 * DAY_MS), periodEnd: isoFromNow(20 * DAY_MS) };
     if (actionKey === 'JOB_HIGHLIGHT' && targetId) {
       const posting = find(targetId);
       if (posting?.highlightedUntil && new Date(posting.highlightedUntil).getTime() > Date.now()) { cost = 0; reason = 'ALREADY_REGISTERED'; }
