@@ -765,6 +765,9 @@ class DemoJobsBackend
   @override
   Future<Quote> quote(String actionKey, {String? targetId}) async {
     _enter('quote');
+    // Pruebas: `scriptError('quote:<ACTION_KEY>', ...)` falla solo esa cotización.
+    final byAction = _scripted['quote:$actionKey'];
+    if (byAction != null && byAction.isNotEmpty) throw byAction.removeAt(0);
     var cost = 0;
     var reason = QuoteReason.freeAction;
     FreeQuota? quota;

@@ -75,6 +75,11 @@ class _AuthPageState extends State<AuthPage> {
     super.dispose();
   }
 
+  /// Enter en el último campo del formulario envía el formulario.
+  void _submitFromKeyboard(String _) {
+    if (!_isLoading) _submit();
+  }
+
   Future<void> _submit() async {
     if (_isInGoogleOnboarding) {
       await _completeGoogleProfile();
@@ -565,6 +570,8 @@ class _AuthPageState extends State<AuthPage> {
                       controller: _password,
                       obscureText: true,
                       autofillHints: const [AutofillHints.newPassword],
+                      textInputAction: TextInputAction.done,
+                      onFieldSubmitted: _submitFromKeyboard,
                       decoration: InputDecoration(
                         labelText: 'Contraseña de Chambeaya',
                         helperText:
@@ -625,6 +632,13 @@ class _AuthPageState extends State<AuthPage> {
                             ? AutofillHints.newPassword
                             : AutofillHints.password,
                       ],
+                      // En el registro siguen el DNI y el código: Enter avanza.
+                      textInputAction: _isRegistering && _canRegister
+                          ? TextInputAction.next
+                          : TextInputAction.done,
+                      onFieldSubmitted: _isRegistering && _canRegister
+                          ? null
+                          : _submitFromKeyboard,
                       decoration: InputDecoration(
                         labelText: 'Contraseña',
                         contentPadding: fieldContentPadding,
@@ -648,6 +662,12 @@ class _AuthPageState extends State<AuthPage> {
                         key: const ValueKey('auth-dni'),
                         controller: _identifier,
                         keyboardType: TextInputType.number,
+                        textInputAction: _showReferral
+                            ? TextInputAction.next
+                            : TextInputAction.done,
+                        onFieldSubmitted: _showReferral
+                            ? null
+                            : _submitFromKeyboard,
                         decoration: InputDecoration(
                           labelText: 'DNI',
                           contentPadding: fieldContentPadding,
@@ -666,6 +686,8 @@ class _AuthPageState extends State<AuthPage> {
                           textCapitalization: TextCapitalization.characters,
                           autocorrect: false,
                           maxLength: 8,
+                          textInputAction: TextInputAction.done,
+                          onFieldSubmitted: _submitFromKeyboard,
                           decoration: InputDecoration(
                             labelText: 'Código de referido (opcional)',
                             helperText:

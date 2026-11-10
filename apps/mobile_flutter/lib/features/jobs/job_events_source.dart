@@ -20,6 +20,66 @@ abstract interface class JobEventsSource {
   Stream<JobEventNotification> watch();
 }
 
+/// Un único flujo de avisos por sesión, compartido por todas las pantallas
+/// (Puestos y Postulaciones).
+///
+///  * [watch] devuelve siempre el mismo flujo `broadcast`;
+///  * la conexión de la fuente real se abre cuando aparece el primer oyente y
+///    se cierra cuando se va el último (la reconexión con retroceso y el corte
+///    ante `401` son los de la fuente real: el error `401` llega a todos los
+///    oyentes y la conexión no se reintenta);
+///  * [close] la cierra al terminar la sesión.
+class SharedJobEventsSource implements JobEventsSource {
+  SharedJobEventsSource(this._inner) {
+    _controller = StreamController<JobEventNotification>.broadcast(
+      onListen: _connect,
+      onCancel: _disconnect,
+    );
+  }
+
+  final JobEventsSource _inner;
+  late final StreamController<JobEventNotification> _controller;
+  StreamSubscription<JobEventNotification>? _upstream;
+
+  /// Conexiones abiertas a la fuente real desde el inicio (pruebas).
+  int connections = 0;
+
+  @override
+  Stream<JobEventNotification> watch() => _controller.stream;
+
+  void _connect() {
+    if (_controller.isClosed || _upstream != null) return;
+    connections += 1;
+    late final StreamSubscription<JobEventNotification> subscription;
+    subscription = _inner.watch().listen(
+      (event) {
+        if (!_controller.isClosed) _controller.add(event);
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (!_controller.isClosed) _controller.addError(error, stackTrace);
+      },
+      onDone: () {
+        // La fuente real terminó (p. ej. tras un 401): no se reintenta hasta
+        // que los oyentes se vayan y vuelva uno nuevo.
+        if (identical(_upstream, subscription)) _upstream = null;
+      },
+    );
+    _upstream = subscription;
+  }
+
+  void _disconnect() {
+    final upstream = _upstream;
+    _upstream = null;
+    upstream?.cancel();
+  }
+
+  /// Corta la conexión y cierra el flujo compartido.
+  Future<void> close() async {
+    _disconnect();
+    if (!_controller.isClosed) await _controller.close();
+  }
+}
+
 class HttpJobEventsSource implements JobEventsSource {
   HttpJobEventsSource({
     required this.api,

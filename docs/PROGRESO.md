@@ -54,6 +54,110 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20261110-062 — Auditoría de `CN-20261110-061` (bajos abiertos de `CN-20261110-059`, M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261110-061` (corrección de BAJO-1, 3, 4, 5 y 6 de `CN-20261110-059`). Base `5e45233`, árbol sin commit. No se auditó ni tocó `apps/web` (corrección de `060`, en curso).
+- Alcance: diff sin commit de `apps/mobile_flutter/{lib,test,README.md}` (`cost_flow.dart`, `main.dart`, `job_events_source.dart`, `jobs_services.dart`, `demo_jobs_backend.dart`, `onboarding_page.dart`, `auth_page.dart`, `test/m5_bajos_test.dart` nuevo y `test/m5_correcciones_test.dart`) y secciones Flutter de `docs/product/moneda-virtual.md` y `docs/guides/local-development.md`. Se incorpora el recorrido visual del coordinador sobre el `build/web` nuevo (API real).
+- Verificación:
+  - BAJO-1 cerrado. Al elegir «Continuar sin prioridad», `cost_flow.dart:124-130` descarta lo opcional y vuelve a cotizar lo que queda (`continue`). Si la postulación cuesta, se muestra «Confirmar y pagar» antes de enviar. La prueba comprueba lo enviado (`[false]`) y el saldo, y falla sin el arreglo (declarado e inspeccionado).
+  - BAJO-3 cerrado para el `401` durante el uso. `_logout(keepAudience: true)` lleva al login del trabajador con el aviso; el cierre manual sigue yendo a la bienvenida. Se conservan las protecciones (token capturado, `_expiring`, sin llamar a la API). La prueba de `ChambeayaApp` es realista para este camino: restaura una sesión guardada, monta el panel con un cliente HTTP simulado que responde `401` (REST y SSE) y comprueba la sesión borrada, el login sin bienvenida y el aviso. No cubre el token viejo de una sesión anterior (protección revisada en código en `059`).
+  - BAJO-4 cerrado. `SharedJobEventsSource` es un `broadcast` que abre la conexión real con el primer oyente y la corta con el último (`onCancel` cancela la suscripción y `HttpJobEventsSource` aborta la petición). `close()` la corta y cierra el flujo, y `JobsServices.dispose` lo llama tras el frame en que el panel salió del árbol. No se pierden avisos al cambiar de pestaña: el `IndexedStack` mantiene montadas Puestos y Postulaciones, así que los oyentes no se van. Tras un `401` la fuente real termina, `_upstream` queda en `null` y no se reintenta mientras haya oyentes. Las pruebas comprueban una sola petición `/job-events` para dos pestañas, el error para todos los oyentes y el corte en `dispose`.
+  - BAJO-5 cerrado: con la bandera apagada el paso 2 dice «Tu perfil cuenta» (conforme en el recorrido visual).
+  - BAJO-6 cerrado: Enter envía en login, contraseña de Google y último campo del registro; no envía si hay una petición en curso (conforme en el recorrido visual).
+- Hallazgos críticos y altos: ninguno.
+- Hallazgos medios (abiertos, no bloquean esta corrección):
+  - MEDIO-1 (preexistente desde `e192110`/`99d59a8`, fuera del diff; recorrido visual del coordinador). `apps/mobile_flutter/lib/main.dart:151-172` (`_restoreSession`) atrapa cualquier fallo de `_authRepository.restore`, borra la sesión guardada y deja `_audience = null`. Consecuencias:
+    - (a) El caso más común de sesión vencida (abrir la app al día siguiente con el token ya inválido) termina en la bienvenida de tres pasos, sin el aviso «Tu sesión venció». El coordinador lo reprodujo con un token inválido en `localStorage`.
+    - (b) Un fallo de red o un `5xx` al restaurar (`AuthFailureKind.connectivity`/`server`) también borra la sesión: abrir la app sin conexión, o con la API caída, obliga a volver a ingresar.
+    - Corrección sugerida: borrar solo ante `AuthFailureKind.invalidCredentials` (`401`/`403`), conservando la audiencia de la sesión guardada y mostrando el aviso. Ante un fallo de conectividad o del servidor, conservar la sesión guardada y ofrecer reintentar (o entrar con la sesión guardada y dejar que el `onUnauthorized` actúe). Agregar pruebas de ambos casos.
+- Hallazgos bajos:
+  - BAJO-1. `m5_bajos_test.dart:283` crea un `JobsServices.demo()` solo para tomar su `walletController` y no lo libera. Es una fuga menor en la prueba.
+  - BAJO-2. BAJO-2 de `059` sigue como riesgo aceptado: una postulación normal con la cotización fallida y la cuota agotada se cobra sin mostrarse, como en la web.
+- Documentación: `apps/mobile_flutter/README.md` y la sección Flutter de `docs/guides/local-development.md` están al día. En `docs/product/moneda-virtual.md` el auditor acotó que el regreso al login con aviso vale durante el uso, y dejó anotado como pendiente el caso de la sesión vencida al abrir la app (MEDIO-1). CRLF conservado.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `pubspec.lock` con el mismo hash antes y después.
+  - `flutter analyze`: `No issues found! (ran in 6.4s)`.
+  - `flutter test`: `00:30 +273 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:48 +274: All tests passed!`.
+  - Recorrido visual del coordinador (`build/web`, `http://localhost:7357`, API real): paso 2 de la bienvenida y Enter en la contraseña conformes; reprodujo MEDIO-1.
+- Riesgos: `NO_EJECUTADA`: Android/iOS o dispositivo real; corte de red real del SSE; `401` en uso contra la API real (solo con cliente simulado); recorrido a 375 px.
+- Siguiente paso: los bajos 1, 3, 4, 5 y 6 de `059` quedan cerrados; el coordinador puede hacer commit de `061`. `implementador-sonnet` corrige MEDIO-1 (restauración de la sesión) en una tarea propia con su entrada, y `auditor-opus` la audita.
+
+### CN-20261110-061 — Corrección de los bajos abiertos de `CN-20261110-059` (M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261110-059` (reauditoría `APROBADO` de `CN-20261110-057`; M5 Flutter con commit `5e45233`). Rama `moneda-virtual`, árbol de trabajo sin commit. No se tocó `apps/web`, `apps/api` ni `docs/PROGRESO.md` fuera de esta entrada.
+- Alcance: solo `apps/mobile_flutter` y su documentación. BAJO-1: «Continuar sin prioridad» vuelve a cotizar lo que queda y muestra su costo antes de enviar. BAJO-3: tras un `401` se vuelve directo al login del trabajador con el aviso «Tu sesión venció»; prueba de `ChambeayaApp` del camino y prueba del SSE con 401. BAJO-4: un único flujo SSE compartido (broadcast) en `JobsServices`. BAJO-5: paso 2 de la bienvenida reescrito para la bandera apagada. BAJO-6: Enter en la contraseña envía el login (y el registro en su último campo). BAJO-2 se mantiene como riesgo aceptado, sin cambios.
+- Archivos:
+  - `apps/mobile_flutter/lib/features/wallet/cost_flow.dart`
+  - `apps/mobile_flutter/lib/main.dart` (`_logout(keepAudience)`, `ChambeayaApp.jobsHttpClient` solo para pruebas)
+  - `apps/mobile_flutter/lib/features/jobs/job_events_source.dart` (`SharedJobEventsSource`)
+  - `apps/mobile_flutter/lib/features/jobs/jobs_services.dart` (`events` compartido, `httpClient`, `dispose` cierra el flujo; constructor ya no `const`)
+  - `apps/mobile_flutter/lib/features/jobs/demo_jobs_backend.dart` (`scriptError('quote:<ACTION_KEY>')` para pruebas)
+  - `apps/mobile_flutter/lib/features/onboarding/onboarding_page.dart`
+  - `apps/mobile_flutter/lib/features/auth/auth_page.dart`
+  - `apps/mobile_flutter/test/m5_bajos_test.dart` (nuevo, 11 pruebas)
+  - `apps/mobile_flutter/test/m5_correcciones_test.dart` (se renombró la prueba de `:661` a «avisa al recibir 401 en rutas REST y no en otros errores», con un comentario; solo cubría REST)
+  - `apps/mobile_flutter/README.md`, `docs/product/moneda-virtual.md`, `docs/guides/local-development.md`
+- Decisiones:
+  - BAJO-1: al elegir «Continuar sin prioridad» se descarta lo opcional y se cotiza lo que queda; si tiene costo (cuota agotada) se muestra el diálogo «Confirmar y pagar» antes de enviar, y si no queda nada con costo se envía.
+  - BAJO-3: el cierre por vencimiento conserva `_audience` (login directo del trabajador); el logout manual sigue yendo a la bienvenida. El cierre sigue sin llamar a la API y ignorando clientes de una sesión anterior.
+  - BAJO-4: `SharedJobEventsSource` abre una sola conexión SSE al primer oyente y la cierra al irse el último. Conserva la reconexión con retroceso y el corte ante 401, cuyo error llega a todos los oyentes sin reintento. `JobsServices.dispose` lo cierra.
+  - BAJO-5: con la bandera apagada el paso 2 es «Tu perfil cuenta» / «Un perfil completo ayuda a las empresas a conocerte cuando revisan tu postulación.» (no promete índice de reputación ni funciones inexistentes). Con la bandera encendida conserva «Índice Chambeaya» / «La puntualidad, asistencia y desempeño construyen tu reputación.».
+  - BAJO-6: login, contraseña del onboarding de Google y último campo del registro (DNI o código de referido) envían con Enter; la contraseña del registro solo avanza. No envía si ya hay una petición en curso.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; `pubspec.lock` idéntico al original.
+  - `flutter analyze`: `No issues found! (ran in 4.8s)`.
+  - `flutter test`: `00:29 +273 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:40 +274: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `Compiling lib\main.dart for the Web... 67,7s` y `√ Built build\web`.
+  - Prueba que falla sin el arreglo: con `if (false && hasOptional)` en `cost_flow.dart` y `keepAudience: false` en `main.dart`, `m5_bajos_test.dart` falló en BAJO-1 (`Expected: <0>  Actual: <1>`, se envió sin mostrar el costo) y en BAJO-3 (`Found 0 widgets with text "Inicia sesión"`); el resto pasó. Restaurado y comprobado con grep.
+  - NO_EJECUTADA: Android/iOS o dispositivo real; corte de red real del SSE; recorrido a 375 px.
+- Riesgos:
+  - El 401 se probó con un cliente HTTP simulado (`jobsHttpClient`), no contra la API real.
+  - Tras un 401 el flujo compartido no se reabre hasta que salgan todos los oyentes; es aceptable porque la sesión ya se está cerrando.
+  - BAJO-2 sigue como riesgo aceptado de `CN-20261110-059`.
+- Siguiente paso: `auditor-opus` audita esta corrección y, si la aprueba, cierra los bajos 1, 3, 4, 5 y 6 de `CN-20261110-059`.
+
+### CN-20261110-060 — Auditoría de `CN-20261110-058` (restauración de archivos versionados tras cierre forzado y agrupación de avisos del Resumen)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: audita `CN-20261110-058` (corrección del BAJO-1 nuevo y del riesgo de `listAll` de `CN-20261110-056`). Rama `moneda-virtual` sobre `5e45233`, árbol sin commit. No se auditó `apps/mobile_flutter` ni los cambios sin commit de `docs/guides/local-development.md` y `docs/product/moneda-virtual.md`, que no pertenecen a `058`.
+- Alcance: `apps/web/scripts/{tracked-files-guard,build-keeping-tracked-files}.mjs`, `apps/web/e2e/global-teardown.mjs`, `apps/web/playwright.config.ts`, `apps/web/features/jobs/{coalesce.ts,overview-view.tsx}`, `apps/web/e2e/overview-live-refresh.spec.ts` y `apps/web/e2e/README.md`. Se leyó el código de Playwright 1.63 (`runner/index.js`, `coreBundle.js`) para ver cómo arranca, detiene y desmonta los `webServer`.
+- Verificaciones conformes:
+  - Dueños por PID con dos builds a la vez: en una copia aislada de `apps/web` se lanzaron dos builds a la vez (`.next` y `.next-flag-off`). Hubo dos dueños vivos y los archivos se reescribieron (`A5627267…/9BA30857…`) mientras la copia en disco seguía siendo la original (`861FF5B0…`). Al salir el último se restauró a `861FF5B0…/B8B3A344…` y se borró la copia. El segundo nunca copia: con `mkdirSync` atómico ante `EEXIST` espera `ready` y solo se registra. `acquire` es síncrono y corre antes del `spawn`, así que una copia sin `ready` nunca tiene archivos ya tocados.
+  - Build fallido: en la copia, con un error de tipos temporal en un archivo de la copia, `node scripts/build-keeping-tracked-files.mjs` con `NEXT_DIST_DIR=.next-flag-off` dio `Failed to type check.`, `BUILD_EXIT=1`, archivos con sus hashes originales y sin copia en disco.
+  - Teardown y builds en curso: en una corrida normal el `globalTeardown` solo se registra después de que todos los `webServer` arrancaron (`TaskRunner.runDeferCleanup` agrega el teardown de cada tarea al alcanzarla). Para entonces ambos scripts ya salieron (`node script && npm start`), así que no puede restaurar a mitad de un build legítimo.
+  - Recuperación en la siguiente corrida: tras un cierre forzado (vencimiento del `timeout` del `webServer`, ver BAJO-1), la corrida siguiente del script restauró `861FF5B0…/B8B3A344…` y borró la copia (`EXIT=0`).
+  - Agrupador: cada `trigger` programa o reprograma un temporizador que vence después de él (`max(0, min(waitMs, firstAt + maxWaitMs - now))`); un aviso posterior a una ejecución abre un ciclo nuevo y `cancel` solo se usa al desmontar. `reload` es estable (`useCallback([])`) y la secuencia de `useResource` deja ganar a la lectura más nueva. El último aviso no se pierde.
+- Hallazgos críticos y altos: ninguno.
+- Hallazgos medios:
+  - MEDIO-1 (regresión en POSIX, `apps/web/scripts/build-keeping-tracked-files.mjs:19`, `detached: posix`). Playwright detiene un `webServer` en Linux/macOS con `process.kill(-pid, 'SIGKILL')` sobre el grupo del shell (`coreBundle.js:9409`). Con `detached: true` el `npm run build`/`next build` queda en otro grupo y sobrevive como huérfano: sigue compilando y escribiendo `.next-flag-off`, reescribe `tsconfig.json` y `next-env.d.ts` después de cualquier recuperación y puede chocar con el build de la corrida siguiente. Antes del cambio el SIGKILL al grupo lo mataba. Revisado por lectura de código; no hay POSIX en esta máquina. Corrección: no separar el grupo (quitar `detached`) y reenviar la señal con `child.kill(signal)` (Ctrl+C ya llega a todo el grupo de la terminal), o, si se conserva `detached`, matar también el grupo del hijo desde un vigía que detecte la muerte del padre.
+- Hallazgos bajos:
+  - BAJO-1 (la red de seguridad no cubre el caso que motivó el cambio). `e2e/global-teardown.mjs` no corre cuando falla el arranque de un `webServer`, que es justo el caso del cierre forzado a mitad del build por vencimiento del `timeout`. Reproducido en la copia con un `webServer` de `timeout: 6000` y un teardown que imprimía una marca: `Error: Timed out waiting 6000ms from config.webServer.`, sin marca del teardown, y `tsconfig.json`/`next-env.d.ts` quedaron modificados (`A5627267…/9BA30857…`) con la copia en disco y el dueño muerto. Solo se recuperan en la siguiente corrida del script o a mano. La entrada `058` y el README decían que el teardown los restauraba. Corrección sugerida: ejecutar Playwright desde un envoltorio (`npm run test`) que siempre llame a `forceRestore()` al salir, o restaurar también al cargar `playwright.config.ts`. El auditor corrigió el README para describir el comportamiento real.
+  - BAJO-2 (prueba que no detecta la ausencia del arreglo). `e2e/overview-live-refresh.spec.ts` (segundo caso) empuja un solo aviso y exige una sola recarga, lo que también cumple el código anterior. Con `overview-view.tsx` en su versión `HEAD` (sin agrupador), en la copia: `4 passed (26.4s)`. Solo el caso unitario del agrupador cubre la agrupación. Sugerencia: empujar una ráfaga (p. ej. 5 avisos seguidos) y exigir una recarga con el texto actualizado.
+  - BAJO-3 (carrera teórica de `release`/`acquire`, `tracked-files-guard.mjs:96-108,113-118`). Si un dueño sale y ve cero dueños vivos justo cuando otro proceso pasa el `EEXIST` y se registra, `forceRestore` borra la copia y el registro del recién llegado. Su build reescribe los archivos y al salir ya no hay copia que restaurar. No ocurre con Playwright, que arranca los `webServer` uno tras otro. Sugerencia: un candado (archivo de bloqueo) alrededor de la comprobación de dueños y del borrado.
+  - Observación: el guardián deja una carpeta vacía `apps/web/node_modules/.cache` (ignorada por git); es inocua.
+- Documentación: el auditor corrigió `apps/web/e2e/README.md` (punto 11): el teardown no corre si falla el arranque de los servidores, y se indica cuándo usar la restauración manual. `docs/guides` y `docs/product` no describen este mecanismo de pruebas.
+- Validaciones:
+  - `npx tsc --noEmit` (`apps/web`): código 0.
+  - `npx playwright test` (`apps/web`, árbol real): `1 skipped`, `199 passed (4.6m)`, `PW_EXIT=0`. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes `861FF5B0…`/`B8B3A344…` iguales a los del inicio y sin copia en disco.
+  - En una copia aislada de `apps/web` (fuera del repo, borrada al terminar; no se usó `NEXT_DIST_DIR` fuera de la copia): build fallido (`BUILD_EXIT=1`, restaurado), dos builds a la vez (restaurado, la copia siempre la original), dos vencimientos de `timeout` del `webServer` (teardown no ejecutado; archivos modificados), recuperación manual (`Se restauraron tsconfig.json y next-env.d.ts desde la copia de un build interrumpido.`) y recuperación en la siguiente corrida (`EXIT=0`, hashes originales), y la prueba del Resumen sin el agrupador (`4 passed`).
+  - NO_EJECUTADA: camino POSIX (ver MEDIO-1) y SIGINT/SIGTERM reales en Windows.
+- Riesgos residuales: los PID reutilizados retrasan la restauración hasta el teardown de una corrida completa. El Resumen tarda hasta 1 s (5 s en ráfagas) en reflejar un aviso.
+- Decisión: `REQUIERE_CAMBIOS`. Un build fallido conserva su código de salida y el último aviso no se pierde. Hay que atender MEDIO-1 (la separación de grupo en POSIX deja builds huérfanos) y BAJO-1: el caso que motivó la corrección (cierre por `timeout` del `webServer`) sigue dejando los archivos modificados hasta otra corrida.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 y BAJO-1 (y, si quiere, BAJO-2 y BAJO-3); `auditor-opus` reaudita.
+
 ### CN-20261110-058 — Corrección del BAJO-1 nuevo de `CN-20261110-056` (restauración tras cierre forzado) y agrupación de avisos del Resumen
 
 - Fecha: 2026-11-10 (America/Lima)

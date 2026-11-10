@@ -29,12 +29,21 @@ class _OnboardingPageState extends State<OnboardingPage> {
       'Perfiles y datos claros',
       'Solo perfiles validados acceden a oportunidades confiables.',
     ),
-    (
-      Icons.insights_outlined,
-      'Índice Chambeaya',
-      'La puntualidad, asistencia y desempeño construyen tu reputación.',
-    ),
   ];
+
+  // Paso 2: con turnos, el índice de reputación; con puestos fijos (bandera
+  // apagada) no hay índice, así que solo se habla del perfil.
+  static const _shiftReputationStep = (
+    Icons.insights_outlined,
+    'Índice Chambeaya',
+    'La puntualidad, asistencia y desempeño construyen tu reputación.',
+  );
+
+  static const _fixedProfileStep = (
+    Icons.badge_outlined,
+    'Tu perfil cuenta',
+    'Un perfil completo ayuda a las empresas a conocerte cuando revisan tu postulación.',
+  );
 
   static const _shiftSteps = [
     (
@@ -64,6 +73,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
 
   List<(IconData, String, String)> get steps => [
     ..._commonSteps,
+    widget.temporaryShiftsEnabled ? _shiftReputationStep : _fixedProfileStep,
     ...(widget.temporaryShiftsEnabled ? _shiftSteps : _fixedJobSteps),
   ];
 

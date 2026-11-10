@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import 'features/auth/auth_page.dart';
 import 'features/auth/auth_repository.dart';
@@ -28,7 +29,12 @@ class ChambeayaApp extends StatefulWidget {
     this.authRepository,
     this.demoModeOverride,
     this.themeModeController,
+    this.jobsHttpClient,
   });
+
+  /// Test-only: cliente HTTP de los servicios de puestos y moneda (con la API
+  /// real). Si se da, la app lo usa en vez de crear el suyo (y no lo cierra).
+  final http.Client? jobsHttpClient;
 
   final AuthSessionStore? sessionStore;
   final AuthRepository? authRepository;
@@ -110,6 +116,7 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     _jobsServices = _usesLiveApi
         ? JobsServices.http(
             token: sessionToken,
+            httpClient: widget.jobsHttpClient,
             onSessionExpired: () => _onSessionExpired(sessionToken),
           )
         : JobsServices.demo();
@@ -180,7 +187,7 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
   void _onSessionExpired(String? token) {
     if (!mounted || token == null || _session?.token != token || _expiring) return;
     _expiring = true;
-    _logout(remote: false).whenComplete(() {
+    _logout(remote: false, keepAudience: true).whenComplete(() {
       _expiring = false;
       _messengerKey.currentState?.showSnackBar(
         const SnackBar(content: Text('Tu sesión venció. Vuelve a ingresar.')),
@@ -188,7 +195,7 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     });
   }
 
-  Future<void> _logout({bool remote = true}) async {
+  Future<void> _logout({bool remote = true, bool keepAudience = false}) async {
     final token = _session?.token;
     if (remote && _usesLiveApi && token != null) {
       try {
@@ -204,7 +211,8 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     _workerDependenciesKey = null;
     setState(() {
       _session = null;
-      _audience = null;
+      // Al vencer la sesión se vuelve directo al login de la misma audiencia.
+      if (!keepAudience) _audience = null;
     });
     // Se libera (saldo compartido y cliente HTTP) cuando el panel ya salió del
     // árbol, para que ninguna pantalla use un controlador desechado.

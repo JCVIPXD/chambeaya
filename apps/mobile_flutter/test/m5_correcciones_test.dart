@@ -658,7 +658,9 @@ void main() {
   });
 
   group('BAJO-3: un 401 en una ruta normal cierra la sesión local', () {
-    testWidgets('ApiClient avisa al recibir 401 (también por SSE) y no en otros errores', (tester) async {
+    // Solo cubre las rutas REST (`getJson`/`getBytes`); el 401 del SSE y el
+    // camino completo hasta el login están en `m5_bajos_test.dart`.
+    testWidgets('ApiClient avisa al recibir 401 en rutas REST y no en otros errores', (tester) async {
       var expired = 0;
       final mock = MockClient((request) async {
         if (request.url.path.endsWith('/boom')) return http.Response('{"error":"X"}', 500);

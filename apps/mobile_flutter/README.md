@@ -69,11 +69,12 @@ solo se pide confirmar si el costo es mayor que 0, si la cotización falla nunca
 ejecuta una acción que siempre cobra sin haber mostrado el costo (`CostRequest.alwaysCharges`;
 la prioridad al postular se descarta con `priority: false`), las pantallas hijas se
 abren con `pushThemed` para conservar el tema oscuro del panel, un `401` llama a
-`ApiClient.onUnauthorized` (cierra la sesión local), el nombre de la moneda sale
+`ApiClient.onUnauthorized` (cierra la sesión local y vuelve directo al login), los avisos
+en vivo son un único flujo compartido (`SharedJobEventsSource` en `JobsServices.events`), el nombre de la moneda sale
 siempre de la respuesta de la API y ningún código de error (`INSUFFICIENT_CURRENCY`,
 `DAILY_SPEND_CAP_REACHED`, `SERIALIZATION_RETRY_EXHAUSTED`) se muestra crudo. Las
 pruebas están en `test/jobs_api_contract_test.dart`, `test/jobs_screens_test.dart`,
-`test/wallet_page_test.dart` y `test/m5_correcciones_test.dart`; `test/support/jobs_fixtures.dart` trae las formas
+`test/wallet_page_test.dart`, `test/m5_correcciones_test.dart` y `test/m5_bajos_test.dart`; `test/support/jobs_fixtures.dart` trae las formas
 JSON de la API. La guía para recorrerlo con datos reales está en
 [`docs/guides/local-development.md`](../../docs/guides/local-development.md).
 

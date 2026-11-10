@@ -235,7 +235,9 @@ Decisiones: la app no consulta ni muestra pantallas ni textos del flujo de turno
 bienvenida y el panel lateral del login hablan de puestos fijos formales; con la bandera encendida conservan los textos
 de turnos); el detalle del puesto, «Mi postulación» y la billetera abierta desde un costo se abren con el tema del panel
 (claro u oscuro) y conservan el botón «atrás»; un `401` de las rutas de puestos, moneda, referido, destacar perfil o avisos en vivo
-cierra la sesión local (sin llamar a la API) y vuelve a la bienvenida con el aviso «Tu sesión venció»; las pantallas largas se adaptan a texto grande y pantallas angostas (320 px). Quedan fuera: chat de la postulación, panel web del
+cierra la sesión local (sin llamar a la API) y vuelve directo al login del trabajador (no a la bienvenida) con el aviso «Tu sesión venció» (esto vale durante el uso; si la
+sesión guardada ya venció al abrir la app, o si restaurarla falla por red, hoy se borra y se vuelve a la bienvenida sin
+aviso: pendiente, ver `CN-20261110-062`); los avisos en vivo usan una sola conexión SSE por sesión, compartida por Puestos y Postulaciones; si falla solo la cotización de la prioridad al postular, «Continuar sin prioridad» vuelve a cotizar lo que queda y muestra su costo antes de enviar; Enter en la contraseña envía el login (en el registro, en el último campo); el paso 2 de la bienvenida con la bandera apagada habla del perfil, no del índice de reputación; las pantallas largas se adaptan a texto grande y pantallas angostas (320 px). Quedan fuera: chat de la postulación, panel web del
 trabajador, compra de monedas (M7) y la firma digital del contrato.
 
 ## Puesto fijo y proceso de contrato

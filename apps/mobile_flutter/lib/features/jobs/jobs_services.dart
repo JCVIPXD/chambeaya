@@ -1,3 +1,5 @@
+import 'package:http/http.dart' as http;
+
 import '../wallet/wallet_controller.dart';
 import '../wallet/wallet_repository.dart';
 import 'api_client.dart';
@@ -9,13 +11,15 @@ import 'jobs_repository.dart';
 /// los repositorios (reales o simulados), el saldo compartido y el flujo de
 /// avisos en vivo. Se arma una vez por sesión en `main.dart`.
 class JobsServices {
-  const JobsServices({
+  /// [events] se envuelve en un único flujo compartido (broadcast): todas las
+  /// pantallas escuchan la misma conexión de avisos.
+  JobsServices({
     required this.jobs,
     required this.wallet,
     required this.walletController,
-    required this.events,
+    required JobEventsSource events,
     this.onClose,
-  });
+  }) : events = SharedJobEventsSource(events);
 
   /// Servicios reales contra la API con el token de la sesión. El cliente se
   /// puede inyectar (pruebas con `MockClient`); si no, los servicios crean
@@ -24,16 +28,23 @@ class JobsServices {
   factory JobsServices.http({
     required String? token,
     ApiClient? api,
+    http.Client? httpClient,
     void Function()? onSessionExpired,
   }) {
-    final client = api ?? ApiClient(token: token, onUnauthorized: onSessionExpired);
+    final client =
+        api ??
+        ApiClient(
+          client: httpClient,
+          token: token,
+          onUnauthorized: onSessionExpired,
+        );
     final wallet = HttpWalletRepository(api: client);
     return JobsServices(
       jobs: HttpJobsRepository(api: client),
       wallet: wallet,
       walletController: WalletController(wallet),
       events: HttpJobEventsSource(api: client),
-      onClose: api == null ? client.close : null,
+      onClose: api == null && httpClient == null ? client.close : null,
     );
   }
 
@@ -51,7 +62,7 @@ class JobsServices {
   final JobsRepository jobs;
   final WalletRepository wallet;
   final WalletController walletController;
-  final JobEventsSource events;
+  final SharedJobEventsSource events;
 
   /// Cierra el cliente HTTP propio de estos servicios (si lo hay).
   final void Function()? onClose;
@@ -59,6 +70,7 @@ class JobsServices {
   /// Libera lo que la sesión mantiene vivo: el saldo compartido y el cliente
   /// HTTP (uno por inicio de sesión).
   void dispose() {
+    events.close();
     walletController.dispose();
     onClose?.call();
   }

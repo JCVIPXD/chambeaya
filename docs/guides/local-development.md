@@ -314,6 +314,7 @@ Pruebas del módulo (desde `apps/mobile_flutter`, con Flutter 3.44.0):
 contra la forma real de la API), `test/jobs_screens_test.dart` (puestos,
 postular con costo previo, postulaciones, ofertas y PDF) y
 `test/wallet_page_test.dart` (saldo, costos, premios, referido y movimientos) y
+`test/m5_bajos_test.dart` (cotización parcial, `401` hasta el login, flujo SSE compartido, paso 2 de la bienvenida y Enter en el login) y
 `test/m5_correcciones_test.dart` (cotización fallida sin cobros ocultos, descarga del PDF en web, refresco de la
 lista de puestos, tema oscuro en las pantallas hijas, textos sin turnos con la bandera apagada, límites de la búsqueda,
 `401` y cierre del cliente HTTP). Con la bandera apagada la bienvenida y el login hablan de puestos fijos formales; para

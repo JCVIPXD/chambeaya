@@ -121,10 +121,14 @@ Future<CostResult> confirmCosts(
           // Defensa: aunque el diálogo no ofrece «Continuar» cuando la acción
           // siempre cobra, nunca se ejecuta sin mostrar el costo.
           if (mustSeeCost) return const CostResult(proceed: false);
-          return CostResult(
-            proceed: true,
-            droppedOptional: dropped || hasOptional,
-          );
+          if (hasOptional) {
+            // Se descarta lo opcional y se vuelve a cotizar lo que queda: si
+            // tiene costo (cuota agotada) se muestra antes de enviar.
+            active = active.where((request) => !request.optional).toList();
+            dropped = true;
+            continue;
+          }
+          return CostResult(proceed: true, droppedOptional: dropped);
         case _UnknownCostChoice.cancel || null:
           return const CostResult(proceed: false);
       }
