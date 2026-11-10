@@ -78,6 +78,8 @@ class WorkerShell extends StatefulWidget {
 class _WorkerShellState extends State<WorkerShell> {
   late int selected = widget.initialIndex;
   var _applicationRevision = 0;
+  // Sube cada vez que se vuelve a la pestaña Puestos: recarga en silencio.
+  var _postingsRevision = 0;
   var _contentVisible = true;
   late final JobsServices _jobs;
   late final bool _ownsJobs;
@@ -108,6 +110,7 @@ class _WorkerShellState extends State<WorkerShell> {
       setState(() {
         selected = value;
         if (value == 1) _applicationRevision++;
+        if (value == 0 && !_shifts) _postingsRevision++;
         _contentVisible = true;
       });
     }
@@ -181,6 +184,7 @@ class _WorkerShellState extends State<WorkerShell> {
         : [
             JobPostingsPage(
               services: _jobs,
+              revision: _applicationRevision + _postingsRevision,
               onApplicationChanged: () => setState(() => _applicationRevision++),
             ),
             MyApplicationsPage(

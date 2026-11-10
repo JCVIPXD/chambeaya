@@ -66,6 +66,7 @@ class HttpJobEventsSource implements JobEventsSource {
           final response = await api.client.send(request);
           if (cancelled) break;
           if (response.statusCode == 401) {
+            api.onUnauthorized?.call();
             if (!controller.isClosed) {
               controller.addError(const ApiException(401, 'INVALID_SESSION'));
             }

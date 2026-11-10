@@ -189,14 +189,54 @@ el flujo de turnos sigue igual debajo de las vistas nuevas):
   versiones, constancia de aceptación (el DNI solo aparece ahí), contratación y avisos en vivo.
 - **Talento:** buscar, invitar y desbloquear contacto y CV.
 - **Billetera:** saldo, movimientos, catálogo, cuota gratuita, tope diario y premios.
-- **Resumen y Perfil de empresa.**
+- **Resumen y Perfil de empresa.** Con la bandera apagada no hay campana de notificaciones ni se muestra el plan (la
+  Membresía está oculta); los totales del Resumen y el selector de Postulantes recorren todas las páginas de puestos (tope de
+  2000 puestos, con aviso si se alcanza).
 - Antes de toda acción con costo se muestra el costo previo; solo se pide confirmar cuando de verdad se cobra, y una
   acción gratuita nunca se bloquea por falta de saldo. Los errores de saldo, tope diario y contención (`503`) tienen
-  mensaje claro y un camino siguiente.
+  mensaje claro y un camino siguiente. La cuota gratuita solo se muestra para acciones que la tienen (límite mayor que
+  0), y una acción bloqueada por otra causa distinta del saldo y del tope diario lo dice sin culpar al tope.
 
 Decisiones: solo se confirma cuando el costo es mayor que cero; el nombre de la moneda lo da la API; el panel es solo en tema
 claro (no hay tema oscuro en el panel actual). Quedan fuera: panel web del trabajador, Flutter, chat de la postulación, panel
 del admin para el historial de verificaciones y la compra de monedas (M7).
+
+## Qué cubre M5 en Flutter (app del trabajador)
+
+La app Flutter del trabajador consume las rutas `/api/workers/job-postings`, `/api/workers/job-applications`,
+`/api/workers/currency/*`, `/api/workers/me/referral`, `/api/workers/me/profile/highlight` y el flujo SSE
+`/api/job-events`. Con la bandera de turnos apagada (por defecto) la app es solo de puestos fijos y moneda:
+
+- **Puestos:** búsqueda por texto, filtros (modalidad, jornada, contrato, sueldo mínimo, ubicación), destacados primero,
+  paginación por cursor y detalle con condiciones y preguntas de la empresa. Los campos respetan los límites de la API
+  (texto y ubicación de 100 caracteres como máximo; sueldo mínimo hasta S/ 100 000). La lista recarga en silencio (sin
+  indicador de carga) ante un aviso en vivo o al volver a la pestaña, para que «Postulaste: …» no quede viejo.
+- **Postular:** respuestas a las preguntas, prioridad opcional y costo previo (`quote`). Solo se pide confirmar si el
+  total es mayor que 0; una postulación gratuita nunca se bloquea por saldo ni por un fallo de la cotización. Si no
+  alcanza el saldo o el tope diario se explica sin cobrar y se puede continuar sin la prioridad o ir a la billetera.
+  Si la cotización falla nunca se cobra algo que no se mostró: al postular con prioridad solo se ofrece «Continuar sin
+  prioridad» (se envía `priority: false`) o Reintentar/Cancelar, y dar prioridad a una postulación ya enviada o destacar
+  el perfil (acciones que siempre cuestan) solo ofrecen Reintentar o Cancelar. La cuota gratuita no se muestra cuando su
+  límite mensual es 0.
+- **Postulaciones:** etapas, historial, avisos en vivo, oferta con versiones y PDF (se valida que sea PDF y se guarda
+  con el cuadro «Guardar como» del sistema en Android, iOS y escritorio; en web es una descarga directa del navegador y la
+  app avisa «Descarga iniciada», porque ahí el selector de archivos no informa si se guardó), aceptar o rechazar con confirmación, constancia, retirarse, dar
+  prioridad y volver a postular. El cierre automático del puesto (`POSTING_CLOSED`/`POSTING_FILLED`) se explica en la
+  lista, el detalle y la línea de tiempo (la API no entrega al trabajador el motivo de un rechazo).
+- **Billetera:** saldo, cuánto cuesta cada acción, cuota gratuita, tope diario, destacar el perfil, premios y topes,
+  código de referido y movimientos paginados.
+- **Invitaciones y registro:** el premio por responder una invitación a tiempo se muestra con el monto de la API, y el
+  registro admite un código de referido opcional.
+- **Errores:** `409 INSUFFICIENT_CURRENCY`, `409 DAILY_SPEND_CAP_REACHED` y `503` con cuenta regresiva de
+  `Retry-After` tienen un mensaje claro y un camino siguiente; nunca se muestra un código crudo. El nombre de la
+  moneda se lee de la respuesta de saldo (mientras no carga se usa «monedas», nunca un nombre fijo).
+
+Decisiones: la app no consulta ni muestra pantallas ni textos del flujo de turnos mientras la bandera esté apagada (la
+bienvenida y el panel lateral del login hablan de puestos fijos formales; con la bandera encendida conservan los textos
+de turnos); el detalle del puesto, «Mi postulación» y la billetera abierta desde un costo se abren con el tema del panel
+(claro u oscuro) y conservan el botón «atrás»; un `401` de las rutas de puestos, moneda, referido, destacar perfil o avisos en vivo
+cierra la sesión local (sin llamar a la API) y vuelve a la bienvenida con el aviso «Tu sesión venció»; las pantallas largas se adaptan a texto grande y pantallas angostas (320 px). Quedan fuera: chat de la postulación, panel web del
+trabajador, compra de monedas (M7) y la firma digital del contrato.
 
 ## Puesto fijo y proceso de contrato
 

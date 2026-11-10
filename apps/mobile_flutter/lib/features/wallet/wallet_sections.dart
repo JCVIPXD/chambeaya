@@ -88,6 +88,7 @@ class _CostsCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Expanded(
+                          flex: 2,
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -114,9 +115,14 @@ class _CostsCard extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 12),
-                        Text(
-                          formatCoins(item.amount, currency),
-                          style: TextStyle(color: palette.ink, fontWeight: FontWeight.w900),
+                        // Flexible: con texto grande el monto pasa a dos líneas
+                        // en lugar de desbordar la fila.
+                        Flexible(
+                          child: Text(
+                            formatCoins(item.amount, currency),
+                            textAlign: TextAlign.end,
+                            style: TextStyle(color: palette.ink, fontWeight: FontWeight.w900),
+                          ),
                         ),
                       ],
                     ),
@@ -236,6 +242,7 @@ class _HighlightProfileCardState extends State<HighlightProfileCard> {
             actionKey: ActionKeys.profileHighlight,
             label: 'Destacar el perfil',
             targetId: _profile?.id,
+            alwaysCharges: true,
           ),
         ],
         onCurrency: services.walletController.adoptCurrencyName,
@@ -443,6 +450,7 @@ class _RewardRow extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             Expanded(
+              flex: 3,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -456,16 +464,25 @@ class _RewardRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text('+$reward', style: TextStyle(color: palette.ink, fontWeight: FontWeight.w900)),
-                const SizedBox(height: 4),
-                StatusPill(
-                  label: statusText,
-                  color: item.earned ? AppColors.teal : AppColors.navy,
-                ),
-              ],
+            // Flexible: con texto grande o pantalla angosta el monto y la
+            // etiqueta se ajustan en lugar de desbordar la fila.
+            Flexible(
+              flex: 2,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    '+$reward',
+                    textAlign: TextAlign.end,
+                    style: TextStyle(color: palette.ink, fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 4),
+                  StatusPill(
+                    label: statusText,
+                    color: item.earned ? AppColors.teal : AppColors.navy,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -783,6 +800,7 @@ class _MovementTile extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             Expanded(
+              flex: 3,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -797,15 +815,24 @@ class _MovementTile extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(amount, style: TextStyle(color: palette.ink, fontWeight: FontWeight.w900)),
-                Text(
-                  'Saldo: ${formatCoins(movement.balanceAfter, currency)}',
-                  style: TextStyle(color: palette.muted, fontSize: 12),
-                ),
-              ],
+            // Flexible: con texto grande el monto y el saldo se ajustan.
+            Flexible(
+              flex: 2,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    amount,
+                    textAlign: TextAlign.end,
+                    style: TextStyle(color: palette.ink, fontWeight: FontWeight.w900),
+                  ),
+                  Text(
+                    'Saldo: ${formatCoins(movement.balanceAfter, currency)}',
+                    textAlign: TextAlign.end,
+                    style: TextStyle(color: palette.muted, fontSize: 12),
+                  ),
+                ],
+              ),
             ),
           ],
         ),

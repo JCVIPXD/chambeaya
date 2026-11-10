@@ -95,6 +95,7 @@ class _ApplySheetState extends State<ApplySheet> {
                 actionKey: ActionKeys.applicationPriority,
                 label: 'Prioridad',
                 optional: true,
+                alwaysCharges: true,
               ),
           ],
           onOpenWallet: () => openWalletPage(context, widget.services),
@@ -148,9 +149,17 @@ class _ApplySheetState extends State<ApplySheet> {
 
   void _fail(Object error) {
     if (!mounted) return;
+    final info = describeJobsError(error, currency: _currency);
     setState(() {
       _submitting = false;
-      _error = describeJobsError(error, currency: _currency);
+      _error = info;
+      // Tras cualquier error que no sea reintentable tal cual (saldo o tope
+      // insuficientes, un 400, un 409 de estado...) lo que el usuario aceptó
+      // deja de ser confiable: se vuelve a cotizar al reenviar para que el
+      // costo mostrado sea el vigente y pueda continuar sin la prioridad (o
+      // ver su billetera). Un 503 o un corte de red no aplicaron nada: ese
+      // reintento conserva lo aceptado y no vuelve a preguntar.
+      if (!info.canRetry) _acceptedPriority = null;
     });
   }
 

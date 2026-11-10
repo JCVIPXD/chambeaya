@@ -51,9 +51,19 @@ class StageProgress extends StatelessWidget {
 
 /// Línea de tiempo de una postulación, del evento más reciente al más antiguo.
 class EventTimeline extends StatelessWidget {
-  const EventTimeline({super.key, required this.events});
+  const EventTimeline({
+    super.key,
+    required this.events,
+    this.autoClosedReason,
+  });
 
   final List<JobEvent> events;
+
+  /// `POSTING_CLOSED` o `POSTING_FILLED` si el sistema resolvió la postulación.
+  /// La API no entrega al trabajador el `detail` de un rechazo (es una nota
+  /// interna de la empresa), así que el motivo del cierre automático sale de
+  /// la propia postulación y se aplica al último evento de rechazo.
+  final String? autoClosedReason;
 
   @override
   Widget build(BuildContext context) {
@@ -63,12 +73,19 @@ class EventTimeline extends StatelessWidget {
     if (ordered.isEmpty) {
       return Text('Todavía no hay movimientos.', style: TextStyle(color: palette.muted));
     }
+    final closedIndex = autoClosedReason == null
+        ? -1
+        : ordered.indexWhere((event) => event.type == 'REJECTED');
+    String label(int index) => eventLabel(
+      ordered[index],
+      autoClosedReason: index == closedIndex ? autoClosedReason : null,
+    );
     return Column(
       children: [
         for (var i = 0; i < ordered.length; i++)
           Semantics(
             container: true,
-            label: '${eventLabel(ordered[i])}, ${formatDateTime(ordered[i].createdAt)}',
+            label: '${label(i)}, ${formatDateTime(ordered[i].createdAt)}',
             excludeSemantics: true,
             child: IntrinsicHeight(
               child: Row(
@@ -101,7 +118,7 @@ class EventTimeline extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            eventLabel(ordered[i]),
+                            label(i),
                             style: TextStyle(
                               color: palette.ink,
                               fontWeight: i == 0 ? FontWeight.w800 : FontWeight.w600,
@@ -156,13 +173,16 @@ class OfferCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          // `Wrap` y no `Row`: «Pendiente de tu respuesta» no cabe junto al
+          // título en una pantalla angosta o con texto grande.
+          Wrap(
+            spacing: 10,
+            runSpacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              Expanded(
-                child: Text(
-                  'Oferta versión ${offer.version}',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
+              Text(
+                'Oferta versión ${offer.version}',
+                style: Theme.of(context).textTheme.titleMedium,
               ),
               StatusPill(
                 label: offerStatusLabel(offer.status),

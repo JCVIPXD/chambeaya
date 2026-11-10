@@ -717,16 +717,28 @@ class JobSearchFilter {
     location: location ?? this.location,
   );
 
-  /// Parámetros de consulta de la API (solo los que tienen valor).
+  /// Parámetros de consulta de la API (solo los que tienen valor). Los topes
+  /// son los de la API (searchQuerySchema): más allá devolvería 400.
   Map<String, String> toQuery() => {
-    if (query.trim().isNotEmpty) 'query': query.trim(),
+    if (query.trim().isNotEmpty) 'query': _clamp(query.trim()),
     if (modality != null) 'modality': modality!.apiValue,
     if (workload != null) 'workload': workload!.apiValue,
     if (contractType != null) 'contractType': contractType!.apiValue,
-    if (minSalarySoles != null) 'minSalaryCents': '${minSalarySoles! * 100}',
-    if (location.trim().isNotEmpty) 'location': location.trim(),
+    if (minSalarySoles != null)
+      'minSalaryCents':
+          '${(minSalarySoles! > maxMinSalarySoles ? maxMinSalarySoles : minSalarySoles!) * 100}',
+    if (location.trim().isNotEmpty) 'location': _clamp(location.trim()),
   };
+
+  static String _clamp(String value) =>
+      value.length > maxSearchTextLength ? value.substring(0, maxSearchTextLength) : value;
 }
+
+/// Largo máximo del texto y de la ubicación de la búsqueda (límite de la API).
+const maxSearchTextLength = 100;
+
+/// Sueldo mínimo máximo aceptado por la API: S/ 100 000 (10 000 000 céntimos).
+const maxMinSalarySoles = 100000;
 
 /// Aviso en vivo (`event: job`) del flujo SSE `GET /api/job-events`.
 class JobEventNotification {

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/navigation/themed_route.dart';
 import '../../theme/app_theme.dart';
 import '../jobs/jobs_format.dart';
 import '../jobs/jobs_services.dart';
@@ -12,13 +13,12 @@ Future<void> openWalletPage(
   BuildContext context,
   JobsServices services, {
   TalentProfileRepository? profileRepository,
-}) => Navigator.of(context).push<void>(
-  MaterialPageRoute(
-    builder: (_) => WalletPage(
-      services: services,
-      profileRepository: profileRepository,
-      showBack: true,
-    ),
+}) => pushThemed<void>(
+  context,
+  (_) => WalletPage(
+    services: services,
+    profileRepository: profileRepository,
+    showBack: true,
   ),
 );
 
@@ -190,12 +190,19 @@ class _BalanceCard extends StatelessWidget {
                       style: const TextStyle(color: Colors.white),
                     )
                   else
-                    Text(
-                      formatCoins(balance, controller.currencyName),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w900,
+                    // Una sola línea que se reduce si hace falta: con texto
+                    // grande la tarjeta no debe comerse la pantalla.
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        formatCoins(balance, controller.currencyName),
+                        maxLines: 1,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.w900,
+                        ),
                       ),
                     ),
                 ],

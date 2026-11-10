@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/config/temporary_shifts.dart' as feature_flags;
 import '../../theme/app_theme.dart';
 import '../onboarding/onboarding_page.dart';
 import 'auth_repository.dart';
@@ -14,7 +15,12 @@ class AuthPage extends StatefulWidget {
     this.repository,
     this.onAuthenticated,
     this.initialGooglePasswordSetupSession,
+    this.temporaryShiftsEnabled = feature_flags.temporaryShiftsEnabled,
   });
+
+  /// Con `false` (valor por defecto) los textos hablan de puestos fijos
+  /// formales; con `true` conservan los de turnos.
+  final bool temporaryShiftsEnabled;
   final AppAudience role;
   final bool demoMode;
   final AuthRepository? repository;
@@ -299,16 +305,24 @@ class _AuthPageState extends State<AuthPage> {
   }
 
   Widget _buildIntro(BuildContext context, {required bool compact}) {
+    final shifts = widget.temporaryShiftsEnabled;
     final title = widget.role == AppAudience.worker
-        ? 'Tu próximo turno empieza aquí'
+        ? (shifts ? 'Tu próximo turno empieza aquí' : 'Tu próximo empleo empieza aquí')
         : 'Organiza tu equipo con claridad';
     final description = widget.role == AppAudience.worker
-        ? 'Encuentra oportunidades confiables, postúlate en pocos pasos y lleva el control de cada turno.'
-        : 'Publica turnos, revisa postulaciones y confirma a la persona indicada desde un solo lugar.';
+        ? (shifts
+              ? 'Encuentra oportunidades confiables, postúlate en pocos pasos y lleva el control de cada turno.'
+              : 'Encuentra puestos fijos formales, postúlate en pocos pasos y sigue cada etapa de tu proceso.')
+        : (shifts
+              ? 'Publica turnos, revisa postulaciones y confirma a la persona indicada desde un solo lugar.'
+              : 'Publica puestos, revisa postulaciones y elige a la persona indicada desde un solo lugar.');
 
     final benefits = widget.role == AppAudience.worker
-        ? const [
-            (Icons.search_rounded, 'Turnos cerca de ti'),
+        ? [
+            (
+              Icons.search_rounded,
+              shifts ? 'Turnos cerca de ti' : 'Puestos fijos formales',
+            ),
             (Icons.bolt_rounded, 'Postulación rápida'),
             (Icons.timeline_rounded, 'Estados fáciles de seguir'),
           ]
@@ -400,7 +414,9 @@ class _AuthPageState extends State<AuthPage> {
               Expanded(
                 child: Text(
                   widget.role == AppAudience.worker
-                      ? 'Busca → postúlate → confirma'
+                      ? (widget.temporaryShiftsEnabled
+                            ? 'Busca → postúlate → confirma'
+                            : 'Busca → postúlate → recibe tu oferta')
                       : 'Publica → elige → confirma',
                   style: const TextStyle(
                     color: Colors.white,
@@ -808,7 +824,9 @@ class _AuthPageState extends State<AuthPage> {
               children: [
                 TextSpan(
                   text: widget.role == AppAudience.worker
-                      ? 'busca · postúlate · confirma'
+                      ? (widget.temporaryShiftsEnabled
+                            ? 'busca · postúlate · confirma'
+                            : 'busca · postúlate · recibe tu oferta')
                       : 'publica · elige · confirma',
                   style: const TextStyle(
                     color: AppColors.muted,

@@ -238,7 +238,10 @@ npm run demo:seed --workspace=@chambeaya/api
 
 Con la bandera de turnos apagada (lo normal), el panel web de la empresa (`http://127.0.0.1:3000`) ofrece:
 **Resumen, Puestos, Postulantes, Talento, Billetera y Perfil de empresa**. No muestra ni consulta nada del flujo de
-turnos. Con `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` (se fija al compilar) vuelven Turnos, Trabajadores,
+turnos: tampoco hay campana de notificaciones (los avisos de postulaciones llegan en vivo a **Postulantes**) ni se
+muestra el plan (la Membresía está oculta). El selector de puesto y los totales del Resumen recorren todas las páginas
+de puestos, no solo los 100 más recientes (hasta 20 páginas de 100; con más de 2000 puestos se avisa que los totales
+cuentan solo los más recientes). Con `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` (se fija al compilar) vuelven Turnos, Trabajadores,
 Mensajes, Pagos y Membresía debajo de las vistas nuevas. El nombre de la moneda sale siempre de la API
 (`VIRTUAL_CURRENCY_NAME`); el panel nunca lo fija.
 
@@ -278,6 +281,43 @@ por Flutter en su lugar:
 ```powershell
 npm run dev:mobile -- -Device chrome
 ```
+
+### App del trabajador: puestos fijos y billetera (M5, parte Flutter)
+
+Con los turnos temporales apagados (el valor por defecto: no se pasa
+`--dart-define=TEMPORARY_SHIFTS_ENABLED=true`), la app del trabajador muestra
+cinco pestañas: **Puestos**, **Postulaciones**, **Billetera**, **Perfil** e
+**Invitaciones**. Con la bandera encendida se conservan las cinco pestañas
+heredadas y se añaden **Puestos fijos** y **Billetera** al final.
+
+Para recorrerla con datos reales:
+
+1. Con la API levantada y la demo sembrada, entra a Flutter con
+   `trabajador.demo@chambeaya.local` / `Demo2026!`.
+2. En el panel de la empresa (`empresa.demo@chambeaya.local`) crea y publica un
+   puesto (ver «Panel de empresa de puestos fijos (M5a)»).
+3. En **Puestos** aparece el puesto; postula (las primeras postulaciones del mes
+   son gratis y no piden confirmar; si algo cuesta, se muestra el costo antes de
+   cobrar). Desde el panel avanza la postulación, programa una entrevista y envía
+   una oferta (con PDF si quieres) y mira cómo **Postulaciones** se actualiza en
+   vivo; acepta o rechaza la oferta y descarga el PDF desde el detalle.
+4. En **Billetera** ves el saldo y el nombre de la moneda (los da la API:
+   `VIRTUAL_CURRENCY_NAME`, la app nunca lo fija), cuánto cuesta cada acción, el
+   tope diario, los premios, tu código de referido y los movimientos.
+
+Con `npm run dev:mobile -- -Demo` la app usa un servidor en memoria
+(`DemoJobsBackend`) con tres puestos de ejemplo y las mismas reglas de cuota,
+costo, saldo, tope diario e idempotencia.
+
+Pruebas del módulo (desde `apps/mobile_flutter`, con Flutter 3.44.0):
+`test/jobs_api_contract_test.dart` (rutas, parámetros, errores `409`/`503` y SSE
+contra la forma real de la API), `test/jobs_screens_test.dart` (puestos,
+postular con costo previo, postulaciones, ofertas y PDF) y
+`test/wallet_page_test.dart` (saldo, costos, premios, referido y movimientos) y
+`test/m5_correcciones_test.dart` (cotización fallida sin cobros ocultos, descarga del PDF en web, refresco de la
+lista de puestos, tema oscuro en las pantallas hijas, textos sin turnos con la bandera apagada, límites de la búsqueda,
+`401` y cierre del cliente HTTP). Con la bandera apagada la bienvenida y el login hablan de puestos fijos formales; para
+ver los textos de turnos usa `--dart-define=TEMPORARY_SHIFTS_ENABLED=true`.
 
 ### Variantes por dispositivo
 

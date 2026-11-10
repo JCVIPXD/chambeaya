@@ -54,6 +54,268 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20261110-058 — Corrección del BAJO-1 nuevo de `CN-20261110-056` (restauración tras cierre forzado) y agrupación de avisos del Resumen
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: corrige el BAJO-1 nuevo y el riesgo residual de `CN-20261110-056` (que aprobó `CN-20261110-054`, commit `773aef0`). Rama `moneda-virtual`; árbol sin commit. No incluye los cambios de `apps/mobile_flutter` ni de `docs/` de otra tarea.
+- Alcance: solo `apps/web`. (1) `scripts/build-keeping-tracked-files.mjs` restaura `tsconfig.json` y `next-env.d.ts` aunque el proceso muera por la fuerza (`taskkill /T /F`, SIGKILL) y espera al `exit` del hijo antes de restaurar ante SIGINT/SIGTERM. (2) El Resumen agrupa los avisos SSE en una sola recarga de `listAll`.
+- Archivos:
+  - `apps/web/scripts/tracked-files-guard.mjs` (nuevo)
+  - `apps/web/scripts/build-keeping-tracked-files.mjs`
+  - `apps/web/e2e/global-teardown.mjs` (nuevo)
+  - `apps/web/playwright.config.ts` (`globalTeardown`)
+  - `apps/web/features/jobs/coalesce.ts` (nuevo)
+  - `apps/web/features/jobs/overview-view.tsx`
+  - `apps/web/e2e/overview-live-refresh.spec.ts` (nuevo)
+  - `apps/web/e2e/README.md` (punto 11; se quitó el paso manual de `git checkout`)
+- Decisiones:
+  - Copia en disco en `apps/web/node_modules/.cache/chambeaya-tracked-files` (ignorada por git). La primera copia es la original: un segundo build concurrente (paneles 3100 y 3101) usa esa copia y no los archivos ya reescritos.
+  - Dueños registrados por PID (`owners/<pid>`). El último dueño vivo en salir restaura y borra la copia. Una copia sin dueños vivos se restaura al inicio de la siguiente corrida del script y en el `globalTeardown` (que restaura sin condiciones).
+  - SIGINT/SIGTERM: se detiene el árbol del hijo (`taskkill /T /F` en Windows; grupo de procesos con `detached` en POSIX) y se restaura en su `exit`, con una guarda de 15 s. El código de salida es el del build (130 y 143 en señales).
+  - Resumen: debounce al final de 1 s con tope de espera de 5 s (`createCoalescer`), cancelado al desmontar. La recarga sigue siendo silenciosa y la actualización en vivo se conserva.
+- Validaciones:
+  - `npx tsc --noEmit` (apps/web), antes y después de las pruebas: código 0, sin errores.
+  - Cierre forzado: script con `NEXT_DIST_DIR=.next-flag-off` muerto con `taskkill /pid <p> /T /F` a mitad del build. Salida: `changed after 64 ticks; backup exists: True`, y `git status` mostró `M next-env.d.ts` y `M tsconfig.json`. Con el globalTeardown: `Se restauraron tsconfig.json y next-env.d.ts desde la copia de un build interrumpido.`, `git status` vacío y hashes sha256 iguales a los del inicio (`tsconfig.json` 861ff5b0358034eee94b83b197f965c5a43d9884588a433f27645d167e4c38af, `next-env.d.ts` b8b3a344484b959af5e4e3fc1a1609dac3cb9ece0cdeb6c145be29bc4c491000). Con la siguiente corrida: segunda muerte forzada (de nuevo `M` en ambos), un build normal del script terminó con `exit=0`, `git status` vacío y hashes iguales.
+  - `npx playwright test` (apps/web, puertos 3100/3101): `1 skipped`, `199 passed (4.5m)`, código 0 (incluye las 4 ejecuciones nuevas de `overview-live-refresh.spec.ts`: el coalescer y una sola recarga por aviso con la actualización en vivo visible). Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes iguales a los del inicio y la carpeta de copia ya no existe.
+  - NO_EJECUTADA: build fallido con comprobación del código de salida en vivo (la lógica es la misma de antes, `code ?? 1`); SIGINT/SIGTERM reales y el camino POSIX (`detached` y `kill(-pid)`), no probados; `apps/api` y `npm run test:web:admin-real`, fuera del alcance.
+- Riesgos:
+  - Un PID muerto reutilizado se toma como dueño vivo y la copia queda hasta el teardown (solo retrasa la restauración).
+  - Si el teardown corre con un build a medias, puede restaurar antes de que termine; solo ocurre en un cierre forzado y se recupera en la siguiente corrida.
+  - El Resumen tarda hasta 1 s (5 s en ráfagas continuas) en reflejar un aviso.
+- Siguiente paso: `auditor-opus` audita esta corrección y, si la aprueba, cierra el BAJO-1 nuevo y el riesgo de `listAll` de `CN-20261110-056`.
+
+### CN-20261110-059 — Reauditoría de `CN-20261110-057` (correcciones de M5 Flutter tras `CN-20261110-055`)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: reaudita `CN-20261110-057` (corrección), que corrige los hallazgos de `CN-20261110-055` sobre `CN-20261110-053` y el commit `a829882`. Rama `moneda-virtual`, árbol sin commit sobre `773aef0`. No se auditó ni tocó lo de `apps/web` (`CN-20261110-058`, en curso).
+- Alcance: diff actual sin commit de `apps/mobile_flutter/{lib,test,README.md}` (incluye `core/navigation/themed_route.dart` y `test/m5_correcciones_test.dart`) y secciones Flutter de `docs/product/moneda-virtual.md` y `docs/guides/local-development.md`. Se incorpora el recorrido visual del coordinador sobre `build/web` (API real, 1280x800, sesión limpia).
+- Verificación de los hallazgos de `055`:
+  - MEDIO-1 cerrado. `CostRequest.alwaysCharges` está en los tres puntos que cobran siempre (prioridad al postular, `apply_sheet.dart:98`; dar prioridad, `application_detail_page.dart:232`; destacar perfil, `wallet_sections.dart:245`), y no hay otra llamada a `apply`, `prioritize` ni `highlightProfile` fuera de `confirmCosts`. Si la cotización falla, las acciones que siempre cobran solo ofrecen Reintentar o Cancelar; además, `continueAnyway` las rechaza por defensa (`cost_flow.dart:120-127`). La prioridad opcional se descarta y se envía `priority: false`. Las pruebas comprueban lo enviado (`applyPriorities`) y el saldo. El coordinador lo confirmó con la API real (`isPriority:false`).
+  - MEDIO-2 cerrado: `pdfSaveMessage` con `isWeb` (por defecto `kIsWeb`).
+  - MEDIO-3 cerrado sin bucles: `refreshSilently` no llama a `onApplicationChanged` (no sube la `revision`), junta las peticiones simultáneas (`_silentAgain`), no muestra indicador de carga y conserva la lista si falla. Hay una conexión SSE más por sesión (Puestos y Postulaciones), acotada y cerrada al desmontar. Confirmado en vivo por el coordinador.
+  - MEDIO-4 cerrado: `pushThemed` captura el tema con `InheritedTheme.capture` sin cambiar la pila de navegación. Hay prueba que falla sin el arreglo, y el coordinador lo confirmó en oscuro.
+  - MEDIO-5 cerrado: bienvenida y login condicionados a la bandera, con textos coherentes con puestos fijos (confirmado visualmente).
+  - BAJO-1 a BAJO-6 cerrados. Para BAJO-3: `ApiClient` solo se usa en rutas `WORKER` de puestos, moneda, referido, destacar perfil, PDF y SSE, donde la API responde `401` solo por sesión inválida (`AuthError` en `guarded`/`workerSession`; el rol equivocado da `403`). `_onSessionExpired` ignora clientes de una sesión anterior (compara el token capturado con el de la sesión vigente), no vuelve a entrar mientras cierra (`_expiring`) y no puede competir con un login nuevo, porque el nuevo token es distinto. Los servicios se liberan después del siguiente frame.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos (abiertos, no bloquean):
+  - BAJO-1 (cotización parcial). `cost_flow.dart:100-127`: si falla solo la cotización de la prioridad y la de la postulación sí llegó con costo mayor que 0 (cuota agotada), «Continuar sin prioridad» devuelve `proceed: true` sin mostrar ese costo conocido. Corrección: al descartar lo opcional, volver a cotizar lo que queda (`active = no opcionales; dropped = true; continue`) en vez de devolver.
+  - BAJO-2 (riesgo aceptado, se mantiene). Una postulación normal sigue admitiendo «Continuar» tras una cotización fallida. Con la cuota agotada, el servidor cobra la tarifa de catálogo (5) sin mostrarla. Es el mismo criterio aprobado en la web (M5a) y el diálogo lo advierte.
+  - BAJO-3. Tras un `401`, `_logout` deja `_audience = null` y la app vuelve a la bienvenida (tres pasos), no directamente al login. Corrección sugerida: conservar `_audience` en el cierre por vencimiento. No hay prueba de `ChambeayaApp` para este camino (ni para el token viejo ignorado); la prueba de `m5_correcciones_test.dart:661` dice «también por SSE» pero solo cubre REST.
+  - BAJO-4. Hay dos conexiones SSE permanentes por sesión (Puestos y Postulaciones, también dentro de `JobsHubPage` con la bandera encendida). Sugerencia: un único flujo compartido (broadcast) en `JobsServices`.
+  - BAJO-5 (texto). El paso 2 de la bienvenida, «Índice Chambeaya: La puntualidad, asistencia y desempeño construyen tu reputación» (`onboarding_page.dart`, `_commonSteps`), sigue pensado para turnos y no hay índice de reputación en puestos fijos. Conviene reescribirlo para la bandera apagada.
+  - BAJO-6 (preexistente, recorrido visual). Enter en el campo de contraseña no envía el login (`auth_page.dart`); anterior a `053`.
+- Documentación: el auditor corrigió en `docs/product/moneda-virtual.md` el alcance del `401`: rutas de puestos, moneda, referido, destacar perfil y avisos; cierra la sesión local sin llamar a la API y vuelve a la bienvenida, no al login. También corrigió una coma suelta en `apps/mobile_flutter/README.md`. La sección Flutter de `docs/guides/local-development.md` está al día. CRLF conservado.
+- Archivos revisados: `apps/mobile_flutter/lib/{main.dart,core/navigation/themed_route.dart,features/wallet/{cost_flow,wallet_page,wallet_sections}.dart,features/jobs/{api_client,apply_sheet,application_detail_page,job_detail_page,job_postings_page,job_postings_controller,jobs_models,jobs_services,my_applications_page,pdf_saver,job_events_source,jobs_hub_page}.dart,features/marketplace/worker_shell.dart,features/onboarding/onboarding_page.dart,features/auth/auth_page.dart}`, `apps/mobile_flutter/test/m5_correcciones_test.dart`, `apps/api/src/modules/{jobs/jobs.routes,currency/currency.routes,talent/talent.routes,auth/auth.service}.ts`. Editados: `docs/product/moneda-virtual.md`, `apps/mobile_flutter/README.md`, `docs/PROGRESO.md`.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: sin cambios en `pubspec.lock` (hash igual).
+  - `flutter analyze`: `No issues found! (ran in 7.9s)`.
+  - `flutter test`: `00:48 +262 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:37 +263: All tests passed!`.
+  - Recorrido visual del coordinador (`build/web` en `http://localhost:7357`, API real, `trabajador.demo`, 1280x800): MEDIO-1, BAJO-1, MEDIO-3, MEDIO-4 y MEDIO-5 conformes. Que un puesto recién publicado no llegue en vivo es lo esperado: la API solo envía avisos a su destinatario.
+- Riesgos: `NO_EJECUTADA`: Android/iOS o dispositivo real; cobro real con saldo; corte de red real del SSE; recorrido visual a 375 px de esta versión y del camino de `401` en la app real. Residuo en la base de desarrollo: puesto «Auxiliar de despacho» con la postulación de `trabajador.demo` preseleccionada, más lo ya declarado en `053` y `055`.
+- Siguiente paso: M5 (Flutter) queda cerrado; el coordinador puede hacer commit. Los bajos BAJO-1, BAJO-3, BAJO-4 y BAJO-5 quedan como mejoras para `implementador-sonnet` en una tarea posterior.
+
+### CN-20261110-057 — Corrección de los hallazgos MEDIO-1 a MEDIO-5 y BAJO-1 a BAJO-6 de `CN-20261110-055` (M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261110-055` (auditoría `REQUIERE_CAMBIOS` de `CN-20261110-053`). Rama `moneda-virtual`, árbol de trabajo sin commit. No se tocó `apps/web`, `apps/api` ni lo de `CN-20261110-054`.
+- Alcance:
+  - MEDIO-1: si la cotización falla ya no se ejecuta una acción que siempre cobra sin haber mostrado el costo. `CostRequest.alwaysCharges` marca la prioridad y destacar el perfil: dar prioridad a una postulación y destacar el perfil solo ofrecen Reintentar o Cancelar; al postular con prioridad se ofrece «Continuar sin prioridad» (se envía `priority: false`) o Reintentar/Cancelar. Las acciones gratuitas conservan «Continuar».
+  - MEDIO-2: en web (`ApplicationDetailPage.isWeb`, por defecto `kIsWeb`) un `null` del selector de archivos muestra «Descarga iniciada.»; fuera de web sigue «Descarga cancelada.».
+  - MEDIO-3: `JobPostingsPage` recarga en silencio (`JobPostingsController.refreshSilently`, sin indicador de carga y conservando la lista si falla) ante avisos en vivo (`events.watch()`) o cambio de `revision`; el shell sube la revisión al volver a la pestaña Puestos y al postular.
+  - MEDIO-4: `pushThemed` (nuevo, `core/navigation/themed_route.dart`) reaplica el tema del contexto a las rutas; lo usan el detalle del puesto, «Mi postulación» y la billetera abierta desde un costo. La pila de navegación no cambia (el botón atrás sigue igual).
+  - MEDIO-5: con la bandera de turnos apagada la bienvenida y el login hablan de puestos fijos formales; encendida conservan el texto actual (`OnboardingPage` y `AuthPage` reciben `temporaryShiftsEnabled`, por defecto la bandera).
+  - BAJO-1: la cuota gratuita se oculta con `monthlyLimit` 0; `DemoJobsBackend` devuelve la cuota con límite 0 para prioridad y destacar, como la API real.
+  - BAJO-2: límites de la API (comprobados en `apps/api/src/modules/jobs/jobs.routes.ts`: `query` y `location` `max(100)`, `minSalaryCents` `max(10_000_000)`): el cliente limita texto y ubicación a 100 caracteres, el sueldo mínimo a S/ 100 000 (mensaje sin enviar la consulta) y `toQuery()` recorta como respaldo.
+  - BAJO-3: `ApiClient.onUnauthorized` (401 de cualquier ruta REST y del SSE) cierra la sesión local, vuelve al login y muestra «Tu sesión venció. Vuelve a ingresar.» (`main.dart`, sin llamar a `logout` en la API; tolera llamadas repetidas y clientes de una sesión anterior).
+  - BAJO-4: `_acceptedPriority` se limpia tras cualquier error que no sea reintentable tal cual (un 503 o un corte de red conservan lo aceptado).
+  - BAJO-5: `ApiClient.close()` y `JobsServices.dispose()` cierran el cliente HTTP propio; `_logout` libera los servicios tras el siguiente frame.
+  - BAJO-6: la prueba de `jobs_screens_test.dart:300` ahora reenvía sin prioridad y comprueba lo enviado y el saldo.
+- Archivos:
+  - Nuevos: `apps/mobile_flutter/lib/core/navigation/themed_route.dart`, `apps/mobile_flutter/test/m5_correcciones_test.dart` (31 pruebas).
+  - Lib: `apps/mobile_flutter/lib/main.dart`, `lib/features/wallet/{cost_flow,wallet_page,wallet_sections}.dart`, `lib/features/jobs/{api_client,apply_sheet,application_detail_page,job_detail_page,job_postings_page,job_postings_controller,jobs_models,jobs_services,my_applications_page,pdf_saver,job_events_source,demo_jobs_backend}.dart`, `lib/features/marketplace/worker_shell.dart`, `lib/features/onboarding/onboarding_page.dart`, `lib/features/auth/auth_page.dart`.
+  - Pruebas modificadas: `apps/mobile_flutter/test/jobs_screens_test.dart`.
+  - Docs: `docs/product/moneda-virtual.md` (sección Flutter: se quita el pendiente de los textos de turnos), `docs/guides/local-development.md`, `apps/mobile_flutter/README.md`.
+- Decisiones:
+  - MEDIO-4 se resolvió capturando el tema (como `showDialog`) en vez de un Navigator anidado: no cambia la pila ni el botón atrás. La hoja de postular y los diálogos ya heredaban el tema; la prueba en oscuro lo confirma.
+  - Texto nuevo con la bandera apagada. Bienvenida: pasos 3 y 4 «Costos informados» («Antes de toda acción con costo, ves cuánto es y cuánto te queda.») y «Puestos fijos formales» («Postula a empleos formales y sigue cada etapa del proceso hasta tu oferta.»); se reescribió también el paso 3 anterior, que decía «validar el turno». Login: título «Tu próximo empleo empieza aquí», descripción «Encuentra puestos fijos formales, postúlate en pocos pasos y sigue cada etapa de tu proceso.», beneficio «Puestos fijos formales», ruta «Busca → postúlate → recibe tu oferta» / «busca · postúlate · recibe tu oferta». Se ajustó también el texto del login de empresa («Publica puestos, revisa postulaciones y elige…»), por coherencia (esa pantalla no es alcanzable hoy).
+  - La postulación normal sigue permitiendo «Continuar» tras una cotización fallida (puede ser gratuita), como aceptó la auditoría.
+  - `DemoJobsBackend.applyPriorities` registra lo enviado en cada `apply`, también cuando el servidor falla.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; `pubspec.lock` y `pubspec.yaml` sin cambios (`git status`).
+  - `flutter analyze`: `No issues found! (ran in 4.4s)`.
+  - `flutter test`: `00:28 +262 ~1: All tests passed!` (antes `+231 ~1`: 31 pruebas nuevas; la omitida es el recorrido heredado de turnos).
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:31 +263: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `√ Built build\web`.
+  - Comprobación de que la prueba falla sin el arreglo: solo para MEDIO-4 (sin `themes.wrap` el detalle sale claro: `Expected: Brightness.dark, Actual: Brightness.light`); el arreglo quedó restaurado. Para los demás no se revirtió el arreglo.
+- Riesgos:
+  - `NO_EJECUTADA`: Android/iOS o dispositivo real; cobro real con saldo (el saldo demo es 0); descarga del PDF en un navegador real (solo `isWeb` en pruebas y lectura de `file_picker_web`); recorrido visual de Flutter web con la API real (el tema oscuro se verificó con pruebas de widgets).
+  - MEDIO-3 abre una segunda conexión SSE (Puestos además de Postulaciones). Un 401 en ella se ignora en esa pestaña y lo gestiona `onUnauthorized`.
+  - `refreshSilently` recarga como máximo las 100 primeras filas ya cargadas.
+  - Tras una cotización fallida, la postulación normal permite «Continuar»; si ya se agotó la cuota gratuita el servidor la cobraría sin mostrar el costo (comportamiento aceptado en la auditoría, no modificado).
+  - Los textos nuevos de bienvenida y login son redacción del implementador.
+- Siguiente paso: `auditor-opus` reaudita `CN-20261110-057` sobre el árbol de trabajo de `moneda-virtual` (sin commit); el coordinador revisa `build/web` en el puerto 7357.
+
+### CN-20261110-056 — Auditoría de `CN-20261110-054` (corrección de BAJO-1 a BAJO-7 de `CN-20261013-052`, M5a)
+
+- Fecha: 2026-11-10 15:05 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261110-054` (corrección), que atiende los BAJO-1 a BAJO-7 de `CN-20261013-052`. Rama `moneda-virtual`, árbol sin commit. No se auditaron los cambios de `CN-20261110-053` (`apps/mobile_flutter/**` y las secciones Flutter de los docs), que revisa `CN-20261110-055`.
+- Alcance: diff sin commit de `apps/web/{app/page.tsx,features/jobs/*,playwright.config.ts,e2e/*,scripts/build-keeping-tracked-files.mjs}`, `apps/api/tests/integration/currency-actions.integration.test.ts` y los bullets de M5a de `docs/guides/local-development.md` y `docs/product/moneda-virtual.md`.
+- Verificación por hallazgo:
+  - BAJO-1: resuelto. El script guarda `tsconfig.json` y `next-env.d.ts`, ejecuta `npm run build` y los restaura al salir el hijo, conservando su código (probado con un build simulado que reescribe ambos archivos: salida 0 → 0 y 3 → 3, archivos restaurados, y `&&` no arranca `next start` si falla). Playwright 1.63 ejecuta las tareas de `webServer` en secuencia (`createPluginSetupTasks` en `TaskRunner`), así que el segundo build toma su copia después de que el primero restauró. Un build real que falló (Turbopack en una copia de auditoría) detuvo la suite con `Process from config.webServer was not able to start. Exit code: 1`. Tras la suite rápida completa, `git status` sin líneas para ambos archivos y hashes SHA-256 idénticos a los de antes.
+  - BAJO-2: resuelto. Cada ronda exige `completados + tolerados = 2 × (ronda + 1)` y la corrida exige al menos un barrido terminado; registrado `[BAJO-1 stress] barridos concurrentes: 8 terminados, 0 tolerados`.
+  - BAJO-3: resuelto. `inFlight` se marca tras validar y antes del primer `await`, y se libera en `finally` en todos los caminos (PDF inválido, error, 401, éxito): un segundo clic durante el envío, incluido uno que termina en error, se ignora; tras el error se puede reintentar.
+  - BAJO-4: resuelto (`aria-label` y el ícono con `aria-hidden`).
+  - BAJO-5: resuelto. Cuota oculta con `monthlyLimit` 0; el bloqueo distingue saldo, tope y «no disponible». La API real devuelve la cuota de `JOB_HIGHLIGHT` con límite 0 (`currency.catalog.ts`), como el fixture nuevo.
+  - BAJO-6: resuelto. Apagada: sin campana (única forma de abrir el panel de avisos) ni plan en barra lateral y Perfil; encendida: campana, plan y Membresía sin cambios (suite heredada y `membership.spec.ts` pasan).
+  - BAJO-7: resuelto. `listAll` sigue `nextCursor` de la API, que pagina por llave `(createdAt, id)` descendente con `id` único e inmutable: no repite ni salta puestos (un puesto creado durante el recorrido queda antes de la primera página y no se duplica). Tope de 20 páginas con aviso; ningún otro consumidor usa `limit: 100`.
+- Pruebas que fallan sin el arreglo (copia de `apps/web` fuera del repo con los siete archivos de código en su versión `HEAD` y las pruebas nuevas): `npx playwright test` de `fixed-jobs-{applicants,postings,flag}.spec.ts` → `14 failed, 20 passed`: fallan justo los 7 casos nuevos o modificados (BAJO-7, BAJO-4, BAJO-3, la prueba de la bandera apagada, «publicar fuera de la cuota», «destacar un puesto», «no culpa al tope diario») en escritorio y en móvil. La copia se borró al terminar.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos (no bloquean):
+  - BAJO-1 (nuevo, `apps/web/scripts/build-keeping-tracked-files.mjs:1-6,536-551`). La restauración depende de que el proceso de Node pueda correr su código: con un cierre forzado durante el build no se restaura (reproducido: `taskkill /T /F`, que es lo que usa Playwright en Windows para detener sus servidores, deja `tsconfig.json` modificado; en POSIX el valor por defecto es `SIGKILL`). Pasa, por ejemplo, si vence el `timeout` de 180 s del `webServer` o si Playwright se detiene en medio del build. Además, en `SIGINT`/`SIGTERM` restaura antes de que termine el hijo, que podría volver a escribir. El comentario del script y el README decían «también si se interrumpe». Corrección sugerida: guardar la copia también en disco (p. ej. en `.next-flag-off/`) y restaurarla al inicio de la siguiente corrida o en un `globalTeardown`, y en las señales esperar al `exit` del hijo. El auditor corrigió `apps/web/e2e/README.md` para describir el límite y el paso manual en ese caso.
+- Documentación: `docs/guides/local-development.md` y `docs/product/moneda-virtual.md` (M5a) describen el comportamiento actual; el auditor agregó el tope de 2000 puestos con aviso de `listAll` y corrigió en `apps/web/e2e/README.md` la afirmación sobre interrupciones. `docs/reference/` no cambia (sin cambios de API).
+- Validaciones (PostgreSQL 16-alpine desechable en `127.0.0.1:57220`, bases `chambeaya_test` y `chambeaya_shadow_test`; borrado al terminar; no se tocó el stack de compose ni el servidor del 7357):
+  - `npx tsc --noEmit` en `apps/api` y `apps/web`: código 0, sin errores.
+  - `npm test` (`apps/api`): `Test Files  36 passed (36)`, `Tests  627 passed (627)`.
+  - `prisma migrate deploy`: `All migrations have been successfully applied.`; `npm run test:integration`: `Test Files  21 passed (21)`, `Tests  232 passed (232)`; `currency-actions` aparte (dos veces): `24 passed (24)`.
+  - `npx playwright test` (`apps/web`, dos paneles compilados): `1 skipped`, `195 passed (4.7m)`, código 0. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío y hashes iguales a los de antes.
+  - NO_EJECUTADA: e2e real (`npm run test:web:admin-real`), Flutter (fuera del alcance) e imágenes Docker.
+- Riesgos residuales: el BAJO-1 nuevo (cierre forzado durante el build); `listAll` hace hasta 20 peticiones seguidas y se repite en cada aviso SSE del Resumen; el texto «Esta acción no está disponible por ahora» es redacción nueva; siguen sin prueba automática la reconexión SSE y los `409` de moneda contra la API real; el panel solo tiene tema claro.
+- Decisión: `APROBADO`. BAJO-1 a BAJO-7 de `CN-20261013-052` quedan resueltos y con pruebas que fallan sin el arreglo; queda abierto solo el BAJO-1 nuevo.
+- Siguiente paso: `implementador-sonnet` puede atender el BAJO-1 nuevo en una corrección menor o diferirlo; M5a queda cerrado tras el commit de estos cambios.
+
+### CN-20261110-055 — Auditoría de `CN-20261110-053` (M5, parte Flutter: puestos fijos y billetera del trabajador, commit `a829882` + cambios sin commit)
+
+- Fecha: 2026-11-10 14:21 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: audita `CN-20261110-053` (implementación) y reconoce como parte de la entrega el commit `a829882` (nunca auditado antes). Rama `moneda-virtual`, árbol sin commit. No se auditaron los cambios de `CN-20261110-054` (`apps/web`, `apps/api/tests/integration/currency-actions.integration.test.ts`, `apps/web/scripts/` y sus secciones de docs).
+- Alcance: diff completo de `a829882` en `apps/mobile_flutter` (≈47 archivos) más los cambios sin commit de `apps/mobile_flutter/{lib,test,README.md}` y las secciones «App del trabajador: puestos fijos y billetera (M5, parte Flutter)» (`docs/guides/local-development.md`) y «Qué cubre M5 en Flutter (app del trabajador)» (`docs/product/moneda-virtual.md`). Contrato contrastado con `apps/api/src/modules/{jobs,currency}` (rutas, esquemas Zod, `workerApplicationView`, `eventView`, `CurrencyQuoteService`, `jobEvents`) y con la API real. Se incorporan los hallazgos del recorrido visual de Flutter web que hizo el coordinador (API real, 1280x800 y 375x812).
+- Contrato verificado sin discrepancias: rutas y verbos del trabajador (`/workers/job-postings`, `/workers/job-applications/*`, `/workers/currency/{balance,movements,catalog,rewards,quote}`, `/workers/me/referral`, `/workers/me/profile/highlight`, `/job-events`); cuerpo de postular (`answers` + `priority` opcional, `strict`); filtros de búsqueda; forma de `quote` (`cost`, `reason`, `freeQuota`, `dailyCap`, `withinDailyCap`, `refundWindowHours`, `currency`); `409 INSUFFICIENT_CURRENCY {cost, balance}`, `409 DAILY_SPEND_CAP_REACHED {dailyCap, spentToday}`, `503 SERIALIZATION_RETRY_EXHAUSTED` con `Retry-After` acotado; idempotencia (postular repetido no cobra dos veces: lo garantiza el servidor por `(puesto, trabajador)` y `instanceKey`); SSE con `Authorization`, `event: job` con `{type, applicationId, postingId, status, at}`, `401` sin reintento, reconexión con retroceso y cancelación limpia; streaming de SSE en web soportado por `http` 1.6.0 (`fetch` con `AbortController`). Privacidad: la app solo muestra lo que entrega `workerApplicationView` (el `detail` de un rechazo llega `null` y el cierre automático sale de `autoClosedReason`, corrección correcta); no hay registros (`print`) ni tokens en errores.
+- Hallazgos críticos y altos: ninguno.
+- Hallazgos medios:
+  - MEDIO-1 (cobro sin costo previo tras una cotización fallida). `apps/mobile_flutter/lib/features/wallet/cost_flow.dart:100` (`_UnknownCostChoice.continueAnyway`) y `:186`: si `quote` falla, «Continuar» ejecuta la acción aunque sea siempre de pago: prioridad (`apply_sheet.dart:93-98` envía `priority: true`; `application_detail_page.dart:216-236`) y destacar el perfil (`wallet_sections.dart:235`). Se cobran 10 monedas sin haber mostrado el costo, contra la regla «Antes de toda acción con costo se muestra el costo previo». La web (M5a) tiene un patrón parecido ya aprobado, pero allí la acción es una sola; aquí se arrastra la opcional. Corrección: ante una cotización fallida, descartar las peticiones opcionales (enviar `priority: false`) y, para acciones sin cuota gratuita (prioridad, destacar), ofrecer solo Reintentar/Cancelar. Agregar prueba que lo demuestre (la actual, `jobs_screens_test.dart:223`, no comprueba qué se envió ni el saldo).
+  - MEDIO-2 (descarga del PDF en web). `application_detail_page.dart:277-285` muestra «Descarga cancelada.» cuando el guardado devuelve `false`, y `pdf_saver.dart` usa `FilePicker.saveFile`, que en web (`file_picker_web` 4.0.0) dispara la descarga del navegador y **siempre** devuelve `null`. En web (canal oficial del trabajador, decisión del 2026-11-10) cada descarga correcta se anuncia como cancelada. Las pruebas usan un `PdfSaverFake` y no lo detectan. Corrección: con `kIsWeb` tratar `null` como «Descarga iniciada» (o devolver un estado de tres valores).
+  - MEDIO-3 (estado viejo en la lista de puestos; recorrido visual). `JobPostingsPage` (`job_postings_page.dart:88-99`, `job_postings_controller.dart:140`) solo actualiza `myApplication` con `markApplied` al postular; no escucha los avisos SSE ni la `revision` del shell. Reproducido por el coordinador: la tarjeta siguió en «Postulaste: Postulado» cuando la empresa ya había emitido la oferta (Postulaciones sí mostraba «Oferta»). Corrección: recargar en silencio (o actualizar la tarjeta por `postingId`) ante un aviso `event: job` o un cambio de `revision`, y al volver a la pestaña.
+  - MEDIO-4 (tema inconsistente; recorrido visual). El tema oscuro se aplica con un `Theme` local dentro de `WorkerShell` (`worker_shell.dart:256`), pero el detalle del puesto, «Mi postulación», la hoja de postular y la billetera abierta desde un costo se abren con `Navigator.of(context).push`/`showModalBottomSheet` sobre el navegador raíz del `MaterialApp` (tema claro fijo). Resultado: shell oscuro y pantallas hijas claras. Corrección: envolver esas rutas con el mismo `Theme` (p. ej. un `Navigator` anidado en el shell o un `builder` que reaplique `buildAppTheme(brillo actual)`), con prueba en modo oscuro.
+  - MEDIO-5 (textos de turnos con la bandera apagada; preexistente, recorrido visual). `features/onboarding/onboarding_page.dart:35-36` («Continuidad operativa en evolución», «encontramos el mejor reemplazo en minutos») y `features/auth/auth_page.dart:303-311,403,811` («Tu próximo turno empieza aquí», «Turnos cerca de ti», «lleva el control de cada turno», «Busca → postúlate → confirma») venden turnos temporales aunque el producto vigente (bandera apagada) es de puestos fijos. No los introdujo `a829882`, pero contradicen el criterio de M5 «sin ningún texto del flujo de turnos» (`worker_shell.dart`, comentario de `temporaryShiftsEnabled`). Corrección: condicionar esos textos a `temporaryShiftsEnabled` con un texto de puestos fijos.
+- Hallazgos bajos:
+  - BAJO-1. `cost_flow.dart:241-249` muestra «Usos gratuitos que te quedan este mes: 0 de 0.» para `APPLICATION_PRIORITY` y `PROFILE_HIGHLIGHT`: la API real devuelve `freeQuota` con `monthlyLimit: 0` (comprobado contra `GET /workers/currency/quote?actionKey=APPLICATION_PRIORITY`), mientras `DemoJobsBackend` devuelve `null` y lo oculta en las pruebas. La web ya lo corrigió en M5a. Corrección: mostrar solo si `monthlyLimit > 0` y alinear el servidor en memoria con la API.
+  - BAJO-2. Los campos de búsqueda no respetan los límites de la API: texto y ubicación de más de 100 caracteres y sueldo mínimo mayor que S/ 100 000 dan `400 INVALID_INPUT` (comprobado contra la API real) y la lista muestra el error genérico. `job_postings_page.dart:159,489,498`. Corrección: `maxLength: 100` y tope del sueldo.
+  - BAJO-3. Un `401` de las rutas REST solo muestra «Tu sesión venció. Vuelve a ingresar.» sin acción ni cierre de la sesión local; no hay manejo global en `main.dart`. Corrección: un `onSessionExpired` en `JobsServices` que llame a `_logout`.
+  - BAJO-4. `apply_sheet.dart:149-162`: `_acceptedPriority` solo se limpia con `409` de saldo o tope; tras otro error no reintentable (400, 409 de estado) el siguiente envío no vuelve a cotizar. El servidor vuelve a validar saldo, así que no cobra de más, pero el costo mostrado puede quedar viejo.
+  - BAJO-5. `JobsServices.dispose` (`jobs_services.dart:49`) no cierra el `http.Client` de `ApiClient`: queda uno por cada inicio de sesión.
+  - BAJO-6 (pruebas). `jobs_screens_test.dart:300` («tras un 409 de saldo con prioridad se puede reenviar sin ella») no llega a reenviar sin prioridad: termina con el cuadro abierto. El total real de pruebas nuevas es 69 (de `+161 -2` a `+231 ~1`), no 70. El resto de las pruebas sí comprueban los criterios (llamadas y saldo del servidor en memoria, rutas, cabeceras y cuerpos con `MockClient`, `401` sin reintento, cuenta regresiva de `Retry-After`).
+- Documentación: `docs/product/moneda-virtual.md` (sección Flutter) corregida por el auditor: la descarga del PDF en web es directa (no «Guardar como») y se aclara que los textos de bienvenida/login todavía hablan de turnos. `docs/guides/local-development.md` (sección Flutter) y `apps/mobile_flutter/README.md` describen el comportamiento actual. `docs/reference/api.md` no requiere cambios.
+- Archivos revisados: `apps/mobile_flutter/lib/{main.dart,core/navigation/*,core/safe_notify.dart,features/jobs/*,features/wallet/*,features/marketplace/worker_shell.dart,features/auth/auth_page.dart,features/onboarding/onboarding_page.dart}`, `apps/mobile_flutter/test/{jobs_api_contract_test,jobs_screens_test,wallet_page_test,theme_switch_cost_test,theme_toggle_state_persistence_test}.dart`, `apps/api/src/modules/jobs/{jobs.routes,jobs.service,jobs.events}.ts`, `apps/api/src/modules/currency/{currency.routes,currency.quote,currency.actions,currency.catalog}.ts`, `pubspec.lock` (`http` 1.6.0, `file_picker` 13.0.0). Editado: `docs/product/moneda-virtual.md`, `docs/PROGRESO.md`.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; hash de `pubspec.lock` igual antes y después.
+  - `flutter analyze`: `No issues found! (ran in 9.6s)`.
+  - `flutter test`: `00:39 +231 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true` (suite completa, no solo dos archivos): `00:35 +232: All tests passed!`.
+  - API real (`http://127.0.0.1:4000/api`, `trabajador.demo`): `GET /workers/currency/quote?actionKey=APPLICATION_PRIORITY` → `cost: 10`, `freeQuota.monthlyLimit: 0`, `currency: "Chambitas"`; `GET /workers/currency/balance` → `{"currency":"Chambitas","balance":0}`; `GET /workers/job-postings?query=<101 caracteres>` → `400`; `minSalaryCents=20000000` → `400 INVALID_INPUT`; `GET /job-events` con token inválido → `401`; con token válido → `retry: 2000`.
+  - Recorrido visual de Flutter web (coordinador, API real, 1280x800 y 375x812): login, cinco pestañas, postular gratis, oferta y «Contratado» en vivo en Postulaciones, constancia y billetera correctos, sin desbordes a 375 px; hallazgos MEDIO-3, MEDIO-4 y MEDIO-5.
+- Riesgos:
+  - `NO_EJECUTADA`: Android/iOS o dispositivo real; cobro real con saldo (el saldo demo es 0); corte de red real del SSE; descarga del PDF en navegador comprobada solo por lectura del código de `file_picker_web`.
+  - Residuo en la base de desarrollo del recorrido del coordinador: un puesto cerrado con título mal codificado («Asistente de almac?n (recorrido Flutter web)», error de curl) y un puesto «Asistente de almacén» con la postulación de `trabajador.demo` contratada; más el residuo ya declarado en `CN-20261110-053`.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 a MEDIO-5 (y los bajos que convenga), con pruebas que fallen antes del arreglo, y registra una `CORRECCION` que referencie `CN-20261110-053` y esta auditoría; luego `auditor-opus` reaudita.
+
+### CN-20261110-054 — Corrección de los siete hallazgos bajos de `CN-20261013-052` (M5a)
+
+- Fecha: 2026-11-10 14:25 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261013-052` (auditoría `APROBADO` de `CN-20261013-051`, BAJO-1 a BAJO-7). Rama `moneda-virtual`, árbol de trabajo sin commit.
+- Alcance:
+  - BAJO-1: `next build` reescribía `apps/web/tsconfig.json` y `apps/web/next-env.d.ts` (con otro `distDir` y también el build normal, con rutas de tipos de producción). Los dos paneles de `playwright.config.ts` compilan ahora con `apps/web/scripts/build-keeping-tracked-files.mjs`, que guarda ambos archivos, ejecuta `npm run build` y los restaura byte a byte al terminar (también si el build falla o se interrumpe). Se quitó el paso manual de `apps/web/e2e/README.md`.
+  - BAJO-2: en la prueba de estrés BAJO-1 de `currency-actions`, `tolerantSweep` cuenta barridos terminados y tolerados (`completados + tolerados = 2 × ronda` en cada ronda) y se exige al menos un barrido terminado por corrida; el conteo se registra.
+  - BAJO-3: `OfferForm.submit` usa un `useRef` de en curso marcado antes del primer `await`; un doble clic con PDF adjunto emite una sola oferta y sube un solo archivo.
+  - BAJO-4: `aria-label="Nuevo puesto"` en el botón de la barra superior (nombre accesible en móvil).
+  - BAJO-5: `QuoteDetails` oculta la cuota gratuita con `monthlyLimit` 0; la fase `blocked` solo culpa al tope diario si `!withinDailyCap`, y si el saldo alcanza y está dentro del tope muestra «Esta acción no está disponible por ahora».
+  - BAJO-6: con la bandera de turnos apagada se oculta la campana de notificaciones y no se muestra el plan (barra lateral y Perfil de empresa); encendida, sin cambios.
+  - BAJO-7: nuevo `jobsApi.postings.listAll` (páginas de 100, tope 20 páginas); `applicants-view` y `overview-view` lo usan y avisan si se alcanza el tope.
+- Archivos:
+  - Web: `apps/web/scripts/build-keeping-tracked-files.mjs` (nuevo), `apps/web/playwright.config.ts`, `apps/web/app/page.tsx`, `apps/web/features/jobs/{applicant-detail,applicants-view,company-profile-view,cost-action,jobs-api,overview-view}.ts(x)`.
+  - Pruebas web: `apps/web/e2e/fixed-jobs-{applicants,flag,postings}.spec.ts`, `apps/web/e2e/fixtures/fixed-jobs-api.ts`, `apps/web/e2e/README.md`.
+  - API: `apps/api/tests/integration/currency-actions.integration.test.ts`.
+  - Docs: `docs/guides/local-development.md`, `docs/product/moneda-virtual.md` (bullets de M5a).
+- Decisiones:
+  - BAJO-1 se resuelve con un script de compilación en vez de un `globalTeardown`, para que los archivos queden restaurados aunque la suite se interrumpa; se aplica a ambos paneles porque el build normal también reescribe `next-env.d.ts`.
+  - BAJO-6: se ocultan la campana y el plan en lugar de reflejar avisos de puestos fijos en la campana (esos avisos viven en Postulantes en vivo; sin Membresía el plan no tiene camino).
+  - El fixture devuelve la cuota de `JOB_HIGHLIGHT` con límite 0 como la API real. La prueba `fixed-jobs-postings.spec.ts:61` afirmaba el texto defectuoso «Agotada (0 de 0 usadas)» y ahora comprueba que no aparece.
+  - Pruebas nuevas: doble clic síncrono en «Emitir oferta» con PDF (una subida, una oferta), aria-label de «Nuevo puesto», bloqueo `canExecute:false` sin culpar al tope (con `page.route` sobre `/api/business/currency/quote`), la campana y el plan ocultos con la bandera apagada, y 105 puestos en el Resumen y en el selector de Postulantes. La suite rápida pasa de 188 a 196 ejecuciones (98 casos).
+- Validaciones (PostgreSQL 16-alpine desechable en `127.0.0.1:57210`, bases `chambeaya_test` y `chambeaya_shadow_test`; borrado al terminar; no se usó el stack de compose):
+  - `npx prisma generate` (`apps/api`; el cliente no estaba generado) y `npx tsc --noEmit` en `apps/api` y en `apps/web`: sin errores.
+  - `npm test` (`apps/api`): 36 archivos, 627/627.
+  - `prisma migrate deploy` en la base nueva: `All migrations have been successfully applied.`
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`): `currency-actions` 24/24; el caso BAJO-1 repetido dos veces más, 1 passed | 23 skipped cada vez; `npm run test:integration` completo: 21 archivos, 232/232.
+  - Playwright rápida (`npx playwright test`, dos paneles compilados): primer intento sin Chromium instalado (los 196 casos fallaron al lanzar el navegador; se instaló con `npm run test:web:install`); segundo intento 193 passed, 1 skipped, 2 failed (la afirmación antigua de `fixed-jobs-postings.spec.ts:61`, corregida); corrida final: 195 passed, 1 skipped (4,2 min), EXIT=0.
+  - Criterio de BAJO-1: tras la corrida final, `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` no devolvió ninguna línea (ambos intactos, sin restauración manual).
+  - NO_EJECUTADA: `flutter analyze`, `flutter test`, e2e real (`npm run test:web:admin-real`) e imágenes Docker (no se tocó nada de esas áreas).
+- Riesgos:
+  - No se comprobó que las pruebas nuevas fallen sin el arreglo (solo que pasan con él).
+  - El mensaje «Esta acción no está disponible por ahora» es redacción nueva del implementador.
+  - `listAll` hace hasta 20 peticiones secuenciales; con más de 2000 puestos se avisa del tope.
+  - El script de compilación usa `spawn` con `shell:true` (aviso DEP0190 de Node, inocuo).
+  - Aún sin cubrir: reconexión SSE y 409 de moneda contra la API real, y el panel solo tiene tema claro.
+- Siguiente paso: `auditor-opus` reaudita `CN-20261110-054` sobre el árbol de trabajo de `moneda-virtual` (sin commit).
+
+### CN-20261110-053 — M5 (Flutter): verificación contra la API real y cierre de puestos fijos y billetera del trabajador (commit `a829882`)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261013-052` (auditoría `APROBADO` de M5a, web). Rama `moneda-virtual` sobre `a829882` («wip(mobile): pantallas de empleos y billetera en la app Flutter», recuperado del disco de una laptop anterior; nunca registrado ni auditado), sin commit.
+- Alcance:
+  - Revisión completa de `a829882` (M5, parte Flutter: puestos, postulaciones con ofertas y PDF, billetera con saldo, movimientos, premios, referido y costos previos) y comparación de cada llamada de `features/jobs/api_client.dart`, `jobs_repository.dart`, `wallet_repository.dart` y `job_events_source.dart` con las rutas de `apps/api/src/modules/{jobs,currency,talent}` y `docs/reference/api.md`: rutas, parámetros, cuerpos, formas de respuesta, `409 INSUFFICIENT_CURRENCY` `{cost, balance}`, `409 DAILY_SPEND_CAP_REACHED` `{cost, dailyCap, spentToday}`, `503` con `Retry-After`, cotización (`quote`) antes de toda acción con costo, nombre de la moneda leído de la respuesta de saldo y bandera `TEMPORARY_SHIFTS_ENABLED` apagada por defecto. Sin discrepancias de contrato.
+  - Verificación contra la API real del stack de desarrollo (script Dart con los repositorios reales de la app): buscar y abrir puesto, cotizar, postular (con y sin respuestas), idempotencia, prioridad sin saldo (409), preselección, entrevista, oferta con PDF, descarga del PDF, aceptar (y aceptar de nuevo), constancia, retirarse, movimientos, catálogo, premios, referido, 404 y 401.
+  - Correcciones: (1) la línea de tiempo del detalle mostraba «La empresa decidió no continuar» en un cierre automático porque la API no entrega al trabajador el `detail` de un rechazo; ahora el motivo sale de `autoClosedReason`. (2) Desbordes de layout con 320 px y texto 1.6x en `OfferCard`, costos, premios, movimientos y tarjeta de saldo. (3) Tras un `409` de saldo o tope diario al postular con prioridad quedaba aceptada la prioridad y el interruptor deshabilitado; ahora se vuelve a cotizar y se puede continuar sin ella. (4) Dos pruebas rotas por `a829882` (`theme_switch_cost_test`, `theme_toggle_state_persistence_test`).
+  - 70 pruebas nuevas (contrato de la API con `MockClient` y SSE, pantallas de puestos y postulaciones con costo previo, billetera).
+  - No se tocó `apps/web`, `apps/api`, `pubspec.yaml` ni `pubspec.lock`.
+- Archivos:
+  - Código: `apps/mobile_flutter/lib/features/jobs/{application_widgets,application_detail_page,jobs_format,apply_sheet}.dart`, `apps/mobile_flutter/lib/features/wallet/{wallet_page,wallet_sections}.dart`.
+  - Pruebas modificadas: `apps/mobile_flutter/test/{theme_switch_cost_test,theme_toggle_state_persistence_test}.dart`.
+  - Pruebas nuevas: `apps/mobile_flutter/test/{jobs_api_contract_test,jobs_screens_test,wallet_page_test}.dart`.
+  - Docs: `apps/mobile_flutter/README.md`, `docs/guides/local-development.md` (subsección «App del trabajador: puestos fijos y billetera (M5, parte Flutter)»), `docs/product/moneda-virtual.md` (sección «Qué cubre M5 en Flutter (app del trabajador)»).
+  - Revisados sin cambios: todo `a829882` (≈47 archivos) y `docs/reference/api.md`.
+- Decisiones:
+  - El nombre de la moneda sale siempre de la API; «monedas» solo mientras carga.
+  - Solo se pide confirmar si el costo total es mayor que 0; una cotización que falla no bloquea una acción gratuita (reintentar o continuar).
+  - Con turnos apagados la app tiene cinco pestañas (Puestos, Postulaciones, Billetera, Perfil, Invitaciones). Con la bandera encendida se conservan las cinco heredadas y se añaden Puestos fijos y Billetera.
+  - El recorrido legado de `theme_toggle_state_persistence_test` queda con `skip` cuando la bandera está apagada y se agregó la prueba equivalente para puestos fijos.
+  - El detalle de un puesto hace una cotización de sugerencia; las pruebas cuentan cotizaciones de forma relativa.
+  - Decisión del dueño del producto (2026-11-10): la versión web del trabajador es la app Flutter compilada para web (servida en `/` en producción); no se construye un panel Next.js separado para el trabajador.
+- Validaciones (Flutter 3.44.0 en `C:\Users\prueb\tools\flutter\bin`; API real en `http://127.0.0.1:4000/api`, demo sembrada; no se detuvo ni reconstruyó el stack):
+  - `flutter pub get --enforce-lockfile` (`apps/mobile_flutter`): `Got dependencies!`; `pubspec.lock` sin cambios.
+  - `flutter analyze`: `No issues found! (ran in 9.2s)`.
+  - `flutter test`: `00:34 +231 ~1: All tests passed!` (la omitida es el recorrido legado de `theme_toggle_state_persistence_test`, con la bandera apagada). Antes de los cambios, la línea base era `+161 -2` (las dos pruebas rotas de `a829882`).
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true test/theme_toggle_state_persistence_test.dart test/theme_switch_cost_test.dart`: `00:06 +8: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `√ Built build\web`.
+  - Script contra la API real (repositorios de la app): recorrido completo conforme (ver Alcance).
+- Riesgos:
+  - `NO_EJECUTADA`: recorrido manual de la UI con la API real (la capa de repositorio sí se verificó con la API real; las pantallas con el servidor en memoria y compilan en web), ejecución en Android/iOS o dispositivo real, y `npm test` de la API o las suites web (fuera de alcance).
+  - Un cobro con costo no se ejercitó contra la API real (el saldo demo es 0; el `409` de saldo sí se vio real); los cobros se probaron con el servidor en memoria.
+  - El flujo SSE (reconexión, `401` sin reintento) solo se prueba con `MockClient.streaming`, no con un corte de red real.
+  - Residuo en la base de desarrollo por la verificación real: puesto «Prueba Flutter M5 puesto» cerrado, con una postulación retirada y una oferta aceptada (constancia) de la cuenta demo.
+  - La lista de movimientos pagina solo por botón (no por scroll).
+  - `ErrorNotice` usa colores fijos (fondo claro con texto navy): legible en ambos temas, sin revisión visual en oscuro.
+- Siguiente paso: `auditor-opus` audita `CN-20261110-053` (diff de `apps/mobile_flutter/{lib,test,README.md}` y las dos secciones nuevas de docs) y reconoce `a829882` como entrega de M5 (Flutter) si no hay hallazgos.
+
 ### CN-20261013-052 — Auditoría de `CN-20261013-051` (M5a: panel web de empresa y pendientes menores de API)
 
 - Fecha: 2026-10-13 (America/Lima)

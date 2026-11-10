@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../core/navigation/themed_route.dart';
 import '../../theme/app_theme.dart';
 import 'application_detail_page.dart';
 import 'application_widgets.dart';
@@ -99,16 +100,15 @@ class _MyApplicationsPageState extends State<MyApplicationsPage> {
   }
 
   void _open(JobApplication application) {
-    Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        builder: (_) => ApplicationDetailPage(
-          services: widget.services,
-          applicationId: application.id,
-          initial: application,
-          liveEvents: _live.stream,
-          pdfSaver: widget.pdfSaver,
-          onChanged: _controller.replace,
-        ),
+    pushThemed<void>(
+      context,
+      (_) => ApplicationDetailPage(
+        services: widget.services,
+        applicationId: application.id,
+        initial: application,
+        liveEvents: _live.stream,
+        pdfSaver: widget.pdfSaver,
+        onChanged: _controller.replace,
       ),
     );
   }

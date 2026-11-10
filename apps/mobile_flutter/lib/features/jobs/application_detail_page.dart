@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
@@ -27,6 +28,7 @@ class ApplicationDetailPage extends StatefulWidget {
     this.liveEvents,
     this.onChanged,
     this.pdfSaver = savePdfWithPicker,
+    this.isWeb = kIsWeb,
   });
 
   final JobsServices services;
@@ -39,6 +41,10 @@ class ApplicationDetailPage extends StatefulWidget {
   /// Se llama cada vez que cambia la postulación (para refrescar la lista).
   final ValueChanged<JobApplication>? onChanged;
   final PdfSaver pdfSaver;
+
+  /// En web el guardado lo hace el navegador (descarga directa) y el selector
+  /// de archivos siempre devuelve `null`: no significa que el usuario cancele.
+  final bool isWeb;
 
   @override
   State<ApplicationDetailPage> createState() => _ApplicationDetailPageState();
@@ -223,6 +229,7 @@ class _ApplicationDetailPageState extends State<ApplicationDetailPage> {
             actionKey: ActionKeys.applicationPriority,
             label: 'Prioridad',
             targetId: application.id,
+            alwaysCharges: true,
           ),
         ],
         onOpenWallet: () => openWalletPage(context, _services),
@@ -281,7 +288,7 @@ class _ApplicationDetailPageState extends State<ApplicationDetailPage> {
       if (!mounted) return;
       setState(() => _downloadingOffer = null);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(saved ? 'PDF guardado.' : 'Descarga cancelada.')),
+        SnackBar(content: Text(pdfSaveMessage(saved: saved, isWeb: widget.isWeb))),
       );
     } catch (error) {
       if (!mounted) return;
@@ -416,7 +423,10 @@ class _ApplicationDetailPageState extends State<ApplicationDetailPage> {
         SectionCard(
           title: 'Línea de tiempo',
           icon: Icons.timeline_rounded,
-          child: EventTimeline(events: application.events),
+          child: EventTimeline(
+            events: application.events,
+            autoClosedReason: application.autoClosedReason,
+          ),
         ),
         if (application.screeningAnswers.isNotEmpty) ...[
           const SizedBox(height: 14),

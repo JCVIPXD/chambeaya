@@ -134,8 +134,9 @@ const funnelStages = <ApplicationStatus>[
 ];
 
 /// Texto de un evento de la línea de tiempo vista por el trabajador. El
-/// detalle de un rechazo nunca llega al trabajador (nota interna).
-String eventLabel(JobEvent event) => switch (event.type) {
+/// detalle de un rechazo nunca llega al trabajador (nota interna): el cierre
+/// automático se identifica con [autoClosedReason] (de la postulación).
+String eventLabel(JobEvent event, {String? autoClosedReason}) => switch (event.type) {
   'APPLIED' => 'Enviaste tu postulación',
   'APPLICATION_REOPENED' => 'Volviste a postular',
   'SHORTLISTED' => 'La empresa te preseleccionó',
@@ -144,7 +145,7 @@ String eventLabel(JobEvent event) => switch (event.type) {
   'OFFER_ACCEPTED' => 'Aceptaste la oferta',
   'OFFER_DECLINED' => 'Rechazaste la oferta',
   'HIRED' => 'La empresa confirmó tu contratación',
-  'REJECTED' => switch (event.detail) {
+  'REJECTED' => switch (autoClosedReason ?? event.detail) {
     'POSTING_CLOSED' => 'El puesto se cerró y tu postulación terminó',
     'POSTING_FILLED' => 'El puesto se cubrió y tu postulación terminó',
     _ => 'La empresa decidió no continuar con tu postulación',

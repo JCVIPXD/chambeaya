@@ -12,6 +12,7 @@ class CostRequest {
     required this.label,
     this.targetId,
     this.optional = false,
+    this.alwaysCharges = false,
   });
 
   final String actionKey;
@@ -23,6 +24,12 @@ class CostRequest {
   /// Una acción opcional (la prioridad) se puede descartar si no alcanza el
   /// saldo, sin cancelar la acción principal.
   final bool optional;
+
+  /// La acción nunca tiene cuota gratuita: siempre cuesta. Si la cotización
+  /// falla, no se puede ejecutar sin haber mostrado el costo (solo
+  /// Reintentar o Cancelar). Una acción opcional con esta marca se descarta
+  /// al continuar tras el fallo.
+  final bool alwaysCharges;
 }
 
 class CostResult {
@@ -50,9 +57,13 @@ class CostResult {
 ///     saldo y lo que quedará, y solo entonces se pide confirmar.
 ///  4. Si el saldo o el tope diario no alcanzan, se explica y se ofrece el
 ///     camino siguiente (ver billetera o continuar sin lo opcional).
-///  5. Si la cotización falla, la acción gratuita no se bloquea: el usuario
-///     puede continuar sabiendo que el servidor descontará lo que corresponda
-///     y que no se cobrará nada fuera del catálogo.
+///  5. Si la cotización falla nunca se ejecuta una acción que siempre cobra
+///     sin haber mostrado el costo: las acciones sin cuota gratuita
+///     (`alwaysCharges`) solo ofrecen Reintentar o Cancelar, y las opcionales
+///     (la prioridad al postular) se descartan al continuar. Una acción que
+///     puede ser gratuita no se bloquea: el usuario puede continuar sabiendo
+///     que el servidor descontará lo que corresponda y que no se cobrará nada
+///     fuera del catálogo.
 Future<CostResult> confirmCosts(
   BuildContext context, {
   required WalletRepository wallet,
@@ -89,16 +100,31 @@ Future<CostResult> confirmCosts(
 
     if (failure != null) {
       final info = describeJobsError(failure!, currency: currency);
+      final mustSeeCost = active.any(
+        (request) => request.alwaysCharges && !request.optional,
+      );
+      final hasOptional = active.any((request) => request.optional);
       final choice = await showDialog<_UnknownCostChoice>(
         context: context,
-        builder: (context) => _UnknownCostDialog(title: title, info: info),
+        builder: (context) => _UnknownCostDialog(
+          title: title,
+          info: info,
+          canContinue: !mustSeeCost,
+          dropsOptional: hasOptional,
+        ),
       );
       if (!context.mounted) return const CostResult(proceed: false);
       switch (choice) {
         case _UnknownCostChoice.retry:
           continue;
         case _UnknownCostChoice.continueAnyway:
-          return CostResult(proceed: true, droppedOptional: dropped);
+          // Defensa: aunque el diálogo no ofrece «Continuar» cuando la acción
+          // siempre cobra, nunca se ejecuta sin mostrar el costo.
+          if (mustSeeCost) return const CostResult(proceed: false);
+          return CostResult(
+            proceed: true,
+            droppedOptional: dropped || hasOptional,
+          );
         case _UnknownCostChoice.cancel || null:
           return const CostResult(proceed: false);
       }
@@ -156,10 +182,21 @@ Future<CostResult> confirmCosts(
 enum _UnknownCostChoice { retry, continueAnyway, cancel }
 
 class _UnknownCostDialog extends StatelessWidget {
-  const _UnknownCostDialog({required this.title, required this.info});
+  const _UnknownCostDialog({
+    required this.title,
+    required this.info,
+    required this.canContinue,
+    required this.dropsOptional,
+  });
 
   final String title;
   final JobsErrorInfo info;
+
+  /// `false` cuando la acción siempre cobra: no se puede seguir sin ver el costo.
+  final bool canContinue;
+
+  /// Al continuar se descarta la parte opcional (la prioridad).
+  final bool dropsOptional;
 
   @override
   Widget build(BuildContext context) => AlertDialog(
@@ -167,9 +204,7 @@ class _UnknownCostDialog extends StatelessWidget {
     content: SingleChildScrollView(
       child: Text(
         'No pudimos consultar el costo de esta acción. ${info.message}\n\n'
-        'Puedes reintentar o continuar de todos modos: si la acción tiene un '
-        'costo, se descontará de tu saldo según el catálogo, y no se hará '
-        'ningún cobro si no alcanza.',
+        '${canContinue ? dropsOptional ? 'Puedes reintentar o continuar sin la prioridad: la prioridad siempre tiene un costo y no la aplicaremos sin que lo veas. Si lo que queda tiene un costo, se descontará de tu saldo según el catálogo, y no se hará ningún cobro si no alcanza.' : 'Puedes reintentar o continuar de todos modos: si la acción tiene un costo, se descontará de tu saldo según el catálogo, y no se hará ningún cobro si no alcanza.' : 'Esta acción siempre tiene un costo y no la haremos sin mostrártelo. Reintenta cuando tengas conexión. No se cobró nada.'}',
       ),
     ),
     actions: [
@@ -181,11 +216,12 @@ class _UnknownCostDialog extends StatelessWidget {
         onPressed: () => Navigator.pop(context, _UnknownCostChoice.retry),
         child: const Text('Reintentar'),
       ),
-      FilledButton(
-        onPressed: () =>
-            Navigator.pop(context, _UnknownCostChoice.continueAnyway),
-        child: const Text('Continuar'),
-      ),
+      if (canContinue)
+        FilledButton(
+          onPressed: () =>
+              Navigator.pop(context, _UnknownCostChoice.continueAnyway),
+          child: Text(dropsOptional ? 'Continuar sin prioridad' : 'Continuar'),
+        ),
     ],
   );
 }
@@ -238,7 +274,8 @@ class _CostDialog extends StatelessWidget {
                     ? 'Gratis'
                     : formatCoins(line.quote.cost, currency),
               ),
-              if (line.quote.freeQuota != null)
+              if (line.quote.freeQuota != null &&
+                  line.quote.freeQuota!.monthlyLimit > 0)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: Text(

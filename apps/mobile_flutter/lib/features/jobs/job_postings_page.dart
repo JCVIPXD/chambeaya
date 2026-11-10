@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/responsive/app_breakpoints.dart';
+import '../../core/navigation/themed_route.dart';
 import '../../theme/app_theme.dart';
 import '../wallet/wallet_page.dart';
 import 'job_detail_page.dart';
@@ -19,6 +21,7 @@ class JobPostingsPage extends StatefulWidget {
     super.key,
     required this.services,
     this.onApplicationChanged,
+    this.revision = 0,
     this.debounce = const Duration(milliseconds: 400),
   });
 
@@ -26,6 +29,10 @@ class JobPostingsPage extends StatefulWidget {
 
   /// Avisa que el trabajador postuló (para refrescar "Mis postulaciones").
   final VoidCallback? onApplicationChanged;
+
+  /// Cambia cuando otra pantalla modificó una postulación o el trabajador
+  /// volvió a esta pestaña: la lista se recarga en silencio.
+  final int revision;
   final Duration debounce;
 
   @override
@@ -37,6 +44,7 @@ class _JobPostingsPageState extends State<JobPostingsPage> {
   final _scroll = ScrollController();
   final _search = TextEditingController();
   Timer? _debounce;
+  StreamSubscription<JobEventNotification>? _events;
 
   @override
   void initState() {
@@ -47,6 +55,20 @@ class _JobPostingsPageState extends State<JobPostingsPage> {
     if (widget.services.walletController.balance == null) {
       widget.services.walletController.refresh();
     }
+    // Un aviso en vivo (la empresa avanzó o cerró una postulación) deja viejo
+    // el estado «Postulaste» de las tarjetas: se recarga en silencio.
+    _events = widget.services.events.watch().listen(
+      (_) => _controller.refreshSilently(),
+      // 401 u otro corte: el flujo propio de Postulaciones lo avisa; aquí no.
+      onError: (Object _) {},
+      cancelOnError: false,
+    );
+  }
+
+  @override
+  void didUpdateWidget(JobPostingsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.revision != widget.revision) _controller.refreshSilently();
   }
 
   void _onWallet() {
@@ -67,6 +89,7 @@ class _JobPostingsPageState extends State<JobPostingsPage> {
 
   @override
   void dispose() {
+    _events?.cancel();
     _debounce?.cancel();
     widget.services.walletController.removeListener(_onWallet);
     _scroll.dispose();
@@ -85,17 +108,16 @@ class _JobPostingsPageState extends State<JobPostingsPage> {
     if (result != null) await _controller.setFilter(result);
   }
 
-  Future<void> _openDetail(JobPosting posting) => Navigator.of(context).push<void>(
-    MaterialPageRoute(
-      builder: (_) => JobDetailPage(
-        services: widget.services,
-        posting: posting,
-        onApplied: (application) {
-          if (!mounted) return;
-          _controller.markApplied(posting.id, application);
-          widget.onApplicationChanged?.call();
-        },
-      ),
+  Future<void> _openDetail(JobPosting posting) => pushThemed<void>(
+    context,
+    (_) => JobDetailPage(
+      services: widget.services,
+      posting: posting,
+      onApplied: (application) {
+        if (!mounted) return;
+        _controller.markApplied(posting.id, application);
+        widget.onApplicationChanged?.call();
+      },
     ),
   );
 
@@ -159,6 +181,9 @@ class _JobPostingsPageState extends State<JobPostingsPage> {
                                 child: TextField(
                                   controller: _search,
                                   textInputAction: TextInputAction.search,
+                                  inputFormatters: [
+                                    LengthLimitingTextInputFormatter(maxSearchTextLength),
+                                  ],
                                   onChanged: _onQueryChanged,
                                   onSubmitted: (value) {
                                     _debounce?.cancel();
@@ -394,6 +419,7 @@ class _FilterSheetState extends State<_FilterSheet> {
   late final TextEditingController _location = TextEditingController(
     text: widget.initial.location,
   );
+  String? _salaryError;
 
   @override
   void dispose() {
@@ -489,14 +515,20 @@ class _FilterSheetState extends State<_FilterSheet> {
             TextField(
               controller: _salary,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              onChanged: (_) {
+                if (_salaryError != null) setState(() => _salaryError = null);
+              },
+              decoration: InputDecoration(
                 labelText: 'Sueldo mínimo mensual (S/)',
                 hintText: 'Por ejemplo 1500',
+                errorText: _salaryError,
               ),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: _location,
+              inputFormatters: [LengthLimitingTextInputFormatter(maxSearchTextLength)],
               decoration: const InputDecoration(
                 labelText: 'Ubicación',
                 hintText: 'Distrito o ciudad',
@@ -516,6 +548,13 @@ class _FilterSheetState extends State<_FilterSheet> {
                   child: FilledButton(
                     onPressed: () {
                       final salary = int.tryParse(_salary.text.trim());
+                      if (salary != null && salary > maxMinSalarySoles) {
+                        setState(
+                          () => _salaryError =
+                              'El sueldo mínimo no puede pasar de S/ 100 000',
+                        );
+                        return;
+                      }
                       Navigator.pop(
                         context,
                         JobSearchFilter(

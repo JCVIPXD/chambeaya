@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/navigation/themed_route.dart';
 import '../../theme/app_theme.dart';
 import '../wallet/wallet_models.dart';
 import 'application_detail_page.dart';
@@ -110,12 +111,11 @@ class _JobDetailPageState extends State<JobDetailPage> {
   );
 
   void _openApplication(String id) {
-    Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        builder: (_) => ApplicationDetailPage(
-          services: widget.services,
-          applicationId: id,
-        ),
+    pushThemed<void>(
+      context,
+      (_) => ApplicationDetailPage(
+        services: widget.services,
+        applicationId: id,
       ),
     );
   }

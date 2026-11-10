@@ -72,9 +72,11 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
   TalentInvitationRepository? _talentInvitationRepository;
   JobsServices? _jobsServices;
   String? _workerDependenciesKey;
+  final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   AppAudience? _audience;
   AuthSession? _session;
   var _restoringSession = true;
+  var _expiring = false;
 
   bool get _isDemoMode => widget.demoModeOverride ?? _configuredDemoMode;
   bool get _usesLiveApi => !_isDemoMode;
@@ -104,8 +106,12 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     if (_workerDependenciesKey == key && _workerRepository != null) return;
     _workerDependenciesKey = key;
     _jobsServices?.dispose();
+    final sessionToken = _session?.token;
     _jobsServices = _usesLiveApi
-        ? JobsServices.http(token: _session?.token)
+        ? JobsServices.http(
+            token: sessionToken,
+            onSessionExpired: () => _onSessionExpired(sessionToken),
+          )
         : JobsServices.demo();
     _workerRepository = _usesLiveApi
         ? HttpWorkerMarketplaceRepository(token: _session?.token)
@@ -168,9 +174,23 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     });
   }
 
-  Future<void> _logout() async {
+  /// Una ruta de la API respondió `401`: la sesión venció o se revocó. Se
+  /// cierra la sesión local y se vuelve al login con un aviso. Tolera varias
+  /// llamadas seguidas y a clientes de una sesión anterior (ya cerrada).
+  void _onSessionExpired(String? token) {
+    if (!mounted || token == null || _session?.token != token || _expiring) return;
+    _expiring = true;
+    _logout(remote: false).whenComplete(() {
+      _expiring = false;
+      _messengerKey.currentState?.showSnackBar(
+        const SnackBar(content: Text('Tu sesión venció. Vuelve a ingresar.')),
+      );
+    });
+  }
+
+  Future<void> _logout({bool remote = true}) async {
     final token = _session?.token;
-    if (_usesLiveApi && token != null) {
+    if (remote && _usesLiveApi && token != null) {
       try {
         await _authRepository.logout(token);
       } catch (_) {
@@ -179,15 +199,24 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     }
     await _sessionStore.clear();
     if (!mounted) return;
+    final closing = _jobsServices;
+    _jobsServices = null;
+    _workerDependenciesKey = null;
     setState(() {
       _session = null;
       _audience = null;
     });
+    // Se libera (saldo compartido y cliente HTTP) cuando el panel ya salió del
+    // árbol, para que ninguna pantalla use un controlador desechado.
+    if (closing != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => closing.dispose());
+    }
   }
 
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Chambeaya',
+    scaffoldMessengerKey: _messengerKey,
     debugShowCheckedModeBanner: false,
     // Intentionally no `darkTheme`/`themeMode` here: `ThemeData` set this way
     // is global to the whole `MaterialApp`, so it would apply to onboarding,

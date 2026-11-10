@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../../core/safe_notify.dart';
@@ -33,6 +35,8 @@ class JobPostingsController extends ChangeNotifier {
   JobsErrorInfo? _moreError;
   int _generation = 0;
   bool _disposed = false;
+  bool _silentRunning = false;
+  bool _silentAgain = false;
 
   JobSearchFilter get filter => _filter;
   List<JobPosting> get items => List.unmodifiable(_items);
@@ -76,6 +80,44 @@ class JobPostingsController extends ChangeNotifier {
       if (generation == _generation) {
         _loading = false;
         _notify();
+      }
+    }
+  }
+
+  /// Recarga la lista sin mostrar el indicador de carga ni vaciarla: se usa
+  /// cuando otra pantalla o un aviso en vivo dejaron viejo el estado de las
+  /// tarjetas. Conserva el filtro y, como mucho, las primeras 100 filas ya
+  /// cargadas. Un fallo se ignora (se conserva lo que ya se ve).
+  Future<void> refreshSilently() async {
+    if (_disposed) return;
+    if (_loading || _loadingMore || _silentRunning) {
+      _silentAgain = true;
+      return;
+    }
+    _silentRunning = true;
+    _silentAgain = false;
+    final generation = _generation;
+    try {
+      final wanted = _items.length > pageSize ? _items.length : pageSize;
+      final page = await repository.searchPostings(
+        _filter,
+        limit: wanted > 100 ? 100 : wanted,
+      );
+      if (generation != _generation || _disposed) return;
+      _items
+        ..clear()
+        ..addAll(_dedupe(page.items, reset: true));
+      _nextCursor = page.nextCursor;
+      _error = null;
+      _moreError = null;
+      _loadedOnce = true;
+      _notify();
+    } catch (_) {
+      // Silencioso: la lista que ya se ve sigue siendo válida.
+    } finally {
+      _silentRunning = false;
+      if (_silentAgain && !_disposed && !_loading && !_loadingMore) {
+        unawaited(refreshSilently());
       }
     }
   }

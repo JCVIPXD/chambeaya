@@ -14,18 +14,26 @@ class JobsServices {
     required this.wallet,
     required this.walletController,
     required this.events,
+    this.onClose,
   });
 
   /// Servicios reales contra la API con el token de la sesión. El cliente se
-  /// puede inyectar (pruebas con `MockClient`).
-  factory JobsServices.http({required String? token, ApiClient? api}) {
-    final client = api ?? ApiClient(token: token);
+  /// puede inyectar (pruebas con `MockClient`); si no, los servicios crean
+  /// el suyo y lo cierran en [dispose]. [onSessionExpired] se llama ante un
+  /// `401` de cualquier ruta (solo con el cliente propio).
+  factory JobsServices.http({
+    required String? token,
+    ApiClient? api,
+    void Function()? onSessionExpired,
+  }) {
+    final client = api ?? ApiClient(token: token, onUnauthorized: onSessionExpired);
     final wallet = HttpWalletRepository(api: client);
     return JobsServices(
       jobs: HttpJobsRepository(api: client),
       wallet: wallet,
       walletController: WalletController(wallet),
       events: HttpJobEventsSource(api: client),
+      onClose: api == null ? client.close : null,
     );
   }
 
@@ -45,6 +53,13 @@ class JobsServices {
   final WalletController walletController;
   final JobEventsSource events;
 
-  /// Libera lo que la sesión mantiene vivo (el saldo compartido).
-  void dispose() => walletController.dispose();
+  /// Cierra el cliente HTTP propio de estos servicios (si lo hay).
+  final void Function()? onClose;
+
+  /// Libera lo que la sesión mantiene vivo: el saldo compartido y el cliente
+  /// HTTP (uno por inicio de sesión).
+  void dispose() {
+    walletController.dispose();
+    onClose?.call();
+  }
 }

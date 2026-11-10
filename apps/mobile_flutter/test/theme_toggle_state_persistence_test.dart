@@ -181,5 +181,71 @@ void main() {
         findsOneWidget,
       );
     },
+    // Este recorrido usa la pestaña "Inicio" de turnos, que solo existe con
+    // `--dart-define=TEMPORARY_SHIFTS_ENABLED=true`. Con el valor por defecto
+    // (apagado) lo cubre la prueba siguiente, sobre puestos fijos.
+    skip: !feature_flags.temporaryShiftsEnabled,
+  );
+
+  // Mismo defecto (CN-20260917-106) con el producto vigente: puestos fijos y
+  // billetera. Cambiar el modo oscuro no debe recrear los servicios de empleos
+  // (se perdería la postulación y el saldo en modo demo).
+  testWidgets(
+    'toggling dark mode keeps the same jobs services, with the application '
+    'and the balance intact',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      SharedPreferences.setMockInitialValues({});
+
+      await tester.pumpWidget(
+        ChambeayaApp(
+          sessionStore: _MemorySessionStore(null),
+          demoModeOverride: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (var i = 0; i < 3; i++) {
+        await tester.tap(find.text('Siguiente'));
+        await tester.pump();
+      }
+      await tester.tap(find.text('Empezar'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Correo electrónico'),
+        'trabajador@demo.pe',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Contraseña'),
+        'Password1',
+      );
+      await tester.tap(find.text('Ingresar'));
+      await tester.pumpAndSettle();
+
+      final servicesBefore = tester
+          .widget<WorkerShell>(find.byType(WorkerShell))
+          .jobsServices!;
+      await servicesBefore.jobs.apply('demo-job-2');
+      final before = await servicesBefore.jobs.myApplications();
+      expect(before.items, hasLength(1));
+
+      await tester.tap(find.text('Perfil'));
+      await tester.pumpAndSettle();
+      final switchFinder = find.widgetWithText(SwitchListTile, 'Modo oscuro');
+      await tester.ensureVisible(switchFinder);
+      await tester.pumpAndSettle();
+      await tester.tap(switchFinder);
+      await tester.pumpAndSettle();
+
+      final servicesAfter = tester
+          .widget<WorkerShell>(find.byType(WorkerShell))
+          .jobsServices!;
+      expect(identical(servicesBefore, servicesAfter), isTrue);
+      final after = await servicesAfter.jobs.myApplications();
+      expect(after.items, hasLength(1));
+      expect(after.items.single.posting.id, 'demo-job-2');
+    },
   );
 }

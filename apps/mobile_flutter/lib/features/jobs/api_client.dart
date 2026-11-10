@@ -35,8 +35,12 @@ class ApiException implements Exception {
 /// fijo y tiempo de espera acotado. Fácil de simular: recibe un
 /// `http.Client` (por ejemplo `MockClient`).
 class ApiClient {
-  ApiClient({http.Client? client, String? baseUrl, this.token})
-    : client = client ?? http.Client(),
+  ApiClient({
+    http.Client? client,
+    String? baseUrl,
+    this.token,
+    this.onUnauthorized,
+  }) : client = client ?? http.Client(),
       _baseUrl = (baseUrl ?? AppConfig.apiBaseUrl).replaceFirst(
         RegExp(r'/+$'),
         '',
@@ -45,6 +49,14 @@ class ApiClient {
   final http.Client client;
   final String? token;
   final String _baseUrl;
+
+  /// Se llama cuando la API responde `401` (la sesión venció o se revocó):
+  /// la app cierra la sesión local y vuelve al login. Puede llamarse varias
+  /// veces seguidas (peticiones simultáneas): quien lo recibe debe tolerarlo.
+  final void Function()? onUnauthorized;
+
+  /// Libera el cliente HTTP (al cerrar la sesión o desechar los servicios).
+  void close() => client.close();
 
   static const requestTimeout = Duration(seconds: 12);
 
@@ -87,7 +99,9 @@ class ApiClient {
 
   Future<http.Response> _send(Future<http.Response> Function() request) async {
     try {
-      return await request().timeout(requestTimeout);
+      final response = await request().timeout(requestTimeout);
+      if (response.statusCode == 401) onUnauthorized?.call();
+      return response;
     } on TimeoutException {
       throw const ApiException(0, 'REQUEST_TIMEOUT');
     } on http.ClientException {

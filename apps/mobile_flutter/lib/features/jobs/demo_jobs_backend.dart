@@ -74,6 +74,9 @@ class DemoJobsBackend
   final List<Movement> _movements = [];
   final Map<String, List<Object>> _scripted = {};
   final List<String> calls = [];
+
+  /// Valor de `priority` de cada llamada a `apply` (lo que realmente se envió).
+  final List<bool> applyPriorities = [];
   final StreamController<JobEventNotification> _events =
       StreamController<JobEventNotification>.broadcast();
 
@@ -334,6 +337,7 @@ class DemoJobsBackend
     List<ScreeningAnswer> answers = const [],
     bool priority = false,
   }) async {
+    applyPriorities.add(priority);
     _enter('apply');
     final posting = _postings.firstWhere(
       (candidate) => candidate.id == postingId,
@@ -780,10 +784,12 @@ class DemoJobsBackend
           reason = QuoteReason.charge;
         }
       case ActionKeys.applicationPriority:
+        quota = const FreeQuota(monthlyLimit: 0, used: 0, remaining: 0);
         final already = targetId != null && _applications[targetId]?.isPriority == true;
         cost = already ? 0 : priorityCost;
         reason = already ? QuoteReason.alreadyRegistered : QuoteReason.charge;
       case ActionKeys.profileHighlight:
+        quota = const FreeQuota(monthlyLimit: 0, used: 0, remaining: 0);
         final active = highlightedUntil != null && highlightedUntil!.isAfter(DateTime.now());
         cost = active ? 0 : highlightCost;
         reason = active ? QuoteReason.alreadyRegistered : QuoteReason.charge;
