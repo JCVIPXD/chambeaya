@@ -150,11 +150,30 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
 
   Future<void> _restoreSession() async {
     AuthSession? restored;
+    // Audiencia de la sesión guardada que la API rechazó (401/403): se conserva
+    // para abrir directo el login y mostrar el aviso de sesión vencida.
+    AppAudience? expiredAudience;
+    AuthSession? stored;
     try {
-      restored = await _sessionStore.read();
-      if (restored != null && _usesLiveApi) {
-        restored = await _authRepository.restore(restored.token);
-        await _sessionStore.write(restored);
+      stored = await _sessionStore.read();
+      restored = stored;
+      if (stored != null && _usesLiveApi) {
+        try {
+          restored = await _authRepository.restore(stored.token);
+          await _sessionStore.write(restored);
+        } on AuthFailure catch (failure) {
+          if (failure.kind == AuthFailureKind.invalidCredentials) {
+            // La API rechazó el token: la sesión venció o se revocó.
+            expiredAudience = stored.audience;
+            restored = null;
+            await _sessionStore.clear();
+          } else {
+            // Sin conexión, API caída (5xx) u otro fallo que no dice nada del
+            // token: se conserva la sesión guardada y se entra con ella. Si
+            // después llega un 401, `onUnauthorized` la cierra con el aviso.
+            restored = stored;
+          }
+        }
       }
     } catch (_) {
       try {
@@ -167,9 +186,16 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     if (!mounted) return;
     setState(() {
       _session = restored;
-      _audience = restored?.audience;
+      _audience = restored?.audience ?? expiredAudience;
       _restoringSession = false;
     });
+    if (expiredAudience != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _messengerKey.currentState?.showSnackBar(
+          const SnackBar(content: Text('Tu sesión venció. Vuelve a ingresar.')),
+        );
+      });
+    }
   }
 
   Future<void> _authenticated(AuthSession session) async {

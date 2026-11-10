@@ -54,6 +54,109 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20261110-065 — Auditoría de `CN-20261110-064` (restaurar la sesión guardada, M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261110-064` (corrección del MEDIO-1 y el BAJO-1 de `CN-20261110-062`). Base `4b2cb15`, árbol sin commit. No se auditó ni tocó `apps/web` (`CN-20261110-063`, en curso).
+- Alcance: diff sin commit de `apps/mobile_flutter/lib/main.dart` (`_restoreSession`), `apps/mobile_flutter/test/m5_bajos_test.dart` y `docs/product/moneda-virtual.md`. Se incorpora el recorrido visual del coordinador sobre el `build/web` nuevo (API real).
+- Verificación:
+  - MEDIO-1 de `062` cerrado.
+    - Solo `AuthFailureKind.invalidCredentials` (`401`/`403` de `GET /auth/session`, según `AuthRepository._throwFailure`) borra la sesión guardada. En ese caso se conserva la audiencia, la app abre directo el login del trabajador y se agenda el aviso.
+    - Red caída, tiempo agotado, `5xx` u otro 4xx conservan la sesión guardada y entran con ella; un `401` posterior la cierra por `onUnauthorized` con el aviso.
+    - Solo un fallo que no es `AuthFailure` (lectura o escritura del almacenamiento, JSON inválido) cae en el `catch` externo, que conserva el comportamiento anterior.
+  - BAJO-1 de `062` cerrado: la prueba de `dispose` ya no deja un `JobsServices.demo()` sin liberar.
+  - Pruebas: cuatro nuevas en `ChambeayaApp` (`401`, `403`, red caída y `5xx`) con comprobaciones reales: sesión guardada borrada o conservada, login sin bienvenida, panel y aviso.
+  - Reproducción adicional del auditor con el almacenamiento real (`SharedPreferences` con las claves `chambeaya.session.*`) y el `AuthRepository` real sobre un `MockClient` que responde `401`, a 1280x800 y 390x844: login, `SnackBar` y texto del aviso presentes, y almacenamiento vacío. La prueba temporal se borró.
+- Hallazgo del recorrido visual («el aviso nunca se ve en la app real»): no se confirma como defecto.
+  - El auditor recargó `build/web` (`http://localhost:7357`, API real) con un token inválido sembrado en `localStorage` (`flutter.chambeaya.session.*`). La captura a ≈1,5 s mostraba el login sin aviso; la de ≈3 s mostraba el `SnackBar` «Tu sesión venció. Vuelve a ingresar.» al pie, a todo el ancho.
+  - El aviso existe, pero aparece después de la petición de restauración y dura los 4 s por defecto del `SnackBar`. Con capturas a 1, 2 y 6 s es fácil perderlo. Además, con el panel del navegador oculto la página deja de dibujar: al auditor le pasó en la segunda serie de capturas.
+  - No hay un `ScaffoldMessenger` ni un `Scaffold` propio en `AuthPage` que lo tape: el único messenger es el del `MaterialApp`, con `_messengerKey`.
+  - La prueba de widgets no difiere del caso real en el árbol, solo en el tiempo: bombea frames de 100 ms durante 2 s, justo dentro de la ventana del aviso.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos:
+  - BAJO-1 (UX). El aviso de sesión vencida es efímero: un `SnackBar` de 4 s que llega tras la petición de restauración, en el caso más común (abrir la app al día siguiente). Quien no mira el pie de la pantalla en ese momento entra al login sin saber por qué. Sugerencia: pasar `sessionExpired` a `AuthPage` y mostrar un aviso fijo sobre el formulario hasta el siguiente intento, o al menos alargar la duración y usar un `SnackBar` flotante. Sirve también para el `401` durante el uso.
+  - BAJO-2 (riesgo). El caso de red caída al abrir la app solo se prueba con widgets; no se probó en el navegador.
+- Documentación: `docs/product/moneda-virtual.md` describe el comportamiento actual (CRLF conservado; el aviso de Git es por `core.autocrlf=true`). No requiere cambios del auditor.
+- Validaciones (Flutter 3.44.0, en `apps/mobile_flutter`):
+  - `flutter analyze`: `No issues found! (ran in 6.5s)`.
+  - `flutter test`: `01:05 +277 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:57 +278: All tests passed!`.
+  - `pubspec.lock` sin cambios (hash igual).
+  - Prueba temporal del auditor con el almacenamiento y el repositorio reales: `LOGIN=1 SNACK=1 TEXT=1`, `PREFS={}` en ambos tamaños (`+2: All tests passed!`), y se borró.
+  - Navegador (panel integrado del auditor, `build/web` con la API real): login directo y `SnackBar` visible a ≈3 s, no a ≈1,5 s.
+- Riesgos: `NO_EJECUTADA`: Android/iOS o dispositivo real; red caída al abrir la app en un navegador real; medición precisa del tiempo de aparición del aviso, porque las capturas del panel oculto son poco fiables.
+- Siguiente paso: el MEDIO-1 y el BAJO-1 de `062` quedan cerrados; el coordinador puede hacer commit de `064`. El BAJO-1 de esta auditoría (aviso fijo de sesión vencida en el login) queda como mejora opcional para `implementador-sonnet`.
+
+### CN-20261110-063 — Corrección de MEDIO-1, BAJO-1, BAJO-2 y BAJO-3 de `CN-20261110-060` (restauración de archivos versionados y prueba de ráfaga del Resumen)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: corrige los hallazgos de `CN-20261110-060` (auditoría REQUIERE_CAMBIOS de `CN-20261110-058`). Rama `moneda-virtual`; árbol sin commit. No incluye `apps/mobile_flutter` ni los cambios de `docs/` de otras tareas.
+- Alcance: solo `apps/web`.
+- Archivos:
+  - `apps/web/scripts/tracked-files-guard.cjs` (nuevo; sustituye al `.mjs` de `058`)
+  - `apps/web/scripts/build-keeping-tracked-files.mjs`
+  - `apps/web/e2e/restore-tracked-files.cjs` (nuevo)
+  - `apps/web/e2e/global-teardown.mjs`
+  - `apps/web/playwright.config.ts`
+  - `apps/web/e2e/fixtures/fixed-jobs-api.ts` (`pushEvents`)
+  - `apps/web/e2e/overview-live-refresh.spec.ts`
+  - `apps/web/e2e/README.md` (punto 11)
+- Decisiones:
+  - MEDIO-1: se quitó `detached` en POSIX; la señal se reenvía con `child.kill(signal)` y en Windows se mantiene `taskkill /T /F`. Justificación por lectura de `playwright-core/lib/coreBundle.js`: la línea 9319 lanza el `webServer` con `detached: process.platform !== "win32"` y la 9409 lo detiene con `process.kill(-pid, "SIGKILL")` sobre el grupo del shell; sin `detached`, el build queda en ese grupo y muere con él.
+  - BAJO-1: `playwright.config.ts` importa `e2e/restore-tracked-files.cjs`, que llama a `recoverStale()` al cargar la configuración y en `process.on('exit')`, también cuando un `webServer` falla al arrancar y no corre el `globalTeardown`. `recoverStale` no toca nada si hay un dueño vivo. El `globalTeardown` se conserva. El guardián pasó a CommonJS (`.cjs`) porque Playwright carga la configuración en modo CJS y `import.meta` fallaba.
+  - BAJO-2: el fixture ganó `pushEvents` (varios avisos SSE en una sola entrega). El caso del Resumen envía 5 avisos, espera el dato actualizado y exige una sola recarga de la lista de puestos.
+  - BAJO-3: candado de archivo (carpeta atómica `chambeaya-tracked-files.lock`, caduca a los 10 s) alrededor de `acquire`, `release`, `recoverStale` y `forceRestore`; `acquire` es una sola sección crítica.
+- Validaciones:
+  - `npx tsc --noEmit` (apps/web): código 0, sin errores.
+  - `npx playwright test` (apps/web, puertos 3100/3101): `1 skipped`, `199 passed (5.3m)`, código 0. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes sha256 iguales a los del inicio (`tsconfig.json` 861ff5b0358034eee94b83b197f965c5a43d9884588a433f27645d167e4c38af, `next-env.d.ts` b8b3a344484b959af5e4e3fc1a1609dac3cb9ece0cdeb6c145be29bc4c491000) y `node_modules/.cache` vacío.
+  - Sin el agrupador (`trigger` ejecutando `run()` directo, restaurado después): el caso del Resumen falla con `Expected: 1  Received: 5` y el unitario con `Expected: 0  Received: 6`.
+  - Timeout de `webServer` en copia aislada de `apps/web` (`apps/_tmp-web-copy`, sin node_modules, borrada al terminar; `build` simulado que reescribe ambos archivos y se cuelga, `timeout` 10 s): `Error: Timed out waiting 10000ms from config.webServer.`; sin la red de seguridad los archivos quedaron `MODIFICADOS` con la copia en disco; con ella, `HASH_OK` y `.cache` vacío (también restauró la copia huérfana de la corrida anterior al cargar el config).
+  - Candado: 3 rondas de 8 procesos concurrentes (`acquire`, reescritura, `release`, tiempos al azar) en la copia: `ronda 1: iguales`, `ronda 2: iguales`, `ronda 3: iguales`, sin copia ni candado residuales.
+  - NO_EJECUTADA: el camino POSIX (`child.kill` sin `detached`, sin máquina POSIX) y SIGINT/SIGTERM reales; `apps/api` y `npm run test:web:admin-real`, fuera del alcance.
+- Riesgos:
+  - Un PID muerto reutilizado se toma como dueño vivo y retrasa la restauración hasta el siguiente arranque o salida de Playwright.
+  - Si Playwright mismo muere a la fuerza y no hay otra corrida, los archivos quedan hasta la siguiente corrida o hasta el comando manual del README.
+  - En POSIX, si `sh -c` no reenvía la señal al `npm` hijo, el build puede tardar en cortarse (guarda de 15 s).
+  - El Resumen tarda hasta 1 s (5 s en ráfagas continuas) en reflejar un aviso.
+- Siguiente paso: `auditor-opus` reaudita esta corrección.
+
+### CN-20261110-064 — Corrección del MEDIO-1 y el BAJO-1 de `CN-20261110-062` (restaurar la sesión guardada, M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261110-062` (auditoría `APROBADO` de `CN-20261110-061`, commit `4b2cb15`). Rama `moneda-virtual`, árbol de trabajo sin commit. No se tocó `apps/web` (en curso en `CN-20261110-063`) ni `apps/api`.
+- Alcance: solo `apps/mobile_flutter` y `docs/product/moneda-virtual.md`. MEDIO-1: `_restoreSession` ya no borra la sesión ante cualquier fallo; ante `401`/`403` borra la sesión, conserva la audiencia guardada, abre directo el login del trabajador y muestra «Tu sesión venció. Vuelve a ingresar.»; ante red caída, tiempo agotado o `5xx` conserva la sesión guardada y entra con ella. BAJO-1: la prueba de `JobsServices.dispose` ya no deja un `JobsServices.demo()` sin liberar.
+- Archivos:
+  - `apps/mobile_flutter/lib/main.dart` (`_restoreSession`)
+  - `apps/mobile_flutter/test/m5_bajos_test.dart` (4 pruebas nuevas; la prueba de `dispose` arma `DemoJobsBackend` y `WalletController` que `dispose` libera)
+  - `docs/product/moneda-virtual.md` (se quitó el caso pendiente de `CN-20261110-062` y se describe el comportamiento nuevo; CRLF conservado)
+- Decisiones:
+  - Solo `AuthFailureKind.invalidCredentials` (`401`/`403` de `AuthRepository.restore`, verificado en `auth_repository.dart`) cierra la sesión. `connectivity` (red o tiempo agotado), `server` (`5xx`) y `unknown` no dicen nada del token.
+  - Se eligió «entrar con la sesión guardada» en vez de una pantalla de reintento. Es lo más simple y seguro: no hay pantalla ni estado de reintento nuevos, no se cierra la sesión por un fallo ajeno al token, y si el token sí estaba vencido el primer `401` de las rutas del panel (`ApiClient.onUnauthorized`) la cierra con el mismo aviso y vuelve al login.
+  - El aviso se muestra tras el primer frame (`addPostFrameCallback`), porque el `ScaffoldMessenger` aún no existe al restaurar.
+  - Si falla el almacenamiento local al leer o borrar la sesión se conserva el comportamiento anterior (se limpia y vuelve la bienvenida).
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; `pubspec.lock` idéntico al original.
+  - `flutter analyze`: `No issues found! (ran in 4.0s)`.
+  - `flutter test`: `01:41 +277 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:56 +278: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `Compiling lib\main.dart for the Web... 57,6s` y `√ Built build\web`.
+  - Pruebas nuevas (token inválido con `401` y con `403`, red caída y `5xx`) comprueban sesión del almacén, pantalla (login directo sin bienvenida o `WorkerShell`) y aviso; el panel responde `503` a todo, así que no se confunde con un `401`.
+  - Prueba que falla sin el arreglo: con el comportamiento anterior reproducido temporalmente (`if (true)` y `expiredAudience = null`) fallaron 4 pruebas: token inválido `401` y `403` (`Found 0 widgets with text "Inicia sesión"`) y red caída y `5xx` (`Expected: 'guardado'  Actual: <null>`). Restaurado y comprobado con grep.
+  - NO_EJECUTADA: Android/iOS o dispositivo real.
+- Riesgos:
+  - Con red caída o `5xx` se entra al panel con la sesión guardada (sus errores aparecen como siempre, sin pantalla de reintento). Si el token estaba vencido, el cierre llega con el primer `401`.
+  - Una cuenta de empresa no hace llamadas a la API desde la app móvil, así que nunca se verifica su sesión guardada (sin cambio respecto a antes).
+- Siguiente paso: `auditor-opus` audita esta corrección y, si la aprueba, cierra el MEDIO-1 y el BAJO-1 de `CN-20261110-062`.
+
 ### CN-20261110-062 — Auditoría de `CN-20261110-061` (bajos abiertos de `CN-20261110-059`, M5 Flutter)
 
 - Fecha: 2026-11-10 (America/Lima)

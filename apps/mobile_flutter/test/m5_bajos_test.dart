@@ -11,6 +11,8 @@ import 'package:chambeaya_mobile/features/jobs/job_postings_page.dart';
 import 'package:chambeaya_mobile/features/jobs/jobs_models.dart';
 import 'package:chambeaya_mobile/features/jobs/jobs_services.dart';
 import 'package:chambeaya_mobile/features/onboarding/onboarding_page.dart';
+import 'package:chambeaya_mobile/features/marketplace/worker_shell.dart';
+import 'package:chambeaya_mobile/features/wallet/wallet_controller.dart';
 import 'package:chambeaya_mobile/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -79,6 +81,22 @@ class _RecordingAuthRepository extends AuthRepository {
     registrations.add('$email|$identifier');
     return Future<AuthSession>.error(const AuthFailure(AuthFailureKind.connectivity));
   }
+}
+
+/// `restore` falla con lo que se le indique (la API rechaza el token, no hay red, 5xx).
+class _FailingRestoreRepository extends AuthRepository {
+  _FailingRestoreRepository(this.failure);
+  final AuthFailure failure;
+  var restores = 0;
+
+  @override
+  Future<AuthSession> restore(String token) async {
+    restores += 1;
+    throw failure;
+  }
+
+  @override
+  Future<void> logout(String token) async {}
 }
 
 /// Fuente de avisos que cuenta conexiones y permite emitir a mano.
@@ -180,6 +198,76 @@ void main() {
     });
   });
 
+  group('Restaurar la sesión guardada al abrir la app', () {
+    // La API del panel responde 503 a todo: no es un 401, no cierra la sesión.
+    final unavailable = MockClient.streaming((request, _) async {
+      return http.StreamedResponse(Stream.value('{}'.codeUnits), 503);
+    });
+
+    Future<_MemorySessionStore> open(WidgetTester tester, AuthFailure failure) async {
+      SharedPreferences.setMockInitialValues({});
+      final store = _MemorySessionStore(
+        const AuthSession(token: 'guardado', audience: AppAudience.worker, name: 'Ana Torres'),
+      );
+      await tester.pumpWidget(
+        ChambeayaApp(
+          sessionStore: store,
+          authRepository: _FailingRestoreRepository(failure),
+          demoModeOverride: false,
+          jobsHttpClient: unavailable,
+        ),
+      );
+      await tester.pump();
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      return store;
+    }
+
+    Future<void> close(WidgetTester tester) async {
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+      await tester.pump();
+    }
+
+    for (final status in [401, 403]) {
+      testWidgets('token inválido ($status): login directo con el aviso y sesión borrada', (
+        tester,
+      ) async {
+        final store = await open(
+          tester,
+          AuthFailure(AuthFailureKind.invalidCredentials, statusCode: status),
+        );
+        expect(store.session, isNull);
+        expect(find.text('Inicia sesión'), findsOneWidget);
+        expect(find.byType(OnboardingPage), findsNothing);
+        expect(find.text('Tu sesión venció. Vuelve a ingresar.'), findsOneWidget);
+        await close(tester);
+      });
+    }
+
+    testWidgets('red caída: conserva la sesión y entra al panel', (tester) async {
+      final store = await open(tester, const AuthFailure(AuthFailureKind.connectivity));
+      expect(store.session?.token, 'guardado');
+      expect(find.byType(WorkerShell), findsOneWidget);
+      expect(find.text('Inicia sesión'), findsNothing);
+      expect(find.byType(OnboardingPage), findsNothing);
+      expect(find.text('Tu sesión venció. Vuelve a ingresar.'), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets('5xx de la API: conserva la sesión y entra al panel', (tester) async {
+      final store = await open(
+        tester,
+        const AuthFailure(AuthFailureKind.server, statusCode: 503),
+      );
+      expect(store.session?.token, 'guardado');
+      expect(find.byType(WorkerShell), findsOneWidget);
+      expect(find.text('Tu sesión venció. Vuelve a ingresar.'), findsNothing);
+      await close(tester);
+    });
+  });
+
   group('BAJO-3: el 401 también llega por el SSE', () {
     test('HttpJobEventsSource avisa a onUnauthorized y emite el error', () async {
       var expired = 0;
@@ -277,10 +365,12 @@ void main() {
 
     test('JobsServices.dispose corta la conexión compartida', () async {
       final inner = _CountingSource();
+      final backend = DemoJobsBackend();
+      // `dispose` libera el controlador de saldo que se le entrega.
       final services = JobsServices(
-        jobs: DemoJobsBackend(),
-        wallet: DemoJobsBackend(),
-        walletController: JobsServices.demo().walletController,
+        jobs: backend,
+        wallet: backend,
+        walletController: WalletController(backend),
         events: inner,
       );
       services.events.watch().listen((_) {});
