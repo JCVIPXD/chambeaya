@@ -49,6 +49,8 @@ export type FixedJobsServer = {
   workerAccepts: (applicationId: string) => void;
   /** Publica un aviso SSE a la conexión abierta del panel. */
   pushEvent: (event: { type: string; applicationId: string; postingId: string; status: ApplicationStatus }) => void;
+  /** Publica varios avisos SSE seguidos en una sola entrega (una ráfaga) a la conexión abierta del panel. */
+  pushEvents: (events: Array<{ type: string; applicationId: string; postingId: string; status: ApplicationStatus }>) => void;
   sseConnections: () => number;
   closePosting: (postingId: string) => void;
 };
@@ -195,15 +197,15 @@ export async function installFixedJobsApi(page: Page, options: FixedJobsOptions 
     stored.detail.updatedAt = new Date().toISOString();
   }
 
-  function pushToPanel(event: { type: string; applicationId: string; postingId: string; status: ApplicationStatus }) {
+  function pushToPanel(...events: Array<{ type: string; applicationId: string; postingId: string; status: ApplicationStatus }>) {
     // Las conexiones de vistas que ya se cerraron quedan pendientes en la lista (el navegador las abortó):
     // se usa la más reciente y, si esa ya no existe, la anterior.
     const body = `retry: 2000
 
-event: job
+${events.map((event) => `event: job
 data: ${JSON.stringify({ ...event, at: new Date().toISOString() })}
 
-`;
+`).join('')}`;
     void (async () => {
       while (sse.length > 0) {
         const waiting = sse.pop()!;
@@ -261,7 +263,8 @@ data: ${JSON.stringify({ ...event, at: new Date().toISOString() })}
       addEvent(stored, 'OFFER_ACCEPTED', 'WORKER', 'OFFER', 'ACCEPTED');
       pushToPanel({ type: 'OFFER_ACCEPTED', applicationId, postingId: stored.postingId, status: 'ACCEPTED' });
     },
-    pushEvent: pushToPanel,
+    pushEvent: (event) => pushToPanel(event),
+    pushEvents: (events) => pushToPanel(...events),
     sseConnections: () => sseOpened,
     closePosting: (postingId) => {
       const posting = find(postingId)!;

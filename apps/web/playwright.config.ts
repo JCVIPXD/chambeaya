@@ -1,11 +1,14 @@
 import { defineConfig, devices } from '@playwright/test';
 
+import './e2e/restore-tracked-files.cjs';
+
 const baseURL = 'http://127.0.0.1:3100';
 // Segundo panel compilado SIN la bandera de turnos temporales (el valor por defecto de producción).
 export const flagOffURL = 'http://127.0.0.1:3101';
 
 export default defineConfig({
   testDir: './e2e',
+  globalTeardown: './e2e/global-teardown.mjs',
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,

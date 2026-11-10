@@ -54,6 +54,40 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20261110-066 — Reauditoría de `CN-20261110-063` (restauración de archivos versionados y prueba de ráfaga del Resumen)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: reaudita `CN-20261110-063`, que corrige MEDIO-1, BAJO-1, BAJO-2 y BAJO-3 de `CN-20261110-060`. Cierra también `CN-20261110-058` (agrupador del Resumen, sin cambios desde `060`). Rama `moneda-virtual` sobre `4b2cb15`, árbol sin commit. No se auditó `apps/mobile_flutter` (`064`/`065`).
+- Alcance: `apps/web/scripts/{tracked-files-guard.cjs,build-keeping-tracked-files.mjs}`, `apps/web/e2e/{restore-tracked-files.cjs,global-teardown.mjs,overview-live-refresh.spec.ts,README.md}`, `apps/web/e2e/fixtures/fixed-jobs-api.ts`, `apps/web/playwright.config.ts`, y `apps/web/features/jobs/{coalesce.ts,overview-view.tsx}` de `058`.
+- Verificación por hallazgo:
+  - MEDIO-1: resuelto. Ya no hay `detached`: el build queda en el grupo del shell que Playwright mata con `process.kill(-pid, 'SIGKILL')`. En Windows se mantiene `taskkill /T /F`. Revisado por lectura de código (no hay POSIX aquí).
+  - BAJO-1: resuelto. En una copia aislada, con la configuración real y un `timeout` de 6 s en el segundo `webServer`, el seguimiento cada 200 ms mostró `15:22:24.936 A5627267 backup=True`, luego `Error: Timed out waiting 6000ms from config.webServer.` (`PW_EXIT=1`) y `15:22:27.276 861FF5B0 backup=False`. Lo restauró el `process.on('exit')` de `restore-tracked-files.cjs` sin que corriera el teardown. La carga del config también recuperó una copia huérfana que dejó un proceso cortado a la fuerza (hashes originales).
+  - BAJO-2: resuelto. Con `overview-view.tsx` en su versión `HEAD` (sin agrupador), en la copia: `Expected: 1`, `Received: 5` en escritorio y móvil; con el agrupador pasa.
+  - BAJO-3: resuelto. `acquire`, `release`, `recoverStale` y `forceRestore` comprueban dueños, copian y borran dentro del mismo candado (carpeta creada de forma atómica).
+- Lo pedido en especial:
+  - `recoverStale` al cargar el config no restaura durante un build de la misma corrida. En Playwright la configuración se carga antes de los `webServer` y los workers después de que terminaron los builds. Además, en la copia, a mitad de un build real (`A5627267`, dueño vivo) se ejecutó `require('./e2e/restore-tracked-files.cjs')`: siguió en `A5627267` con la copia intacta, y al terminar el build quedó en `861FF5B0/B8B3A344` sin copia.
+  - El candado no queda trabado. Uno viejo se descarta al instante (`secs=0.1`); uno recién huérfano, a los 10 s (`secs=10.1`), en ambos casos con salida 0 y sin candado residual. La espera máxima es de 30 s y termina en un error explícito, no en un bloqueo.
+  - Imports del config: `playwright.config.ts` importa un `.cjs` (Playwright transpila la configuración a CJS) y los `.mjs` importan el `.cjs` por su exportación por defecto (interoperabilidad de Node 22, el de `web-tests.yml`). El `.mjs` viejo no existe y nada lo importa (solo aparece en entradas históricas de este registro). `npx tsc --noEmit` sin errores y la suite completa carga el config y el teardown.
+  - Build fallido: en la copia, con un error de tipos temporal, `Failed to type check.` y `BUILD_EXIT=1`, con archivos restaurados y sin copia.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos: ninguno bloqueante. Observaciones:
+  - (a) El comentario de cabecera de `build-keeping-tracked-files.mjs:5-7` todavía no menciona la recuperación al cargar o salir del config; el README sí.
+  - (b) Si dos procesos ven a la vez un candado vencido, el segundo puede borrar el candado recién creado por el primero (comprobar y borrar no son atómicos); requiere un candado huérfano y dos esperas simultáneas.
+  - (c) En POSIX, un dueño muerto por SIGKILL que aún no fue recolectado (zombi) cuenta como vivo al salir Playwright, y la restauración pasa a la corrida siguiente.
+  - (d) `playwright.admin-real.config.ts` compila con `npm run build` sin el guardián (sin cambios desde antes).
+- Documentación: `apps/web/e2e/README.md` (punto 11) describe el comportamiento actual (recuperación al cargar o salir del config, teardown solo en corridas completas, candado y ráfaga del Resumen). `docs/guides`, `docs/reference` y `docs/product` no cambian.
+- Validaciones:
+  - `npx tsc --noEmit` (`apps/web`): `WEB_TSC_EXIT=0`.
+  - `npx playwright test` (`apps/web`, árbol real): `1 skipped`, `199 passed (4.4m)`, `PW_EXIT=0`. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes `861FF5B0…`/`B8B3A344…` iguales a los del inicio y `apps/web/node_modules/.cache` vacío.
+  - En la copia aislada `D:\Proyectos JCTS\audit066-copy` (borrada al terminar; se quitó primero el enlace a `node_modules` y el del repo quedó intacto): build fallido, recuperación tras un cierre forzado, `recoverStale` a mitad de un build, candados viejo y huérfano, dos vencimientos de `timeout` del `webServer` y la prueba del Resumen sin agrupador. Resultados arriba.
+  - NO_EJECUTADA: el camino POSIX en vivo y SIGINT/SIGTERM reales.
+- Riesgos residuales: las observaciones (b) y (c); un PID reutilizado retrasa la restauración; si Playwright mismo muere a la fuerza, los archivos se restauran en la siguiente corrida o con el comando manual del README. El Resumen tarda hasta 1 s (5 s en ráfagas continuas) en reflejar un aviso.
+- Decisión: `APROBADO`. Quedan cerrados MEDIO-1, BAJO-1, BAJO-2 y BAJO-3 de `CN-20261110-060`, la corrección `CN-20261110-058` y, con ellas, el BAJO-1 nuevo y el riesgo de `listAll` de `CN-20261110-056`.
+- Siguiente paso: commit de los cambios de `058`/`063` en `apps/web` (coordinador); las observaciones (a) a (d) pueden atenderse cuando convenga.
+
 ### CN-20261110-065 — Auditoría de `CN-20261110-064` (restaurar la sesión guardada, M5 Flutter)
 
 - Fecha: 2026-11-10 (America/Lima)

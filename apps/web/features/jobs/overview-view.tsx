@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback } from 'react';
+import { useEffect, useMemo } from 'react';
 import { BriefcaseBusiness, Plus, Search, Users, WalletCards } from 'lucide-react';
 
+import { createCoalescer } from './coalesce';
 import { formatCoins } from './format';
 import { useJobEvents } from './job-events';
 import { useJobs } from './jobs-context';
@@ -11,12 +12,18 @@ import { POSTING_STATUS_LABEL } from './labels';
 import { EmptyBlock, ErrorBlock, LoadingBlock, StatusPill, ViewHeading } from './ui';
 import { useResource } from './use-resource';
 
+const LIVE_REFRESH_WAIT_MS = 1000;
+const LIVE_REFRESH_MAX_WAIT_MS = 5000;
+
 /** Resumen de la empresa cuando los turnos temporales están apagados: puestos, postulantes y saldo. */
 export function OverviewView({ companyName, requestCreate }: { companyName: string; requestCreate: () => void }) {
   const { token, currency, balance, balanceError, onUnauthorized, goTo, setSelectedPostingId } = useJobs();
   const postings = useResource(() => jobsApi.postings.listAll(token), 'overview', { onUnauthorized, currency });
   const { reload } = postings;
-  const onEvent = useCallback(() => void reload({ silent: true }), [reload]);
+  // `listAll` son hasta 20 peticiones: una ráfaga de avisos en vivo se agrupa en una sola recarga silenciosa.
+  const refresh = useMemo(() => createCoalescer(() => void reload({ silent: true }), { waitMs: LIVE_REFRESH_WAIT_MS, maxWaitMs: LIVE_REFRESH_MAX_WAIT_MS }), [reload]);
+  useEffect(() => refresh.cancel, [refresh]);
+  const onEvent = refresh.trigger;
   useJobEvents(token, true, onEvent, onUnauthorized);
 
   const items = postings.data?.items ?? [];

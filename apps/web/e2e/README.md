@@ -189,14 +189,26 @@ siempre con Chromium; no es una prueba en un teléfono físico):
     ni un texto del flujo de turnos y que, encendida, conviven las vistas viejas y las nuevas. Los puertos 3100 y
     3101 deben estar libres.
     **Archivos versionados:** compilar con otro `distDir` hace que Next.js reescriba `apps/web/tsconfig.json` (agrega
-    `.next-flag-off/types/**/*.ts` al `include`) y `apps/web/next-env.d.ts`. Ya no hay paso manual: el segundo panel
-    se compila con `apps/web/scripts/build-keeping-tracked-files.mjs`, que guarda esos dos archivos antes del build y
-    los restaura byte a byte al terminar (también si el build falla, conservando su código de salida, o con Ctrl+C).
-    Si el proceso se mata a la fuerza durante el build (Playwright detiene sus servidores con `taskkill /T /F` en
-    Windows o `SIGKILL`, por ejemplo al vencer el `timeout` de 180 s del `webServer`), no hay restauración: en ese
-    caso revisa `git status` y restáuralos con `git checkout -- apps/web/tsconfig.json apps/web/next-env.d.ts`.
-    Tras una corrida normal de `npm run test:web`, `git status` no debe mostrarlos modificados (BAJO-1 de
-    `CN-20261013-052`, corregido en `CN-20261110-054`).
+    `.next-flag-off/types/**/*.ts` al `include`) y `apps/web/next-env.d.ts`. No hay paso manual: ambos paneles se
+    compilan con `apps/web/scripts/build-keeping-tracked-files.mjs`, que guarda una copia de esos dos archivos en
+    disco (`apps/web/node_modules/.cache/chambeaya-tracked-files`, ignorada por git; lógica en
+    `scripts/tracked-files-guard.cjs`, con un candado de archivo alrededor del registro de dueños y del borrado de la
+    copia) y los restaura byte a byte al terminar el último build en curso, también si el build falla (conserva su
+    código de salida) o con Ctrl+C/SIGTERM (reenvía la señal al hijo y restaura cuando este termina). En POSIX el
+    script no separa el grupo de procesos: Playwright detiene su `webServer` con `process.kill(-pid, 'SIGKILL')` sobre
+    el grupo del shell y el build debe morir con él. Si el proceso muere a la fuerza durante el build (Playwright usa
+    `taskkill /T /F` en Windows o `SIGKILL`, por ejemplo al vencer el `timeout` de 180 s del `webServer`) no corre
+    ningún manejador, pero la copia queda en disco y la restauran, sin tocar nada si hay un build vivo: el inicio del
+    siguiente `build-keeping-tracked-files.mjs`; `playwright.config.ts` (importa `e2e/restore-tracked-files.cjs`), tanto
+    al cargarse como al salir el proceso de Playwright, incluso cuando un `webServer` falla al arrancar (caso en que
+    Playwright no ejecuta el `globalTeardown`); y el `globalTeardown` (`e2e/global-teardown.mjs`) en corridas
+    completas. Si aun así quedaran modificados (por ejemplo, Playwright mismo fue matado), ejecuta
+    `node -e "import('./e2e/global-teardown.mjs').then((m) => m.default())"` en `apps/web` o vuelve a lanzar la
+    suite. Tras una corrida de `npm run test:web`, `git status` no debe mostrarlos modificados (BAJO-1 de
+    `CN-20261013-052`, corregido en `CN-20261110-054`, `CN-20261110-058` y `CN-20261110-063`).
+    El Resumen agrupa los avisos en vivo (espera 1 s sin avisos nuevos, tope de 5 s) en una sola recarga de
+    puestos; lo cubre `overview-live-refresh.spec.ts` (una ráfaga de cinco avisos debe dar una sola recarga; falla sin el
+    agrupador).
     Con la bandera apagada la campana de notificaciones se oculta y no se muestra el plan (BAJO-6); el selector de
     puesto y el Resumen recorren todas las páginas de puestos (BAJO-7, 105 puestos en `fixed-jobs-applicants.spec.ts`);
     el doble clic en «Emitir oferta» emite una sola oferta (BAJO-3), «Nuevo puesto» tiene nombre accesible en móvil
