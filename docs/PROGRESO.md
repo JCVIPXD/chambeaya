@@ -54,6 +54,47 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20261111-068 — Auditoría de `CN-20261111-067` (CI: `prisma generate` antes de las pruebas de integración de la API)
+
+- Fecha: 2026-11-11 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261111-067` (cambio del coordinador en `.github/workflows/web-tests.yml`, sin commit; PR https://github.com/JCVIPXD/chambeaya/pull/1).
+- Alcance: el diff de `web-tests.yml` (un paso y su comentario), `flutter-tests.yml`, `apps/api/package.json`, `apps/api/prisma/schema.prisma`, los Dockerfiles de la API y qué importan `apps/web` y `packages/`.
+- Verificaciones conformes:
+  - Orden y esquema: el paso va después de `npm ci` (que instala `prisma` 6.12.0) y antes de `migrate deploy` y `test:integration`. `npm exec --workspace=@chambeaya/api` corre en `apps/api`, donde Prisma 6 toma por defecto `prisma/schema.prisma` (no hay `prisma.config.*` ni la clave `prisma` en `package.json`). El generador `prisma-client-js`, sin `output`, escribe en el `.prisma/client` que resuelve el `@prisma/client` instalado en la raíz. `generate` no necesita `DATABASE_URL`; el `env` del job ya lo da para los pasos siguientes.
+  - Otros jobs y workflows: `browser-tests` ejecuta la Playwright rápida con la API simulada y ni `apps/web` ni `packages/` importan `@prisma/client` ni `@chambeaya/api` (solo `playwright.admin-real.config.ts`, que no corre en CI). `flutter-quality` no usa Node. Ninguno necesita el paso.
+  - La réplica de `067` no bastaba por sí sola: corrió en el árbol de desarrollo, donde el cliente ya estaba generado, así que no reprodujo el fallo. El auditor repitió el job desde una instalación limpia y lo confirmó.
+- Réplica limpia del job: copia mínima del monorepo (raíz, `apps/api`, `packages/`, `apps/web/package.json`) en el directorio temporal de la sesión, PostgreSQL 16-alpine desechable en `127.0.0.1:57240` con las mismas credenciales y la misma `DATABASE_URL` del job; ambos borrados al terminar.
+  - `npm ci`: `added 192 packages in 1m`, código 0. El `.prisma/client/index.js` instalado es el stub que lanza `@prisma/client did not initialize yet. Please run "prisma generate"…`.
+  - Sin el paso nuevo: `migrate deploy`, `All migrations have been successfully applied.`; `test:integration`, `TypeError: Cannot read properties of undefined (reading 'Serializable')`. Es el mismo error del CI en `9873ca0`.
+  - Con el paso nuevo: `prisma generate`, código 0; `migrate deploy`, `No pending migrations to apply.`; `test:integration`, `Test Files  21 passed (21)`, `Tests  232 passed (232)`, código 0.
+- Hallazgos críticos, altos, medios y bajos: ninguno.
+- Observaciones (fuera de alcance, no bloquean): ningún job de CI ejecuta `npm test` (unitarias) ni `npx tsc --noEmit` de `apps/api`. Ese job también necesitaría `prisma generate`.
+- Documentación: no hay guía de CI en `docs/` que cambie; el comentario del workflow explica el paso.
+- Riesgos residuales: NO_EJECUTADA la corrida real en GitHub Actions (Ubuntu en lugar de Windows; el cliente se genera para la plataforma del runner, así que no cambia el resultado esperado).
+- Decisión: `APROBADO`.
+- Siguiente paso: commit y push a `moneda-virtual` (coordinador) y comprobar `api-integration-tests` en el PR.
+
+### CN-20261111-067 — CI: generar el cliente de Prisma antes de las pruebas de integración de la API
+
+- Fecha: 2026-11-11 (America/Lima)
+- Agente: coordinador (Claude Opus 5.5; cambio de una línea hecho fuera de `implementador-sonnet`, declarado aquí y enviado a auditoría como cualquier otro)
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: PR https://github.com/JCVIPXD/chambeaya/pull/1 (`moneda-virtual` → `main`, head `9873ca0`). El job `api-integration-tests` de `.github/workflows/web-tests.yml` falla desde `main` (`d4a65d0`: «@prisma/client did not initialize yet. Please run "prisma generate"») y en la rama (`9873ca0`: `TypeError: Cannot read properties of undefined (reading 'Serializable')` en `apps/api/src/modules/admin/admin.routes.ts:67`, al importar `src/app.ts`).
+- Alcance: el job hace `npm ci` en la raíz del monorepo y `prisma migrate deploy`, pero nunca `prisma generate`; como el esquema vive en `apps/api/prisma`, el postinstall de `@prisma/client` no genera el cliente y todas las pruebas de integración caen al importar la app. Se añade el paso `npm exec --workspace=@chambeaya/api -- prisma generate` entre `npm ci` y `migrate deploy`, con un comentario. No cambia código de la aplicación.
+- Archivos: `.github/workflows/web-tests.yml`.
+- Decisiones: se usa la misma forma de invocación que el paso existente de `migrate deploy` (workspace de la API, esquema por defecto `apps/api/prisma/schema.prisma`). Los Dockerfiles ya generaban el cliente (`Dockerfile.dev`, `Dockerfile.production`); el job `browser-tests` y `flutter-quality` no dependen del cliente y ya pasaban.
+- Validaciones (réplica local de los pasos del job, PostgreSQL 16-alpine desechable en `127.0.0.1:57230`, base `chambeaya_test`, borrado al terminar):
+  - `npm exec --workspace=@chambeaya/api -- prisma generate`: generó el cliente sin errores.
+  - `npm exec --workspace=@chambeaya/api -- prisma migrate deploy`: `All migrations have been successfully applied.`
+  - `npm run test:integration --workspace=@chambeaya/api` con `CHAMBEAYA_INTEGRATION_TESTS=true`: `Test Files  21 passed (21)`, `Tests  232 passed (232)`.
+  - NO_EJECUTADA: la corrida real en GitHub Actions (se verificará tras el push al PR).
+- Riesgos: ninguno conocido más allá de la corrida en Actions pendiente. Avisos del runner no relacionados: acciones en Node.js 20 forzadas a Node.js 24 y migración de `ubuntu-latest` a Ubuntu 26.
+- Siguiente paso: `auditor-opus` audita; tras `APROBADO`, commit y push a `moneda-virtual` y comprobar el CI del PR.
+
 ### CN-20261110-066 — Reauditoría de `CN-20261110-063` (restauración de archivos versionados y prueba de ráfaga del Resumen)
 
 - Fecha: 2026-11-10 (America/Lima)

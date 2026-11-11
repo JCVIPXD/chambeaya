@@ -71,5 +71,9 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # npm ci en la raíz del monorepo no genera el cliente de Prisma (el
+      # esquema vive en apps/api/prisma); sin este paso todas las pruebas de
+      # integración fallan al importar la app.
+      - run: npm exec --workspace=@chambeaya/api -- prisma generate
       - run: npm exec --workspace=@chambeaya/api -- prisma migrate deploy
       - run: npm run test:integration --workspace=@chambeaya/api
