@@ -6,6 +6,7 @@ import { marketplaceShiftEvents, type MarketplaceShiftEvents } from './marketpla
 import { isRetryableTransactionError } from '../operations/serializable-retry.js';
 import { DatabaseMarketplaceService, DemoMarketplaceService, MarketplaceError, type MarketplaceOperations } from './marketplace.service.js';
 import type { ShiftIndustry, ShiftSearchFilter } from './shift_search.js';
+import { TEMPORARY_SHIFTS_DISABLED_ERROR, temporaryShiftsEnabled } from '../temporary-shifts.js';
 
 const screeningAnswersSchema = z.object({
   answers: z.array(z.object({
@@ -59,9 +60,10 @@ export function createMarketplaceRouter(
   service: MarketplaceOperations = new DatabaseMarketplaceService(),
   events: MarketplaceShiftEvents = marketplaceShiftEvents,
   authService: AuthService = new DatabaseAuthService(),
-  options: { feedRefreshIntervalMs?: number } = {},
+  options: { feedRefreshIntervalMs?: number; temporaryShiftsEnabled?: boolean } = {},
 ) {
   const feedRefreshIntervalMs = options.feedRefreshIntervalMs ?? DEFAULT_FEED_REFRESH_INTERVAL_MS;
+  const legacyShiftsEnabled = options.temporaryShiftsEnabled ?? temporaryShiftsEnabled();
   const router = Router();
   const workerId = (value: unknown) => typeof value === 'string' && value.trim() ? value : 'worker-demo';
   const authenticatedWorkerId = async (request: import('express').Request) => {
@@ -189,6 +191,10 @@ export function createMarketplaceRouter(
   });
   router.post('/shifts/:id/applications', async (request, response) => {
     try {
+      if (!legacyShiftsEnabled) {
+        response.status(503).json({ error: TEMPORARY_SHIFTS_DISABLED_ERROR });
+        return;
+      }
       const input = screeningAnswersSchema.parse(request.body ?? {});
       const application = await service.applyToShift(await authenticatedWorkerId(request), request.params.id, input.answers);
       response.status(201).json(application);

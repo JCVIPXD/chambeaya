@@ -39,6 +39,8 @@ export function buildShift(overrides: Partial<ShiftRecord> = {}): ShiftRecord {
     notes: null,
     rescueActive: false,
     status: 'ASSIGNED',
+    commissionBps: 1000,
+    taxBps: 1800,
     ...overrides,
   };
 }
@@ -142,11 +144,23 @@ type Hold = {
 };
 
 function paymentFor(shift: ShiftRecord, application: ShiftApplicationRecord): PaymentRecord {
+  // Comisión/IGV del turno (fijados al publicarlo), o el 10%/18% por
+  // defecto de este fixture si el escenario no los sobreescribió.
+  const commissionBps = shift.commissionBps ?? 1000;
+  const taxBps = shift.taxBps ?? 1800;
+  const commissionCents = Math.floor((shift.payCents * commissionBps + 5000) / 10000);
+  const taxCents = Math.floor((commissionCents * taxBps + 5000) / 10000);
   return {
     id: `payment-${application.id}`,
     reference: `CN-TEST-${application.id.toUpperCase()}`,
     description: `${shift.title} · Empresa de pruebas UI`,
     amountCents: shift.payCents,
+    commissionBps,
+    commissionCents,
+    taxBps,
+    taxCents,
+    totalCents: shift.payCents + commissionCents + taxCents,
+    provider: 'manual',
     workerCount: 1,
     status: 'PENDING',
     // Vence al terminar el turno: cae dentro de "Esta semana" (`app/page.tsx`).

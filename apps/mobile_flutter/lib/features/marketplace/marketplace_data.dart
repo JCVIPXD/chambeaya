@@ -220,6 +220,8 @@ class PaymentRecord {
     this.id,
     this.reference,
     this.receiptConfirmed = false,
+    this.canConfirmReceipt = false,
+    this.date,
   });
   final String? id;
   final String company;
@@ -228,6 +230,17 @@ class PaymentRecord {
   final String status;
   final String? reference;
   final bool receiptConfirmed;
+  // Alcance D: derivado por la API (`GET /workers/wallet`, campo
+  // `canConfirmReceipt`), nunca calculado en el cliente a partir de
+  // `provider` -ese campo nunca se expone al trabajador, ver
+  // `apps/api/tests/marketplace.no-commission-leak.test.ts`. Solo es `true`
+  // si el pago es manual, ya está `PROCESSED` ("Pagado") y todavía no se
+  // confirmó la recepción.
+  final bool canConfirmReceipt;
+  // Fecha del movimiento (`createdAt` del pago o de la fila del historial),
+  // ya formateada por el repositorio. `null` en los movimientos de
+  // demostración que no traen fecha propia.
+  final String? date;
 }
 
 class CompanyMetrics {
@@ -323,27 +336,37 @@ List<Shift> filterDemoShifts(List<Shift> shifts, ShiftSearchFilter filter) {
   return results;
 }
 
+// Coherente con los tres estados de "Mis pagos" (Alcance D): pendiente de
+// pago, pagado (aún sin confirmar la recepción) y recepción confirmada.
 const paymentHistory = [
   PaymentRecord(
+    id: 'demo-payment-la-mar',
     company: 'Restaurante La Mar',
     role: 'Atención al Cliente',
     amount: 'S/ 90.00',
     status: 'Liberado',
     reference: 'LA-MAR-001',
+    canConfirmReceipt: true,
+    date: '2026-09-20T00:00:00.000Z',
   ),
   PaymentRecord(
+    id: 'demo-payment-cafe-del-cielo',
     company: 'Café del Cielo',
     role: 'Barista',
     amount: 'S/ 110.00',
     status: 'Liberado',
     reference: 'CC-2026-014',
+    receiptConfirmed: true,
+    date: '2026-09-12T00:00:00.000Z',
   ),
   PaymentRecord(
+    id: 'demo-payment-eventos-peru',
     company: 'Eventos Perú',
     role: 'Azafata de Eventos',
     amount: 'S/ 130.00',
     status: 'Pendiente',
     reference: 'EP-2026-022',
+    date: '2026-09-24T00:00:00.000Z',
   ),
 ];
 

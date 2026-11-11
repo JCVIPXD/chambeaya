@@ -106,6 +106,59 @@ curl http://127.0.0.1:4000/api/health
 curl http://127.0.0.1:3000
 ```
 
+### Pagos: modo simulado (Alcance E del plan de pagos)
+
+`docker-compose.yml` arranca la API con `PAYMENT_PROVIDER=simulated` y un
+`PAYMENT_WEBHOOK_SECRET` de desarrollo fijo (nunca lo uses en producción; el
+instalador genera uno propio por servidor, ver
+[Despliegue con Docker](deployment.md)). En este modo:
+
+- `GET /api/business/payment-settings` devuelve `mode: 'simulated'`.
+- Al completar una asignación (check-out del trabajador, o el cierre manual
+  de un `NO_SHOW`/`ABANDONED` con `outcome: 'COMPLETED'`), el `Payment` nace
+  con `provider: 'simulated'` en vez de `'manual'`.
+- `POST /api/business/payments/:id/checkout` funciona de verdad: crea un
+  `PaymentAttempt` y devuelve un `redirectUrl` hacia
+  `${PANEL_PUBLIC_URL}/pago-simulado/<checkoutId>`.
+- En el panel, el pago muestra **"Pagar en simulador"** (o **"Continuar
+  pago"** si ya existe un intento). La página de checkout requiere la sesión
+  de la empresa dueña y permite aprobar o rechazar la prueba; no mueve dinero.
+- `POST /api/payments/simulated/:checkoutId/approve` (o `.../reject`), con la
+  sesión de la empresa dueña del pago, recorre el mismo camino que un
+  webhook real firmado — sin mover dinero — y deja el pago `PROCESSED` o de
+  vuelta en `PENDING`.
+
+Para volver al modo sin pasarela en el mismo entorno local, exporta
+`PAYMENT_PROVIDER=manual` antes de `docker compose up` (o edítalo en tu
+propio `.env`, si usas uno junto a `docker-compose.yml`); con `manual`,
+`checkout` responde `409 PROVIDER_MANUAL` y el flujo vuelve a ser el de
+"marcar como pagado" descrito en [API y reglas operativas](../reference/api.md).
+
+### Turnos temporales pausados (M0) y moneda virtual (M1)
+
+Desde `CN-20261001-032` los turnos temporales están apagados por defecto: la
+API responde `503 TEMPORARY_SHIFTS_DISABLED` al publicar un turno o postular,
+el panel de empresa se centra en puestos fijos (ver «Panel de empresa de puestos fijos», abajo) y Flutter oculta "Postular". Lo
+ya sembrado por `npm run demo:seed` (la postulación pendiente, aceptar,
+check-in, pagos) sigue funcionando. Para reactivar el flujo legado en tu
+máquina hacen falta las tres banderas: `TEMPORARY_SHIFTS_ENABLED=true` en la
+API, `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` al arrancar o compilar el
+panel, y `--dart-define=TEMPORARY_SHIFTS_ENABLED=true` en Flutter.
+Con Docker, `docker-compose.yml` reenvía `TEMPORARY_SHIFTS_ENABLED` y
+`VIRTUAL_CURRENCY_NAME` a la API y `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED` al
+panel (desde `CN-20261001-035`): defínelas en tu `.env` o expórtalas antes de
+`docker compose up` (están documentadas, vacías, en `.env.example`). Vacías
+equivalen a "apagado" y a `Chambitas`.
+
+El nombre de la moneda virtual se toma de `VIRTUAL_CURRENCY_NAME`
+(predeterminado `Chambitas`). Las rutas de saldo, movimientos y ajustes del
+administrador están en [API y reglas operativas](../reference/api.md#moneda-virtual-m1).
+El catálogo de costos y premios (M2) se siembra al aplicar las migraciones
+y se edita por API (el admin todavía no tiene pantalla; la empresa lee el catálogo en su Billetera). En una base de pruebas,
+`TRUNCATE "User" CASCADE` de las suites de integración también lo vacía. Si
+necesitas los valores sembrados, aplica de nuevo las migraciones en una base
+limpia. Ver [Catálogo de costos y premios](../reference/api.md#catálogo-de-costos-y-premios-m2).
+
 ### Trabajo diario en terminales separadas
 
 Cuando necesites ver los logs de cada componente por separado, usa tres
@@ -181,6 +234,25 @@ $env:CHAMBEAYA_ALLOW_DEMO_SEED = 'true'
 npm run demo:seed --workspace=@chambeaya/api
 ```
 
+### Panel de empresa de puestos fijos (M5a)
+
+Con la bandera de turnos apagada (lo normal), el panel web de la empresa (`http://127.0.0.1:3000`) ofrece:
+**Resumen, Puestos, Postulantes, Talento, Billetera y Perfil de empresa**. No muestra ni consulta nada del flujo de
+turnos: tampoco hay campana de notificaciones (los avisos de postulaciones llegan en vivo a **Postulantes**) ni se
+muestra el plan (la Membresía está oculta). El selector de puesto y los totales del Resumen recorren todas las páginas
+de puestos, no solo los 100 más recientes (hasta 20 páginas de 100; con más de 2000 puestos se avisa que los totales
+cuentan solo los más recientes). Con `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` (se fija al compilar) vuelven Turnos, Trabajadores,
+Mensajes, Pagos y Membresía debajo de las vistas nuevas. El nombre de la moneda sale siempre de la API
+(`VIRTUAL_CURRENCY_NAME`); el panel nunca lo fija.
+
+Para probarlo a mano con datos reales: levanta API y PostgreSQL, crea o siembra una cuenta `BUSINESS`
+(`npm run demo:seed` o el superadmin), entra al panel, crea un puesto en **Puestos**, publícalo (las 3 primeras
+publicaciones del mes son gratis) y, con una cuenta de trabajador (registro público o app móvil), postula al
+puesto para verlo aparecer en vivo en **Postulantes**. Las pruebas automáticas del panel están en
+[`apps/web/e2e/README.md`](../../apps/web/e2e/README.md): la suite rápida simula la API en el navegador (compila dos
+paneles, uno con la bandera encendida en el puerto 3100 y otro apagado en el 3101), y `apps/web/e2e-real/` recorre
+publicar, postular y contratar contra la API real y PostgreSQL desechable.
+
 ## Aplicación Flutter (fuera de Docker)
 
 La app Flutter siempre se ejecuta desde el equipo anfitrión, nunca dentro de
@@ -209,6 +281,44 @@ por Flutter en su lugar:
 ```powershell
 npm run dev:mobile -- -Device chrome
 ```
+
+### App del trabajador: puestos fijos y billetera (M5, parte Flutter)
+
+Con los turnos temporales apagados (el valor por defecto: no se pasa
+`--dart-define=TEMPORARY_SHIFTS_ENABLED=true`), la app del trabajador muestra
+cinco pestañas: **Puestos**, **Postulaciones**, **Billetera**, **Perfil** e
+**Invitaciones**. Con la bandera encendida se conservan las cinco pestañas
+heredadas y se añaden **Puestos fijos** y **Billetera** al final.
+
+Para recorrerla con datos reales:
+
+1. Con la API levantada y la demo sembrada, entra a Flutter con
+   `trabajador.demo@chambeaya.local` / `Demo2026!`.
+2. En el panel de la empresa (`empresa.demo@chambeaya.local`) crea y publica un
+   puesto (ver «Panel de empresa de puestos fijos (M5a)»).
+3. En **Puestos** aparece el puesto; postula (las primeras postulaciones del mes
+   son gratis y no piden confirmar; si algo cuesta, se muestra el costo antes de
+   cobrar). Desde el panel avanza la postulación, programa una entrevista y envía
+   una oferta (con PDF si quieres) y mira cómo **Postulaciones** se actualiza en
+   vivo; acepta o rechaza la oferta y descarga el PDF desde el detalle.
+4. En **Billetera** ves el saldo y el nombre de la moneda (los da la API:
+   `VIRTUAL_CURRENCY_NAME`, la app nunca lo fija), cuánto cuesta cada acción, el
+   tope diario, los premios, tu código de referido y los movimientos.
+
+Con `npm run dev:mobile -- -Demo` la app usa un servidor en memoria
+(`DemoJobsBackend`) con tres puestos de ejemplo y las mismas reglas de cuota,
+costo, saldo, tope diario e idempotencia.
+
+Pruebas del módulo (desde `apps/mobile_flutter`, con Flutter 3.44.0):
+`test/jobs_api_contract_test.dart` (rutas, parámetros, errores `409`/`503` y SSE
+contra la forma real de la API), `test/jobs_screens_test.dart` (puestos,
+postular con costo previo, postulaciones, ofertas y PDF) y
+`test/wallet_page_test.dart` (saldo, costos, premios, referido y movimientos) y
+`test/m5_bajos_test.dart` (cotización parcial, `401` hasta el login, flujo SSE compartido, paso 2 de la bienvenida y Enter en el login) y
+`test/m5_correcciones_test.dart` (cotización fallida sin cobros ocultos, descarga del PDF en web, refresco de la
+lista de puestos, tema oscuro en las pantallas hijas, textos sin turnos con la bandera apagada, límites de la búsqueda,
+`401` y cierre del cliente HTTP). Con la bandera apagada la bienvenida y el login hablan de puestos fijos formales; para
+ver los textos de turnos usa `--dart-define=TEMPORARY_SHIFTS_ENABLED=true`.
 
 ### Variantes por dispositivo
 

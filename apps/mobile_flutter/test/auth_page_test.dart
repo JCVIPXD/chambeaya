@@ -101,6 +101,79 @@ void main() {
     expect(authenticated, isTrue);
   });
 
+  testWidgets(
+    'field errors stay under their own field when switching to register',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(home: AuthPage(role: AppAudience.worker)),
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('auth-email')),
+        'not-an-email',
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('auth-password')),
+        'short',
+      );
+      await tester.tap(find.text('Ingresar'));
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('auth-email')),
+          matching: find.text('Ingresa un correo válido'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('auth-password')),
+          matching: find.text('Mínimo 8 caracteres'),
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Quiero registrarme'));
+      await tester.pump();
+
+      // The email and password fields keep their own error after the
+      // "Nombre completo" field is inserted above them: identity is
+      // preserved by ValueKey instead of by position.
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('auth-email')),
+          matching: find.text('Ingresa un correo válido'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('auth-password')),
+          matching: find.text('Mínimo 8 caracteres'),
+        ),
+        findsOneWidget,
+      );
+
+      // The freshly-mounted name field must not inherit a stale error from
+      // the field that used to occupy its position.
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('auth-name')),
+          matching: find.text('Ingresa un correo válido'),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('auth-email')),
+          matching: find.text('Mínimo 8 caracteres'),
+        ),
+        findsNothing,
+      );
+    },
+  );
+
   testWidgets('desktop authentication keeps a readable form width', (
     tester,
   ) async {

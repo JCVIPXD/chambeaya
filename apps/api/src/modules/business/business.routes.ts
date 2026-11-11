@@ -7,10 +7,30 @@ import {
   BusinessRecordNotFoundError,
   BusinessForbiddenError,
   BusinessValidationError,
+  CommissionChangedError,
+  PaymentNotPayableError,
+  PaymentNotFoundError,
+  ProviderManualError,
+  ProviderUnavailableError,
   DatabaseBusinessService,
   type BusinessOperations,
   type ShiftInput,
 } from './business.service.js';
+import { TEMPORARY_SHIFTS_DISABLED_ERROR, temporaryShiftsEnabled as legacyTemporaryShiftsEnabled } from '../temporary-shifts.js';
+
+// Tope de cualquier monto de dinero que entra por un formulario (el pago por
+// persona de un turno, o el `amountCents` del CRUD manual de pagos): además
+// de ser un límite comercial razonable (S/100.000), garantiza que
+// `amountCents + commissionCents + taxCents` (`buildPaymentAmounts`) nunca
+// desborde el `Int` de Postgres (máx. 2.147.483.647) ni con el `bps` máximo
+// que admite hoy el ajuste de comisión (`commissionBps` hasta 5000, ver
+// `admin.routes.ts`) y, defensivamente, el mismo tope para `taxBps` aunque
+// hoy no sea editable por API: en el peor caso (50% + 50% de IGV sobre esa
+// comisión) el total es `amount * 1.75`, muy por debajo del límite incluso
+// en este tope (BAJO-1 de CN-20260926-012; antes `amountCents` admitía hasta
+// 10^10, por encima del propio `Int`, y un `PATCH` con un monto grande
+// respondía `500` en vez de `400`).
+const MAX_MONEY_AMOUNT_CENTS = 100_000_00;
 
 const nullableText = z.string().trim().max(240).nullable().optional();
 const companySchema = z.object({
@@ -27,7 +47,7 @@ const shiftFields = {
   location: z.string().trim().min(2).max(160),
   startsAt: z.coerce.date(),
   endsAt: z.coerce.date(),
-  payCents: z.number().int().positive().max(100_000_00),
+  payCents: z.number().int().positive().max(MAX_MONEY_AMOUNT_CENTS),
   requiredWorkers: z.number().int().min(1).max(200),
   description: z.string().trim().min(20).max(4000).nullable().optional(),
   responsibilities: z.string().trim().min(10).max(3000).nullable().optional(),
@@ -37,7 +57,20 @@ const shiftFields = {
   notes: z.string().trim().max(2000).nullable().optional(),
   rescueActive: z.boolean().optional(),
 };
-const shiftSchema = z.object(shiftFields).strict();
+// Solo al crear: los bps que el panel mostró en la vista previa
+// (`GET /business/payment-settings`). BAJO-4 de CN-20260926-012, ver
+// `business.service.ts#createShift`. No forman parte de `shiftFields`
+// (`shiftUpdateSchema` nunca los acepta: editar un turno no toca su
+// comisión). Obligatorios (BAJO-1 de CN-20260926-014): el panel es el único
+// cliente BUSINESS, así que si `payment-settings` no cargó, la empresa no
+// debe poder publicar un turno sin haber visto ninguna vista previa. Sin
+// estos dos campos, la petición responde `400 INVALID_INPUT` (Zod) antes de
+// llegar al servicio.
+const shiftSchema = z.object({
+  ...shiftFields,
+  expectedCommissionBps: z.number().int().min(0).max(5000),
+  expectedTaxBps: z.number().int().min(0).max(5000),
+}).strict();
 const shiftUpdateSchema = z.object(shiftFields).partial()
   .refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
 
@@ -92,17 +125,6 @@ const messageUpdateSchema = z.object({
   readAt: z.coerce.date().nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
 
-const paymentFields = {
-  reference: z.string().trim().min(2).max(80),
-  description: z.string().trim().min(2).max(240),
-  amountCents: z.number().int().positive().max(100_000_000_00),
-  workerCount: z.number().int().min(0).max(100_000).optional(),
-  status: z.enum(['PENDING', 'SCHEDULED', 'PROCESSED', 'CANCELLED']).optional(),
-  dueAt: z.coerce.date().nullable().optional(),
-  processedAt: z.coerce.date().nullable().optional(),
-};
-const paymentSchema = z.object(paymentFields);
-const paymentUpdateSchema = paymentSchema.partial().refine((value) => Object.keys(value).length > 0, 'EMPTY_UPDATE');
 const applicationDecisionSchema = z.object({
   decision: z.enum(['ACCEPTED', 'REJECTED']),
   reason: z.string().trim().min(3).max(500).optional(),
@@ -166,6 +188,26 @@ function sendError(response: Response, error: unknown) {
     response.status(403).json({ error: error.message });
     return;
   }
+  if (error instanceof CommissionChangedError) {
+    response.status(409).json({ error: error.message, commissionBps: error.commissionBps, taxBps: error.taxBps });
+    return;
+  }
+  if (error instanceof PaymentNotPayableError) {
+    response.status(409).json({ error: error.message });
+    return;
+  }
+  if (error instanceof PaymentNotFoundError) {
+    response.status(404).json({ error: 'PAYMENT_NOT_FOUND' });
+    return;
+  }
+  if (error instanceof ProviderManualError) {
+    response.status(409).json({ error: 'PROVIDER_MANUAL' });
+    return;
+  }
+  if (error instanceof ProviderUnavailableError) {
+    response.status(502).json({ error: 'PROVIDER_UNAVAILABLE' });
+    return;
+  }
   if (error instanceof AuthError) {
     response.status(401).json({ error: error.code });
     return;
@@ -182,15 +224,21 @@ export function createBusinessRouter(
   authService: AuthService = new DatabaseAuthService(),
   operations: BusinessOperations = new DatabaseBusinessService(),
   onShiftsChanged: () => void = () => {},
+  temporaryShiftsEnabled = legacyTemporaryShiftsEnabled(),
 ) {
   const router = Router();
 
   router.get('/company', route(authService, async (_request, response, session) => { response.json(await operations.getCompany(session)); }));
   router.get('/subscription', route(authService, async (_request, response, session) => { response.json(await operations.getSubscription(session)); }));
+  router.get('/payment-settings', route(authService, async (_request, response, session) => { response.json(await operations.paymentSettings(session)); }));
   router.patch('/company', route(authService, async (request, response, session) => { response.json(await operations.updateCompany(session, companySchema.parse(request.body))); }));
 
   router.get('/shifts', route(authService, async (_request, response, session) => { response.json(await operations.listShifts(session)); }));
   router.post('/shifts', route(authService, async (request, response, session) => {
+    if (!temporaryShiftsEnabled) {
+      response.status(503).json({ error: TEMPORARY_SHIFTS_DISABLED_ERROR });
+      return;
+    }
     const input = shiftSchema.parse(request.body);
     assertShiftDatesValid(input);
     const shift = await operations.createShift(session, input);
@@ -252,11 +300,13 @@ export function createBusinessRouter(
   router.patch('/conversations/:id/messages/:messageId', route(authService, async (request, response, session) => { response.json(await operations.updateMessage(session, param(request, 'id'), param(request, 'messageId'), messageUpdateSchema.parse(request.body))); }));
   router.delete('/conversations/:id/messages/:messageId', route(authService, async (request, response, session) => { await operations.deleteMessage(session, param(request, 'id'), param(request, 'messageId')); response.status(204).send(); }));
 
+  // Alcance D: se retira el CRUD manual (`POST`/`PATCH`/`DELETE`) — permitía
+  // a la empresa inventar pagos, alterar montos y saltarse la comisión. La
+  // lectura se conserva; el único escritor que queda es `mark-paid`.
   router.get('/payments', route(authService, async (_request, response, session) => { response.json(await operations.listPayments(session)); }));
-  router.post('/payments', route(authService, async (request, response, session) => { response.status(201).json(await operations.createPayment(session, paymentSchema.parse(request.body))); }));
   router.get('/payments/:id', route(authService, async (request, response, session) => { response.json(await operations.getPayment(session, param(request, 'id'))); }));
-  router.patch('/payments/:id', route(authService, async (request, response, session) => { response.json(await operations.updatePayment(session, param(request, 'id'), paymentUpdateSchema.parse(request.body))); }));
-  router.delete('/payments/:id', route(authService, async (request, response, session) => { await operations.deletePayment(session, param(request, 'id')); response.status(204).send(); }));
+  router.post('/payments/:id/mark-paid', route(authService, async (request, response, session) => { response.json(await operations.markPaymentPaid(session, param(request, 'id'))); }));
+  router.post('/payments/:id/checkout', route(authService, async (request, response, session) => { response.json(await operations.checkoutPayment(session, param(request, 'id'))); }));
 
   return router;
 }

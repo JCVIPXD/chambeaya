@@ -16,7 +16,7 @@ export interface AuthRouterOptions {
   /**
    * Middleware aplicado únicamente a las rutas sensibles a fuerza bruta o
    * enumeración (`register`, `login`, `google`, `google/complete`,
-   * `password`). Se omite si no se provee.
+   * `password`, `password/change`). Se omite si no se provee.
    */
   rateLimiter?: RequestHandler;
 }
@@ -109,6 +109,40 @@ export function createAuthRouter(
     } catch (error) {
       const code = error instanceof AuthError ? error.code : 'INVALID_REGISTRATION';
       response.status(code === 'INVALID_SESSION' ? 401 : 400).json({ error: code });
+    }
+  });
+
+  // Solo los códigos que `AuthService.changePassword` puede lanzar de forma
+  // esperada llevan un estado 4xx propio; cualquier otro error (por ejemplo
+  // una falla de la base de datos) responde `500 INTERNAL_ERROR` sin
+  // filtrar su detalle. Antes cualquier error no reconocido caía en el
+  // `400` genérico del final, incluida una falla real del servidor
+  // (CN-20260926-008, BAJO-4).
+  const changePasswordStatusByCode: Record<string, number> = {
+    INVALID_SESSION: 401,
+    INVALID_CURRENT_PASSWORD: 401,
+    GOOGLE_ONLY_ACCOUNT: 409,
+    PASSWORD_CHANGED_CONCURRENTLY: 409,
+    WEAK_PASSWORD: 400,
+    PASSWORD_UNCHANGED: 400,
+  };
+
+  router.post('/password/change', ...guarded, async (request, response) => {
+    try {
+      response.json(
+        await service.changePassword(
+          bearerToken(request.header('authorization')),
+          String(request.body?.currentPassword ?? ''),
+          String(request.body?.newPassword ?? ''),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof AuthError && error.code in changePasswordStatusByCode) {
+        response.status(changePasswordStatusByCode[error.code]).json({ error: error.code });
+        return;
+      }
+      console.error('POST /api/auth/password/change failed unexpectedly', error);
+      response.status(500).json({ error: 'INTERNAL_ERROR' });
     }
   });
 

@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import 'features/auth/auth_page.dart';
 import 'features/auth/auth_repository.dart';
 import 'features/auth/auth_session.dart';
 import 'features/auth/auth_session_store.dart';
 import 'features/company/company_dashboard_page.dart';
+import 'features/jobs/jobs_services.dart';
 import 'features/marketplace/http_worker_marketplace_repository.dart';
 import 'features/profile/talent_invitation_repository.dart';
 import 'features/profile/talent_profile_repository.dart';
@@ -27,7 +29,12 @@ class ChambeayaApp extends StatefulWidget {
     this.authRepository,
     this.demoModeOverride,
     this.themeModeController,
+    this.jobsHttpClient,
   });
+
+  /// Test-only: cliente HTTP de los servicios de puestos y moneda (con la API
+  /// real). Si se da, la app lo usa en vez de crear el suyo (y no lo cierra).
+  final http.Client? jobsHttpClient;
 
   final AuthSessionStore? sessionStore;
   final AuthRepository? authRepository;
@@ -69,10 +76,13 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
   WorkerMarketplaceRepository? _workerRepository;
   TalentProfileRepository? _talentProfileRepository;
   TalentInvitationRepository? _talentInvitationRepository;
+  JobsServices? _jobsServices;
   String? _workerDependenciesKey;
+  final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   AppAudience? _audience;
   AuthSession? _session;
   var _restoringSession = true;
+  var _expiring = false;
 
   bool get _isDemoMode => widget.demoModeOverride ?? _configuredDemoMode;
   bool get _usesLiveApi => !_isDemoMode;
@@ -101,6 +111,15 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     final key = '$_usesLiveApi|${_session?.token}|${_session?.name}';
     if (_workerDependenciesKey == key && _workerRepository != null) return;
     _workerDependenciesKey = key;
+    _jobsServices?.dispose();
+    final sessionToken = _session?.token;
+    _jobsServices = _usesLiveApi
+        ? JobsServices.http(
+            token: sessionToken,
+            httpClient: widget.jobsHttpClient,
+            onSessionExpired: () => _onSessionExpired(sessionToken),
+          )
+        : JobsServices.demo();
     _workerRepository = _usesLiveApi
         ? HttpWorkerMarketplaceRepository(token: _session?.token)
         : DemoWorkerMarketplaceRepository();
@@ -125,16 +144,36 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
   @override
   void dispose() {
     if (widget.themeModeController == null) _themeMode.dispose();
+    _jobsServices?.dispose();
     super.dispose();
   }
 
   Future<void> _restoreSession() async {
     AuthSession? restored;
+    // Audiencia de la sesión guardada que la API rechazó (401/403): se conserva
+    // para abrir directo el login y mostrar el aviso de sesión vencida.
+    AppAudience? expiredAudience;
+    AuthSession? stored;
     try {
-      restored = await _sessionStore.read();
-      if (restored != null && _usesLiveApi) {
-        restored = await _authRepository.restore(restored.token);
-        await _sessionStore.write(restored);
+      stored = await _sessionStore.read();
+      restored = stored;
+      if (stored != null && _usesLiveApi) {
+        try {
+          restored = await _authRepository.restore(stored.token);
+          await _sessionStore.write(restored);
+        } on AuthFailure catch (failure) {
+          if (failure.kind == AuthFailureKind.invalidCredentials) {
+            // La API rechazó el token: la sesión venció o se revocó.
+            expiredAudience = stored.audience;
+            restored = null;
+            await _sessionStore.clear();
+          } else {
+            // Sin conexión, API caída (5xx) u otro fallo que no dice nada del
+            // token: se conserva la sesión guardada y se entra con ella. Si
+            // después llega un 401, `onUnauthorized` la cierra con el aviso.
+            restored = stored;
+          }
+        }
       }
     } catch (_) {
       try {
@@ -147,9 +186,16 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     if (!mounted) return;
     setState(() {
       _session = restored;
-      _audience = restored?.audience;
+      _audience = restored?.audience ?? expiredAudience;
       _restoringSession = false;
     });
+    if (expiredAudience != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _messengerKey.currentState?.showSnackBar(
+          const SnackBar(content: Text('Tu sesión venció. Vuelve a ingresar.')),
+        );
+      });
+    }
   }
 
   Future<void> _authenticated(AuthSession session) async {
@@ -161,9 +207,23 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     });
   }
 
-  Future<void> _logout() async {
+  /// Una ruta de la API respondió `401`: la sesión venció o se revocó. Se
+  /// cierra la sesión local y se vuelve al login con un aviso. Tolera varias
+  /// llamadas seguidas y a clientes de una sesión anterior (ya cerrada).
+  void _onSessionExpired(String? token) {
+    if (!mounted || token == null || _session?.token != token || _expiring) return;
+    _expiring = true;
+    _logout(remote: false, keepAudience: true).whenComplete(() {
+      _expiring = false;
+      _messengerKey.currentState?.showSnackBar(
+        const SnackBar(content: Text('Tu sesión venció. Vuelve a ingresar.')),
+      );
+    });
+  }
+
+  Future<void> _logout({bool remote = true, bool keepAudience = false}) async {
     final token = _session?.token;
-    if (_usesLiveApi && token != null) {
+    if (remote && _usesLiveApi && token != null) {
       try {
         await _authRepository.logout(token);
       } catch (_) {
@@ -172,15 +232,25 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
     }
     await _sessionStore.clear();
     if (!mounted) return;
+    final closing = _jobsServices;
+    _jobsServices = null;
+    _workerDependenciesKey = null;
     setState(() {
       _session = null;
-      _audience = null;
+      // Al vencer la sesión se vuelve directo al login de la misma audiencia.
+      if (!keepAudience) _audience = null;
     });
+    // Se libera (saldo compartido y cliente HTTP) cuando el panel ya salió del
+    // árbol, para que ninguna pantalla use un controlador desechado.
+    if (closing != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => closing.dispose());
+    }
   }
 
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Chambeaya',
+    scaffoldMessengerKey: _messengerKey,
     debugShowCheckedModeBanner: false,
     // Intentionally no `darkTheme`/`themeMode` here: `ThemeData` set this way
     // is global to the whole `MaterialApp`, so it would apply to onboarding,
@@ -240,6 +310,13 @@ class _ChambeayaAppState extends State<ChambeayaApp> {
       repository: _workerRepository!,
       talentProfileRepository: _talentProfileRepository!,
       talentInvitationRepository: _talentInvitationRepository!,
+      jobsServices: _jobsServices,
+      // Solo con la API real hay una sesión de verdad cuya contraseña se
+      // pueda cambiar; en modo demo `_session!.token` no corresponde a
+      // ninguna cuenta del backend.
+      authRepository: _usesLiveApi ? _authRepository : null,
+      sessionToken: _usesLiveApi ? _session?.token : null,
+      googleOnlyAccount: _session?.requiresPasswordSetup == true,
     );
   }
 }

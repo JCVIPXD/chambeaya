@@ -104,6 +104,8 @@ describe('per-assignment check-in lifecycle with PostgreSQL', () => {
         requiredWorkers: input.requiredWorkers,
         description: 'Turno de prueba de integración del ciclo de check-in.',
         requirements: 'Disponibilidad completa para el horario indicado.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(response.status).toBe(201);
     return response.body.id as string;

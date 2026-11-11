@@ -54,6 +54,2578 @@ Los agentes trabajan en secuencia. Esto evita conflictos en el código y en este
 
 ## Registro
 
+### CN-20261111-068 — Auditoría de `CN-20261111-067` (CI: `prisma generate` antes de las pruebas de integración de la API)
+
+- Fecha: 2026-11-11 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261111-067` (cambio del coordinador en `.github/workflows/web-tests.yml`, sin commit; PR https://github.com/JCVIPXD/chambeaya/pull/1).
+- Alcance: el diff de `web-tests.yml` (un paso y su comentario), `flutter-tests.yml`, `apps/api/package.json`, `apps/api/prisma/schema.prisma`, los Dockerfiles de la API y qué importan `apps/web` y `packages/`.
+- Verificaciones conformes:
+  - Orden y esquema: el paso va después de `npm ci` (que instala `prisma` 6.12.0) y antes de `migrate deploy` y `test:integration`. `npm exec --workspace=@chambeaya/api` corre en `apps/api`, donde Prisma 6 toma por defecto `prisma/schema.prisma` (no hay `prisma.config.*` ni la clave `prisma` en `package.json`). El generador `prisma-client-js`, sin `output`, escribe en el `.prisma/client` que resuelve el `@prisma/client` instalado en la raíz. `generate` no necesita `DATABASE_URL`; el `env` del job ya lo da para los pasos siguientes.
+  - Otros jobs y workflows: `browser-tests` ejecuta la Playwright rápida con la API simulada y ni `apps/web` ni `packages/` importan `@prisma/client` ni `@chambeaya/api` (solo `playwright.admin-real.config.ts`, que no corre en CI). `flutter-quality` no usa Node. Ninguno necesita el paso.
+  - La réplica de `067` no bastaba por sí sola: corrió en el árbol de desarrollo, donde el cliente ya estaba generado, así que no reprodujo el fallo. El auditor repitió el job desde una instalación limpia y lo confirmó.
+- Réplica limpia del job: copia mínima del monorepo (raíz, `apps/api`, `packages/`, `apps/web/package.json`) en el directorio temporal de la sesión, PostgreSQL 16-alpine desechable en `127.0.0.1:57240` con las mismas credenciales y la misma `DATABASE_URL` del job; ambos borrados al terminar.
+  - `npm ci`: `added 192 packages in 1m`, código 0. El `.prisma/client/index.js` instalado es el stub que lanza `@prisma/client did not initialize yet. Please run "prisma generate"…`.
+  - Sin el paso nuevo: `migrate deploy`, `All migrations have been successfully applied.`; `test:integration`, `TypeError: Cannot read properties of undefined (reading 'Serializable')`. Es el mismo error del CI en `9873ca0`.
+  - Con el paso nuevo: `prisma generate`, código 0; `migrate deploy`, `No pending migrations to apply.`; `test:integration`, `Test Files  21 passed (21)`, `Tests  232 passed (232)`, código 0.
+- Hallazgos críticos, altos, medios y bajos: ninguno.
+- Observaciones (fuera de alcance, no bloquean): ningún job de CI ejecuta `npm test` (unitarias) ni `npx tsc --noEmit` de `apps/api`. Ese job también necesitaría `prisma generate`.
+- Documentación: no hay guía de CI en `docs/` que cambie; el comentario del workflow explica el paso.
+- Riesgos residuales: NO_EJECUTADA la corrida real en GitHub Actions (Ubuntu en lugar de Windows; el cliente se genera para la plataforma del runner, así que no cambia el resultado esperado).
+- Decisión: `APROBADO`.
+- Siguiente paso: commit y push a `moneda-virtual` (coordinador) y comprobar `api-integration-tests` en el PR.
+
+### CN-20261111-067 — CI: generar el cliente de Prisma antes de las pruebas de integración de la API
+
+- Fecha: 2026-11-11 (America/Lima)
+- Agente: coordinador (Claude Opus 5.5; cambio de una línea hecho fuera de `implementador-sonnet`, declarado aquí y enviado a auditoría como cualquier otro)
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: PR https://github.com/JCVIPXD/chambeaya/pull/1 (`moneda-virtual` → `main`, head `9873ca0`). El job `api-integration-tests` de `.github/workflows/web-tests.yml` falla desde `main` (`d4a65d0`: «@prisma/client did not initialize yet. Please run "prisma generate"») y en la rama (`9873ca0`: `TypeError: Cannot read properties of undefined (reading 'Serializable')` en `apps/api/src/modules/admin/admin.routes.ts:67`, al importar `src/app.ts`).
+- Alcance: el job hace `npm ci` en la raíz del monorepo y `prisma migrate deploy`, pero nunca `prisma generate`; como el esquema vive en `apps/api/prisma`, el postinstall de `@prisma/client` no genera el cliente y todas las pruebas de integración caen al importar la app. Se añade el paso `npm exec --workspace=@chambeaya/api -- prisma generate` entre `npm ci` y `migrate deploy`, con un comentario. No cambia código de la aplicación.
+- Archivos: `.github/workflows/web-tests.yml`.
+- Decisiones: se usa la misma forma de invocación que el paso existente de `migrate deploy` (workspace de la API, esquema por defecto `apps/api/prisma/schema.prisma`). Los Dockerfiles ya generaban el cliente (`Dockerfile.dev`, `Dockerfile.production`); el job `browser-tests` y `flutter-quality` no dependen del cliente y ya pasaban.
+- Validaciones (réplica local de los pasos del job, PostgreSQL 16-alpine desechable en `127.0.0.1:57230`, base `chambeaya_test`, borrado al terminar):
+  - `npm exec --workspace=@chambeaya/api -- prisma generate`: generó el cliente sin errores.
+  - `npm exec --workspace=@chambeaya/api -- prisma migrate deploy`: `All migrations have been successfully applied.`
+  - `npm run test:integration --workspace=@chambeaya/api` con `CHAMBEAYA_INTEGRATION_TESTS=true`: `Test Files  21 passed (21)`, `Tests  232 passed (232)`.
+  - NO_EJECUTADA: la corrida real en GitHub Actions (se verificará tras el push al PR).
+- Riesgos: ninguno conocido más allá de la corrida en Actions pendiente. Avisos del runner no relacionados: acciones en Node.js 20 forzadas a Node.js 24 y migración de `ubuntu-latest` a Ubuntu 26.
+- Siguiente paso: `auditor-opus` audita; tras `APROBADO`, commit y push a `moneda-virtual` y comprobar el CI del PR.
+
+### CN-20261110-066 — Reauditoría de `CN-20261110-063` (restauración de archivos versionados y prueba de ráfaga del Resumen)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: reaudita `CN-20261110-063`, que corrige MEDIO-1, BAJO-1, BAJO-2 y BAJO-3 de `CN-20261110-060`. Cierra también `CN-20261110-058` (agrupador del Resumen, sin cambios desde `060`). Rama `moneda-virtual` sobre `4b2cb15`, árbol sin commit. No se auditó `apps/mobile_flutter` (`064`/`065`).
+- Alcance: `apps/web/scripts/{tracked-files-guard.cjs,build-keeping-tracked-files.mjs}`, `apps/web/e2e/{restore-tracked-files.cjs,global-teardown.mjs,overview-live-refresh.spec.ts,README.md}`, `apps/web/e2e/fixtures/fixed-jobs-api.ts`, `apps/web/playwright.config.ts`, y `apps/web/features/jobs/{coalesce.ts,overview-view.tsx}` de `058`.
+- Verificación por hallazgo:
+  - MEDIO-1: resuelto. Ya no hay `detached`: el build queda en el grupo del shell que Playwright mata con `process.kill(-pid, 'SIGKILL')`. En Windows se mantiene `taskkill /T /F`. Revisado por lectura de código (no hay POSIX aquí).
+  - BAJO-1: resuelto. En una copia aislada, con la configuración real y un `timeout` de 6 s en el segundo `webServer`, el seguimiento cada 200 ms mostró `15:22:24.936 A5627267 backup=True`, luego `Error: Timed out waiting 6000ms from config.webServer.` (`PW_EXIT=1`) y `15:22:27.276 861FF5B0 backup=False`. Lo restauró el `process.on('exit')` de `restore-tracked-files.cjs` sin que corriera el teardown. La carga del config también recuperó una copia huérfana que dejó un proceso cortado a la fuerza (hashes originales).
+  - BAJO-2: resuelto. Con `overview-view.tsx` en su versión `HEAD` (sin agrupador), en la copia: `Expected: 1`, `Received: 5` en escritorio y móvil; con el agrupador pasa.
+  - BAJO-3: resuelto. `acquire`, `release`, `recoverStale` y `forceRestore` comprueban dueños, copian y borran dentro del mismo candado (carpeta creada de forma atómica).
+- Lo pedido en especial:
+  - `recoverStale` al cargar el config no restaura durante un build de la misma corrida. En Playwright la configuración se carga antes de los `webServer` y los workers después de que terminaron los builds. Además, en la copia, a mitad de un build real (`A5627267`, dueño vivo) se ejecutó `require('./e2e/restore-tracked-files.cjs')`: siguió en `A5627267` con la copia intacta, y al terminar el build quedó en `861FF5B0/B8B3A344` sin copia.
+  - El candado no queda trabado. Uno viejo se descarta al instante (`secs=0.1`); uno recién huérfano, a los 10 s (`secs=10.1`), en ambos casos con salida 0 y sin candado residual. La espera máxima es de 30 s y termina en un error explícito, no en un bloqueo.
+  - Imports del config: `playwright.config.ts` importa un `.cjs` (Playwright transpila la configuración a CJS) y los `.mjs` importan el `.cjs` por su exportación por defecto (interoperabilidad de Node 22, el de `web-tests.yml`). El `.mjs` viejo no existe y nada lo importa (solo aparece en entradas históricas de este registro). `npx tsc --noEmit` sin errores y la suite completa carga el config y el teardown.
+  - Build fallido: en la copia, con un error de tipos temporal, `Failed to type check.` y `BUILD_EXIT=1`, con archivos restaurados y sin copia.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos: ninguno bloqueante. Observaciones:
+  - (a) El comentario de cabecera de `build-keeping-tracked-files.mjs:5-7` todavía no menciona la recuperación al cargar o salir del config; el README sí.
+  - (b) Si dos procesos ven a la vez un candado vencido, el segundo puede borrar el candado recién creado por el primero (comprobar y borrar no son atómicos); requiere un candado huérfano y dos esperas simultáneas.
+  - (c) En POSIX, un dueño muerto por SIGKILL que aún no fue recolectado (zombi) cuenta como vivo al salir Playwright, y la restauración pasa a la corrida siguiente.
+  - (d) `playwright.admin-real.config.ts` compila con `npm run build` sin el guardián (sin cambios desde antes).
+- Documentación: `apps/web/e2e/README.md` (punto 11) describe el comportamiento actual (recuperación al cargar o salir del config, teardown solo en corridas completas, candado y ráfaga del Resumen). `docs/guides`, `docs/reference` y `docs/product` no cambian.
+- Validaciones:
+  - `npx tsc --noEmit` (`apps/web`): `WEB_TSC_EXIT=0`.
+  - `npx playwright test` (`apps/web`, árbol real): `1 skipped`, `199 passed (4.4m)`, `PW_EXIT=0`. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes `861FF5B0…`/`B8B3A344…` iguales a los del inicio y `apps/web/node_modules/.cache` vacío.
+  - En la copia aislada `D:\Proyectos JCTS\audit066-copy` (borrada al terminar; se quitó primero el enlace a `node_modules` y el del repo quedó intacto): build fallido, recuperación tras un cierre forzado, `recoverStale` a mitad de un build, candados viejo y huérfano, dos vencimientos de `timeout` del `webServer` y la prueba del Resumen sin agrupador. Resultados arriba.
+  - NO_EJECUTADA: el camino POSIX en vivo y SIGINT/SIGTERM reales.
+- Riesgos residuales: las observaciones (b) y (c); un PID reutilizado retrasa la restauración; si Playwright mismo muere a la fuerza, los archivos se restauran en la siguiente corrida o con el comando manual del README. El Resumen tarda hasta 1 s (5 s en ráfagas continuas) en reflejar un aviso.
+- Decisión: `APROBADO`. Quedan cerrados MEDIO-1, BAJO-1, BAJO-2 y BAJO-3 de `CN-20261110-060`, la corrección `CN-20261110-058` y, con ellas, el BAJO-1 nuevo y el riesgo de `listAll` de `CN-20261110-056`.
+- Siguiente paso: commit de los cambios de `058`/`063` en `apps/web` (coordinador); las observaciones (a) a (d) pueden atenderse cuando convenga.
+
+### CN-20261110-065 — Auditoría de `CN-20261110-064` (restaurar la sesión guardada, M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261110-064` (corrección del MEDIO-1 y el BAJO-1 de `CN-20261110-062`). Base `4b2cb15`, árbol sin commit. No se auditó ni tocó `apps/web` (`CN-20261110-063`, en curso).
+- Alcance: diff sin commit de `apps/mobile_flutter/lib/main.dart` (`_restoreSession`), `apps/mobile_flutter/test/m5_bajos_test.dart` y `docs/product/moneda-virtual.md`. Se incorpora el recorrido visual del coordinador sobre el `build/web` nuevo (API real).
+- Verificación:
+  - MEDIO-1 de `062` cerrado.
+    - Solo `AuthFailureKind.invalidCredentials` (`401`/`403` de `GET /auth/session`, según `AuthRepository._throwFailure`) borra la sesión guardada. En ese caso se conserva la audiencia, la app abre directo el login del trabajador y se agenda el aviso.
+    - Red caída, tiempo agotado, `5xx` u otro 4xx conservan la sesión guardada y entran con ella; un `401` posterior la cierra por `onUnauthorized` con el aviso.
+    - Solo un fallo que no es `AuthFailure` (lectura o escritura del almacenamiento, JSON inválido) cae en el `catch` externo, que conserva el comportamiento anterior.
+  - BAJO-1 de `062` cerrado: la prueba de `dispose` ya no deja un `JobsServices.demo()` sin liberar.
+  - Pruebas: cuatro nuevas en `ChambeayaApp` (`401`, `403`, red caída y `5xx`) con comprobaciones reales: sesión guardada borrada o conservada, login sin bienvenida, panel y aviso.
+  - Reproducción adicional del auditor con el almacenamiento real (`SharedPreferences` con las claves `chambeaya.session.*`) y el `AuthRepository` real sobre un `MockClient` que responde `401`, a 1280x800 y 390x844: login, `SnackBar` y texto del aviso presentes, y almacenamiento vacío. La prueba temporal se borró.
+- Hallazgo del recorrido visual («el aviso nunca se ve en la app real»): no se confirma como defecto.
+  - El auditor recargó `build/web` (`http://localhost:7357`, API real) con un token inválido sembrado en `localStorage` (`flutter.chambeaya.session.*`). La captura a ≈1,5 s mostraba el login sin aviso; la de ≈3 s mostraba el `SnackBar` «Tu sesión venció. Vuelve a ingresar.» al pie, a todo el ancho.
+  - El aviso existe, pero aparece después de la petición de restauración y dura los 4 s por defecto del `SnackBar`. Con capturas a 1, 2 y 6 s es fácil perderlo. Además, con el panel del navegador oculto la página deja de dibujar: al auditor le pasó en la segunda serie de capturas.
+  - No hay un `ScaffoldMessenger` ni un `Scaffold` propio en `AuthPage` que lo tape: el único messenger es el del `MaterialApp`, con `_messengerKey`.
+  - La prueba de widgets no difiere del caso real en el árbol, solo en el tiempo: bombea frames de 100 ms durante 2 s, justo dentro de la ventana del aviso.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos:
+  - BAJO-1 (UX). El aviso de sesión vencida es efímero: un `SnackBar` de 4 s que llega tras la petición de restauración, en el caso más común (abrir la app al día siguiente). Quien no mira el pie de la pantalla en ese momento entra al login sin saber por qué. Sugerencia: pasar `sessionExpired` a `AuthPage` y mostrar un aviso fijo sobre el formulario hasta el siguiente intento, o al menos alargar la duración y usar un `SnackBar` flotante. Sirve también para el `401` durante el uso.
+  - BAJO-2 (riesgo). El caso de red caída al abrir la app solo se prueba con widgets; no se probó en el navegador.
+- Documentación: `docs/product/moneda-virtual.md` describe el comportamiento actual (CRLF conservado; el aviso de Git es por `core.autocrlf=true`). No requiere cambios del auditor.
+- Validaciones (Flutter 3.44.0, en `apps/mobile_flutter`):
+  - `flutter analyze`: `No issues found! (ran in 6.5s)`.
+  - `flutter test`: `01:05 +277 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:57 +278: All tests passed!`.
+  - `pubspec.lock` sin cambios (hash igual).
+  - Prueba temporal del auditor con el almacenamiento y el repositorio reales: `LOGIN=1 SNACK=1 TEXT=1`, `PREFS={}` en ambos tamaños (`+2: All tests passed!`), y se borró.
+  - Navegador (panel integrado del auditor, `build/web` con la API real): login directo y `SnackBar` visible a ≈3 s, no a ≈1,5 s.
+- Riesgos: `NO_EJECUTADA`: Android/iOS o dispositivo real; red caída al abrir la app en un navegador real; medición precisa del tiempo de aparición del aviso, porque las capturas del panel oculto son poco fiables.
+- Siguiente paso: el MEDIO-1 y el BAJO-1 de `062` quedan cerrados; el coordinador puede hacer commit de `064`. El BAJO-1 de esta auditoría (aviso fijo de sesión vencida en el login) queda como mejora opcional para `implementador-sonnet`.
+
+### CN-20261110-063 — Corrección de MEDIO-1, BAJO-1, BAJO-2 y BAJO-3 de `CN-20261110-060` (restauración de archivos versionados y prueba de ráfaga del Resumen)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: corrige los hallazgos de `CN-20261110-060` (auditoría REQUIERE_CAMBIOS de `CN-20261110-058`). Rama `moneda-virtual`; árbol sin commit. No incluye `apps/mobile_flutter` ni los cambios de `docs/` de otras tareas.
+- Alcance: solo `apps/web`.
+- Archivos:
+  - `apps/web/scripts/tracked-files-guard.cjs` (nuevo; sustituye al `.mjs` de `058`)
+  - `apps/web/scripts/build-keeping-tracked-files.mjs`
+  - `apps/web/e2e/restore-tracked-files.cjs` (nuevo)
+  - `apps/web/e2e/global-teardown.mjs`
+  - `apps/web/playwright.config.ts`
+  - `apps/web/e2e/fixtures/fixed-jobs-api.ts` (`pushEvents`)
+  - `apps/web/e2e/overview-live-refresh.spec.ts`
+  - `apps/web/e2e/README.md` (punto 11)
+- Decisiones:
+  - MEDIO-1: se quitó `detached` en POSIX; la señal se reenvía con `child.kill(signal)` y en Windows se mantiene `taskkill /T /F`. Justificación por lectura de `playwright-core/lib/coreBundle.js`: la línea 9319 lanza el `webServer` con `detached: process.platform !== "win32"` y la 9409 lo detiene con `process.kill(-pid, "SIGKILL")` sobre el grupo del shell; sin `detached`, el build queda en ese grupo y muere con él.
+  - BAJO-1: `playwright.config.ts` importa `e2e/restore-tracked-files.cjs`, que llama a `recoverStale()` al cargar la configuración y en `process.on('exit')`, también cuando un `webServer` falla al arrancar y no corre el `globalTeardown`. `recoverStale` no toca nada si hay un dueño vivo. El `globalTeardown` se conserva. El guardián pasó a CommonJS (`.cjs`) porque Playwright carga la configuración en modo CJS y `import.meta` fallaba.
+  - BAJO-2: el fixture ganó `pushEvents` (varios avisos SSE en una sola entrega). El caso del Resumen envía 5 avisos, espera el dato actualizado y exige una sola recarga de la lista de puestos.
+  - BAJO-3: candado de archivo (carpeta atómica `chambeaya-tracked-files.lock`, caduca a los 10 s) alrededor de `acquire`, `release`, `recoverStale` y `forceRestore`; `acquire` es una sola sección crítica.
+- Validaciones:
+  - `npx tsc --noEmit` (apps/web): código 0, sin errores.
+  - `npx playwright test` (apps/web, puertos 3100/3101): `1 skipped`, `199 passed (5.3m)`, código 0. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes sha256 iguales a los del inicio (`tsconfig.json` 861ff5b0358034eee94b83b197f965c5a43d9884588a433f27645d167e4c38af, `next-env.d.ts` b8b3a344484b959af5e4e3fc1a1609dac3cb9ece0cdeb6c145be29bc4c491000) y `node_modules/.cache` vacío.
+  - Sin el agrupador (`trigger` ejecutando `run()` directo, restaurado después): el caso del Resumen falla con `Expected: 1  Received: 5` y el unitario con `Expected: 0  Received: 6`.
+  - Timeout de `webServer` en copia aislada de `apps/web` (`apps/_tmp-web-copy`, sin node_modules, borrada al terminar; `build` simulado que reescribe ambos archivos y se cuelga, `timeout` 10 s): `Error: Timed out waiting 10000ms from config.webServer.`; sin la red de seguridad los archivos quedaron `MODIFICADOS` con la copia en disco; con ella, `HASH_OK` y `.cache` vacío (también restauró la copia huérfana de la corrida anterior al cargar el config).
+  - Candado: 3 rondas de 8 procesos concurrentes (`acquire`, reescritura, `release`, tiempos al azar) en la copia: `ronda 1: iguales`, `ronda 2: iguales`, `ronda 3: iguales`, sin copia ni candado residuales.
+  - NO_EJECUTADA: el camino POSIX (`child.kill` sin `detached`, sin máquina POSIX) y SIGINT/SIGTERM reales; `apps/api` y `npm run test:web:admin-real`, fuera del alcance.
+- Riesgos:
+  - Un PID muerto reutilizado se toma como dueño vivo y retrasa la restauración hasta el siguiente arranque o salida de Playwright.
+  - Si Playwright mismo muere a la fuerza y no hay otra corrida, los archivos quedan hasta la siguiente corrida o hasta el comando manual del README.
+  - En POSIX, si `sh -c` no reenvía la señal al `npm` hijo, el build puede tardar en cortarse (guarda de 15 s).
+  - El Resumen tarda hasta 1 s (5 s en ráfagas continuas) en reflejar un aviso.
+- Siguiente paso: `auditor-opus` reaudita esta corrección.
+
+### CN-20261110-064 — Corrección del MEDIO-1 y el BAJO-1 de `CN-20261110-062` (restaurar la sesión guardada, M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261110-062` (auditoría `APROBADO` de `CN-20261110-061`, commit `4b2cb15`). Rama `moneda-virtual`, árbol de trabajo sin commit. No se tocó `apps/web` (en curso en `CN-20261110-063`) ni `apps/api`.
+- Alcance: solo `apps/mobile_flutter` y `docs/product/moneda-virtual.md`. MEDIO-1: `_restoreSession` ya no borra la sesión ante cualquier fallo; ante `401`/`403` borra la sesión, conserva la audiencia guardada, abre directo el login del trabajador y muestra «Tu sesión venció. Vuelve a ingresar.»; ante red caída, tiempo agotado o `5xx` conserva la sesión guardada y entra con ella. BAJO-1: la prueba de `JobsServices.dispose` ya no deja un `JobsServices.demo()` sin liberar.
+- Archivos:
+  - `apps/mobile_flutter/lib/main.dart` (`_restoreSession`)
+  - `apps/mobile_flutter/test/m5_bajos_test.dart` (4 pruebas nuevas; la prueba de `dispose` arma `DemoJobsBackend` y `WalletController` que `dispose` libera)
+  - `docs/product/moneda-virtual.md` (se quitó el caso pendiente de `CN-20261110-062` y se describe el comportamiento nuevo; CRLF conservado)
+- Decisiones:
+  - Solo `AuthFailureKind.invalidCredentials` (`401`/`403` de `AuthRepository.restore`, verificado en `auth_repository.dart`) cierra la sesión. `connectivity` (red o tiempo agotado), `server` (`5xx`) y `unknown` no dicen nada del token.
+  - Se eligió «entrar con la sesión guardada» en vez de una pantalla de reintento. Es lo más simple y seguro: no hay pantalla ni estado de reintento nuevos, no se cierra la sesión por un fallo ajeno al token, y si el token sí estaba vencido el primer `401` de las rutas del panel (`ApiClient.onUnauthorized`) la cierra con el mismo aviso y vuelve al login.
+  - El aviso se muestra tras el primer frame (`addPostFrameCallback`), porque el `ScaffoldMessenger` aún no existe al restaurar.
+  - Si falla el almacenamiento local al leer o borrar la sesión se conserva el comportamiento anterior (se limpia y vuelve la bienvenida).
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; `pubspec.lock` idéntico al original.
+  - `flutter analyze`: `No issues found! (ran in 4.0s)`.
+  - `flutter test`: `01:41 +277 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:56 +278: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `Compiling lib\main.dart for the Web... 57,6s` y `√ Built build\web`.
+  - Pruebas nuevas (token inválido con `401` y con `403`, red caída y `5xx`) comprueban sesión del almacén, pantalla (login directo sin bienvenida o `WorkerShell`) y aviso; el panel responde `503` a todo, así que no se confunde con un `401`.
+  - Prueba que falla sin el arreglo: con el comportamiento anterior reproducido temporalmente (`if (true)` y `expiredAudience = null`) fallaron 4 pruebas: token inválido `401` y `403` (`Found 0 widgets with text "Inicia sesión"`) y red caída y `5xx` (`Expected: 'guardado'  Actual: <null>`). Restaurado y comprobado con grep.
+  - NO_EJECUTADA: Android/iOS o dispositivo real.
+- Riesgos:
+  - Con red caída o `5xx` se entra al panel con la sesión guardada (sus errores aparecen como siempre, sin pantalla de reintento). Si el token estaba vencido, el cierre llega con el primer `401`.
+  - Una cuenta de empresa no hace llamadas a la API desde la app móvil, así que nunca se verifica su sesión guardada (sin cambio respecto a antes).
+- Siguiente paso: `auditor-opus` audita esta corrección y, si la aprueba, cierra el MEDIO-1 y el BAJO-1 de `CN-20261110-062`.
+
+### CN-20261110-062 — Auditoría de `CN-20261110-061` (bajos abiertos de `CN-20261110-059`, M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261110-061` (corrección de BAJO-1, 3, 4, 5 y 6 de `CN-20261110-059`). Base `5e45233`, árbol sin commit. No se auditó ni tocó `apps/web` (corrección de `060`, en curso).
+- Alcance: diff sin commit de `apps/mobile_flutter/{lib,test,README.md}` (`cost_flow.dart`, `main.dart`, `job_events_source.dart`, `jobs_services.dart`, `demo_jobs_backend.dart`, `onboarding_page.dart`, `auth_page.dart`, `test/m5_bajos_test.dart` nuevo y `test/m5_correcciones_test.dart`) y secciones Flutter de `docs/product/moneda-virtual.md` y `docs/guides/local-development.md`. Se incorpora el recorrido visual del coordinador sobre el `build/web` nuevo (API real).
+- Verificación:
+  - BAJO-1 cerrado. Al elegir «Continuar sin prioridad», `cost_flow.dart:124-130` descarta lo opcional y vuelve a cotizar lo que queda (`continue`). Si la postulación cuesta, se muestra «Confirmar y pagar» antes de enviar. La prueba comprueba lo enviado (`[false]`) y el saldo, y falla sin el arreglo (declarado e inspeccionado).
+  - BAJO-3 cerrado para el `401` durante el uso. `_logout(keepAudience: true)` lleva al login del trabajador con el aviso; el cierre manual sigue yendo a la bienvenida. Se conservan las protecciones (token capturado, `_expiring`, sin llamar a la API). La prueba de `ChambeayaApp` es realista para este camino: restaura una sesión guardada, monta el panel con un cliente HTTP simulado que responde `401` (REST y SSE) y comprueba la sesión borrada, el login sin bienvenida y el aviso. No cubre el token viejo de una sesión anterior (protección revisada en código en `059`).
+  - BAJO-4 cerrado. `SharedJobEventsSource` es un `broadcast` que abre la conexión real con el primer oyente y la corta con el último (`onCancel` cancela la suscripción y `HttpJobEventsSource` aborta la petición). `close()` la corta y cierra el flujo, y `JobsServices.dispose` lo llama tras el frame en que el panel salió del árbol. No se pierden avisos al cambiar de pestaña: el `IndexedStack` mantiene montadas Puestos y Postulaciones, así que los oyentes no se van. Tras un `401` la fuente real termina, `_upstream` queda en `null` y no se reintenta mientras haya oyentes. Las pruebas comprueban una sola petición `/job-events` para dos pestañas, el error para todos los oyentes y el corte en `dispose`.
+  - BAJO-5 cerrado: con la bandera apagada el paso 2 dice «Tu perfil cuenta» (conforme en el recorrido visual).
+  - BAJO-6 cerrado: Enter envía en login, contraseña de Google y último campo del registro; no envía si hay una petición en curso (conforme en el recorrido visual).
+- Hallazgos críticos y altos: ninguno.
+- Hallazgos medios (abiertos, no bloquean esta corrección):
+  - MEDIO-1 (preexistente desde `e192110`/`99d59a8`, fuera del diff; recorrido visual del coordinador). `apps/mobile_flutter/lib/main.dart:151-172` (`_restoreSession`) atrapa cualquier fallo de `_authRepository.restore`, borra la sesión guardada y deja `_audience = null`. Consecuencias:
+    - (a) El caso más común de sesión vencida (abrir la app al día siguiente con el token ya inválido) termina en la bienvenida de tres pasos, sin el aviso «Tu sesión venció». El coordinador lo reprodujo con un token inválido en `localStorage`.
+    - (b) Un fallo de red o un `5xx` al restaurar (`AuthFailureKind.connectivity`/`server`) también borra la sesión: abrir la app sin conexión, o con la API caída, obliga a volver a ingresar.
+    - Corrección sugerida: borrar solo ante `AuthFailureKind.invalidCredentials` (`401`/`403`), conservando la audiencia de la sesión guardada y mostrando el aviso. Ante un fallo de conectividad o del servidor, conservar la sesión guardada y ofrecer reintentar (o entrar con la sesión guardada y dejar que el `onUnauthorized` actúe). Agregar pruebas de ambos casos.
+- Hallazgos bajos:
+  - BAJO-1. `m5_bajos_test.dart:283` crea un `JobsServices.demo()` solo para tomar su `walletController` y no lo libera. Es una fuga menor en la prueba.
+  - BAJO-2. BAJO-2 de `059` sigue como riesgo aceptado: una postulación normal con la cotización fallida y la cuota agotada se cobra sin mostrarse, como en la web.
+- Documentación: `apps/mobile_flutter/README.md` y la sección Flutter de `docs/guides/local-development.md` están al día. En `docs/product/moneda-virtual.md` el auditor acotó que el regreso al login con aviso vale durante el uso, y dejó anotado como pendiente el caso de la sesión vencida al abrir la app (MEDIO-1). CRLF conservado.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `pubspec.lock` con el mismo hash antes y después.
+  - `flutter analyze`: `No issues found! (ran in 6.4s)`.
+  - `flutter test`: `00:30 +273 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:48 +274: All tests passed!`.
+  - Recorrido visual del coordinador (`build/web`, `http://localhost:7357`, API real): paso 2 de la bienvenida y Enter en la contraseña conformes; reprodujo MEDIO-1.
+- Riesgos: `NO_EJECUTADA`: Android/iOS o dispositivo real; corte de red real del SSE; `401` en uso contra la API real (solo con cliente simulado); recorrido a 375 px.
+- Siguiente paso: los bajos 1, 3, 4, 5 y 6 de `059` quedan cerrados; el coordinador puede hacer commit de `061`. `implementador-sonnet` corrige MEDIO-1 (restauración de la sesión) en una tarea propia con su entrada, y `auditor-opus` la audita.
+
+### CN-20261110-061 — Corrección de los bajos abiertos de `CN-20261110-059` (M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261110-059` (reauditoría `APROBADO` de `CN-20261110-057`; M5 Flutter con commit `5e45233`). Rama `moneda-virtual`, árbol de trabajo sin commit. No se tocó `apps/web`, `apps/api` ni `docs/PROGRESO.md` fuera de esta entrada.
+- Alcance: solo `apps/mobile_flutter` y su documentación. BAJO-1: «Continuar sin prioridad» vuelve a cotizar lo que queda y muestra su costo antes de enviar. BAJO-3: tras un `401` se vuelve directo al login del trabajador con el aviso «Tu sesión venció»; prueba de `ChambeayaApp` del camino y prueba del SSE con 401. BAJO-4: un único flujo SSE compartido (broadcast) en `JobsServices`. BAJO-5: paso 2 de la bienvenida reescrito para la bandera apagada. BAJO-6: Enter en la contraseña envía el login (y el registro en su último campo). BAJO-2 se mantiene como riesgo aceptado, sin cambios.
+- Archivos:
+  - `apps/mobile_flutter/lib/features/wallet/cost_flow.dart`
+  - `apps/mobile_flutter/lib/main.dart` (`_logout(keepAudience)`, `ChambeayaApp.jobsHttpClient` solo para pruebas)
+  - `apps/mobile_flutter/lib/features/jobs/job_events_source.dart` (`SharedJobEventsSource`)
+  - `apps/mobile_flutter/lib/features/jobs/jobs_services.dart` (`events` compartido, `httpClient`, `dispose` cierra el flujo; constructor ya no `const`)
+  - `apps/mobile_flutter/lib/features/jobs/demo_jobs_backend.dart` (`scriptError('quote:<ACTION_KEY>')` para pruebas)
+  - `apps/mobile_flutter/lib/features/onboarding/onboarding_page.dart`
+  - `apps/mobile_flutter/lib/features/auth/auth_page.dart`
+  - `apps/mobile_flutter/test/m5_bajos_test.dart` (nuevo, 11 pruebas)
+  - `apps/mobile_flutter/test/m5_correcciones_test.dart` (se renombró la prueba de `:661` a «avisa al recibir 401 en rutas REST y no en otros errores», con un comentario; solo cubría REST)
+  - `apps/mobile_flutter/README.md`, `docs/product/moneda-virtual.md`, `docs/guides/local-development.md`
+- Decisiones:
+  - BAJO-1: al elegir «Continuar sin prioridad» se descarta lo opcional y se cotiza lo que queda; si tiene costo (cuota agotada) se muestra el diálogo «Confirmar y pagar» antes de enviar, y si no queda nada con costo se envía.
+  - BAJO-3: el cierre por vencimiento conserva `_audience` (login directo del trabajador); el logout manual sigue yendo a la bienvenida. El cierre sigue sin llamar a la API y ignorando clientes de una sesión anterior.
+  - BAJO-4: `SharedJobEventsSource` abre una sola conexión SSE al primer oyente y la cierra al irse el último. Conserva la reconexión con retroceso y el corte ante 401, cuyo error llega a todos los oyentes sin reintento. `JobsServices.dispose` lo cierra.
+  - BAJO-5: con la bandera apagada el paso 2 es «Tu perfil cuenta» / «Un perfil completo ayuda a las empresas a conocerte cuando revisan tu postulación.» (no promete índice de reputación ni funciones inexistentes). Con la bandera encendida conserva «Índice Chambeaya» / «La puntualidad, asistencia y desempeño construyen tu reputación.».
+  - BAJO-6: login, contraseña del onboarding de Google y último campo del registro (DNI o código de referido) envían con Enter; la contraseña del registro solo avanza. No envía si ya hay una petición en curso.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; `pubspec.lock` idéntico al original.
+  - `flutter analyze`: `No issues found! (ran in 4.8s)`.
+  - `flutter test`: `00:29 +273 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:40 +274: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `Compiling lib\main.dart for the Web... 67,7s` y `√ Built build\web`.
+  - Prueba que falla sin el arreglo: con `if (false && hasOptional)` en `cost_flow.dart` y `keepAudience: false` en `main.dart`, `m5_bajos_test.dart` falló en BAJO-1 (`Expected: <0>  Actual: <1>`, se envió sin mostrar el costo) y en BAJO-3 (`Found 0 widgets with text "Inicia sesión"`); el resto pasó. Restaurado y comprobado con grep.
+  - NO_EJECUTADA: Android/iOS o dispositivo real; corte de red real del SSE; recorrido a 375 px.
+- Riesgos:
+  - El 401 se probó con un cliente HTTP simulado (`jobsHttpClient`), no contra la API real.
+  - Tras un 401 el flujo compartido no se reabre hasta que salgan todos los oyentes; es aceptable porque la sesión ya se está cerrando.
+  - BAJO-2 sigue como riesgo aceptado de `CN-20261110-059`.
+- Siguiente paso: `auditor-opus` audita esta corrección y, si la aprueba, cierra los bajos 1, 3, 4, 5 y 6 de `CN-20261110-059`.
+
+### CN-20261110-060 — Auditoría de `CN-20261110-058` (restauración de archivos versionados tras cierre forzado y agrupación de avisos del Resumen)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: audita `CN-20261110-058` (corrección del BAJO-1 nuevo y del riesgo de `listAll` de `CN-20261110-056`). Rama `moneda-virtual` sobre `5e45233`, árbol sin commit. No se auditó `apps/mobile_flutter` ni los cambios sin commit de `docs/guides/local-development.md` y `docs/product/moneda-virtual.md`, que no pertenecen a `058`.
+- Alcance: `apps/web/scripts/{tracked-files-guard,build-keeping-tracked-files}.mjs`, `apps/web/e2e/global-teardown.mjs`, `apps/web/playwright.config.ts`, `apps/web/features/jobs/{coalesce.ts,overview-view.tsx}`, `apps/web/e2e/overview-live-refresh.spec.ts` y `apps/web/e2e/README.md`. Se leyó el código de Playwright 1.63 (`runner/index.js`, `coreBundle.js`) para ver cómo arranca, detiene y desmonta los `webServer`.
+- Verificaciones conformes:
+  - Dueños por PID con dos builds a la vez: en una copia aislada de `apps/web` se lanzaron dos builds a la vez (`.next` y `.next-flag-off`). Hubo dos dueños vivos y los archivos se reescribieron (`A5627267…/9BA30857…`) mientras la copia en disco seguía siendo la original (`861FF5B0…`). Al salir el último se restauró a `861FF5B0…/B8B3A344…` y se borró la copia. El segundo nunca copia: con `mkdirSync` atómico ante `EEXIST` espera `ready` y solo se registra. `acquire` es síncrono y corre antes del `spawn`, así que una copia sin `ready` nunca tiene archivos ya tocados.
+  - Build fallido: en la copia, con un error de tipos temporal en un archivo de la copia, `node scripts/build-keeping-tracked-files.mjs` con `NEXT_DIST_DIR=.next-flag-off` dio `Failed to type check.`, `BUILD_EXIT=1`, archivos con sus hashes originales y sin copia en disco.
+  - Teardown y builds en curso: en una corrida normal el `globalTeardown` solo se registra después de que todos los `webServer` arrancaron (`TaskRunner.runDeferCleanup` agrega el teardown de cada tarea al alcanzarla). Para entonces ambos scripts ya salieron (`node script && npm start`), así que no puede restaurar a mitad de un build legítimo.
+  - Recuperación en la siguiente corrida: tras un cierre forzado (vencimiento del `timeout` del `webServer`, ver BAJO-1), la corrida siguiente del script restauró `861FF5B0…/B8B3A344…` y borró la copia (`EXIT=0`).
+  - Agrupador: cada `trigger` programa o reprograma un temporizador que vence después de él (`max(0, min(waitMs, firstAt + maxWaitMs - now))`); un aviso posterior a una ejecución abre un ciclo nuevo y `cancel` solo se usa al desmontar. `reload` es estable (`useCallback([])`) y la secuencia de `useResource` deja ganar a la lectura más nueva. El último aviso no se pierde.
+- Hallazgos críticos y altos: ninguno.
+- Hallazgos medios:
+  - MEDIO-1 (regresión en POSIX, `apps/web/scripts/build-keeping-tracked-files.mjs:19`, `detached: posix`). Playwright detiene un `webServer` en Linux/macOS con `process.kill(-pid, 'SIGKILL')` sobre el grupo del shell (`coreBundle.js:9409`). Con `detached: true` el `npm run build`/`next build` queda en otro grupo y sobrevive como huérfano: sigue compilando y escribiendo `.next-flag-off`, reescribe `tsconfig.json` y `next-env.d.ts` después de cualquier recuperación y puede chocar con el build de la corrida siguiente. Antes del cambio el SIGKILL al grupo lo mataba. Revisado por lectura de código; no hay POSIX en esta máquina. Corrección: no separar el grupo (quitar `detached`) y reenviar la señal con `child.kill(signal)` (Ctrl+C ya llega a todo el grupo de la terminal), o, si se conserva `detached`, matar también el grupo del hijo desde un vigía que detecte la muerte del padre.
+- Hallazgos bajos:
+  - BAJO-1 (la red de seguridad no cubre el caso que motivó el cambio). `e2e/global-teardown.mjs` no corre cuando falla el arranque de un `webServer`, que es justo el caso del cierre forzado a mitad del build por vencimiento del `timeout`. Reproducido en la copia con un `webServer` de `timeout: 6000` y un teardown que imprimía una marca: `Error: Timed out waiting 6000ms from config.webServer.`, sin marca del teardown, y `tsconfig.json`/`next-env.d.ts` quedaron modificados (`A5627267…/9BA30857…`) con la copia en disco y el dueño muerto. Solo se recuperan en la siguiente corrida del script o a mano. La entrada `058` y el README decían que el teardown los restauraba. Corrección sugerida: ejecutar Playwright desde un envoltorio (`npm run test`) que siempre llame a `forceRestore()` al salir, o restaurar también al cargar `playwright.config.ts`. El auditor corrigió el README para describir el comportamiento real.
+  - BAJO-2 (prueba que no detecta la ausencia del arreglo). `e2e/overview-live-refresh.spec.ts` (segundo caso) empuja un solo aviso y exige una sola recarga, lo que también cumple el código anterior. Con `overview-view.tsx` en su versión `HEAD` (sin agrupador), en la copia: `4 passed (26.4s)`. Solo el caso unitario del agrupador cubre la agrupación. Sugerencia: empujar una ráfaga (p. ej. 5 avisos seguidos) y exigir una recarga con el texto actualizado.
+  - BAJO-3 (carrera teórica de `release`/`acquire`, `tracked-files-guard.mjs:96-108,113-118`). Si un dueño sale y ve cero dueños vivos justo cuando otro proceso pasa el `EEXIST` y se registra, `forceRestore` borra la copia y el registro del recién llegado. Su build reescribe los archivos y al salir ya no hay copia que restaurar. No ocurre con Playwright, que arranca los `webServer` uno tras otro. Sugerencia: un candado (archivo de bloqueo) alrededor de la comprobación de dueños y del borrado.
+  - Observación: el guardián deja una carpeta vacía `apps/web/node_modules/.cache` (ignorada por git); es inocua.
+- Documentación: el auditor corrigió `apps/web/e2e/README.md` (punto 11): el teardown no corre si falla el arranque de los servidores, y se indica cuándo usar la restauración manual. `docs/guides` y `docs/product` no describen este mecanismo de pruebas.
+- Validaciones:
+  - `npx tsc --noEmit` (`apps/web`): código 0.
+  - `npx playwright test` (`apps/web`, árbol real): `1 skipped`, `199 passed (4.6m)`, `PW_EXIT=0`. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes `861FF5B0…`/`B8B3A344…` iguales a los del inicio y sin copia en disco.
+  - En una copia aislada de `apps/web` (fuera del repo, borrada al terminar; no se usó `NEXT_DIST_DIR` fuera de la copia): build fallido (`BUILD_EXIT=1`, restaurado), dos builds a la vez (restaurado, la copia siempre la original), dos vencimientos de `timeout` del `webServer` (teardown no ejecutado; archivos modificados), recuperación manual (`Se restauraron tsconfig.json y next-env.d.ts desde la copia de un build interrumpido.`) y recuperación en la siguiente corrida (`EXIT=0`, hashes originales), y la prueba del Resumen sin el agrupador (`4 passed`).
+  - NO_EJECUTADA: camino POSIX (ver MEDIO-1) y SIGINT/SIGTERM reales en Windows.
+- Riesgos residuales: los PID reutilizados retrasan la restauración hasta el teardown de una corrida completa. El Resumen tarda hasta 1 s (5 s en ráfagas) en reflejar un aviso.
+- Decisión: `REQUIERE_CAMBIOS`. Un build fallido conserva su código de salida y el último aviso no se pierde. Hay que atender MEDIO-1 (la separación de grupo en POSIX deja builds huérfanos) y BAJO-1: el caso que motivó la corrección (cierre por `timeout` del `webServer`) sigue dejando los archivos modificados hasta otra corrida.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 y BAJO-1 (y, si quiere, BAJO-2 y BAJO-3); `auditor-opus` reaudita.
+
+### CN-20261110-058 — Corrección del BAJO-1 nuevo de `CN-20261110-056` (restauración tras cierre forzado) y agrupación de avisos del Resumen
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: corrige el BAJO-1 nuevo y el riesgo residual de `CN-20261110-056` (que aprobó `CN-20261110-054`, commit `773aef0`). Rama `moneda-virtual`; árbol sin commit. No incluye los cambios de `apps/mobile_flutter` ni de `docs/` de otra tarea.
+- Alcance: solo `apps/web`. (1) `scripts/build-keeping-tracked-files.mjs` restaura `tsconfig.json` y `next-env.d.ts` aunque el proceso muera por la fuerza (`taskkill /T /F`, SIGKILL) y espera al `exit` del hijo antes de restaurar ante SIGINT/SIGTERM. (2) El Resumen agrupa los avisos SSE en una sola recarga de `listAll`.
+- Archivos:
+  - `apps/web/scripts/tracked-files-guard.mjs` (nuevo)
+  - `apps/web/scripts/build-keeping-tracked-files.mjs`
+  - `apps/web/e2e/global-teardown.mjs` (nuevo)
+  - `apps/web/playwright.config.ts` (`globalTeardown`)
+  - `apps/web/features/jobs/coalesce.ts` (nuevo)
+  - `apps/web/features/jobs/overview-view.tsx`
+  - `apps/web/e2e/overview-live-refresh.spec.ts` (nuevo)
+  - `apps/web/e2e/README.md` (punto 11; se quitó el paso manual de `git checkout`)
+- Decisiones:
+  - Copia en disco en `apps/web/node_modules/.cache/chambeaya-tracked-files` (ignorada por git). La primera copia es la original: un segundo build concurrente (paneles 3100 y 3101) usa esa copia y no los archivos ya reescritos.
+  - Dueños registrados por PID (`owners/<pid>`). El último dueño vivo en salir restaura y borra la copia. Una copia sin dueños vivos se restaura al inicio de la siguiente corrida del script y en el `globalTeardown` (que restaura sin condiciones).
+  - SIGINT/SIGTERM: se detiene el árbol del hijo (`taskkill /T /F` en Windows; grupo de procesos con `detached` en POSIX) y se restaura en su `exit`, con una guarda de 15 s. El código de salida es el del build (130 y 143 en señales).
+  - Resumen: debounce al final de 1 s con tope de espera de 5 s (`createCoalescer`), cancelado al desmontar. La recarga sigue siendo silenciosa y la actualización en vivo se conserva.
+- Validaciones:
+  - `npx tsc --noEmit` (apps/web), antes y después de las pruebas: código 0, sin errores.
+  - Cierre forzado: script con `NEXT_DIST_DIR=.next-flag-off` muerto con `taskkill /pid <p> /T /F` a mitad del build. Salida: `changed after 64 ticks; backup exists: True`, y `git status` mostró `M next-env.d.ts` y `M tsconfig.json`. Con el globalTeardown: `Se restauraron tsconfig.json y next-env.d.ts desde la copia de un build interrumpido.`, `git status` vacío y hashes sha256 iguales a los del inicio (`tsconfig.json` 861ff5b0358034eee94b83b197f965c5a43d9884588a433f27645d167e4c38af, `next-env.d.ts` b8b3a344484b959af5e4e3fc1a1609dac3cb9ece0cdeb6c145be29bc4c491000). Con la siguiente corrida: segunda muerte forzada (de nuevo `M` en ambos), un build normal del script terminó con `exit=0`, `git status` vacío y hashes iguales.
+  - `npx playwright test` (apps/web, puertos 3100/3101): `1 skipped`, `199 passed (4.5m)`, código 0 (incluye las 4 ejecuciones nuevas de `overview-live-refresh.spec.ts`: el coalescer y una sola recarga por aviso con la actualización en vivo visible). Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío, hashes iguales a los del inicio y la carpeta de copia ya no existe.
+  - NO_EJECUTADA: build fallido con comprobación del código de salida en vivo (la lógica es la misma de antes, `code ?? 1`); SIGINT/SIGTERM reales y el camino POSIX (`detached` y `kill(-pid)`), no probados; `apps/api` y `npm run test:web:admin-real`, fuera del alcance.
+- Riesgos:
+  - Un PID muerto reutilizado se toma como dueño vivo y la copia queda hasta el teardown (solo retrasa la restauración).
+  - Si el teardown corre con un build a medias, puede restaurar antes de que termine; solo ocurre en un cierre forzado y se recupera en la siguiente corrida.
+  - El Resumen tarda hasta 1 s (5 s en ráfagas continuas) en reflejar un aviso.
+- Siguiente paso: `auditor-opus` audita esta corrección y, si la aprueba, cierra el BAJO-1 nuevo y el riesgo de `listAll` de `CN-20261110-056`.
+
+### CN-20261110-059 — Reauditoría de `CN-20261110-057` (correcciones de M5 Flutter tras `CN-20261110-055`)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: reaudita `CN-20261110-057` (corrección), que corrige los hallazgos de `CN-20261110-055` sobre `CN-20261110-053` y el commit `a829882`. Rama `moneda-virtual`, árbol sin commit sobre `773aef0`. No se auditó ni tocó lo de `apps/web` (`CN-20261110-058`, en curso).
+- Alcance: diff actual sin commit de `apps/mobile_flutter/{lib,test,README.md}` (incluye `core/navigation/themed_route.dart` y `test/m5_correcciones_test.dart`) y secciones Flutter de `docs/product/moneda-virtual.md` y `docs/guides/local-development.md`. Se incorpora el recorrido visual del coordinador sobre `build/web` (API real, 1280x800, sesión limpia).
+- Verificación de los hallazgos de `055`:
+  - MEDIO-1 cerrado. `CostRequest.alwaysCharges` está en los tres puntos que cobran siempre (prioridad al postular, `apply_sheet.dart:98`; dar prioridad, `application_detail_page.dart:232`; destacar perfil, `wallet_sections.dart:245`), y no hay otra llamada a `apply`, `prioritize` ni `highlightProfile` fuera de `confirmCosts`. Si la cotización falla, las acciones que siempre cobran solo ofrecen Reintentar o Cancelar; además, `continueAnyway` las rechaza por defensa (`cost_flow.dart:120-127`). La prioridad opcional se descarta y se envía `priority: false`. Las pruebas comprueban lo enviado (`applyPriorities`) y el saldo. El coordinador lo confirmó con la API real (`isPriority:false`).
+  - MEDIO-2 cerrado: `pdfSaveMessage` con `isWeb` (por defecto `kIsWeb`).
+  - MEDIO-3 cerrado sin bucles: `refreshSilently` no llama a `onApplicationChanged` (no sube la `revision`), junta las peticiones simultáneas (`_silentAgain`), no muestra indicador de carga y conserva la lista si falla. Hay una conexión SSE más por sesión (Puestos y Postulaciones), acotada y cerrada al desmontar. Confirmado en vivo por el coordinador.
+  - MEDIO-4 cerrado: `pushThemed` captura el tema con `InheritedTheme.capture` sin cambiar la pila de navegación. Hay prueba que falla sin el arreglo, y el coordinador lo confirmó en oscuro.
+  - MEDIO-5 cerrado: bienvenida y login condicionados a la bandera, con textos coherentes con puestos fijos (confirmado visualmente).
+  - BAJO-1 a BAJO-6 cerrados. Para BAJO-3: `ApiClient` solo se usa en rutas `WORKER` de puestos, moneda, referido, destacar perfil, PDF y SSE, donde la API responde `401` solo por sesión inválida (`AuthError` en `guarded`/`workerSession`; el rol equivocado da `403`). `_onSessionExpired` ignora clientes de una sesión anterior (compara el token capturado con el de la sesión vigente), no vuelve a entrar mientras cierra (`_expiring`) y no puede competir con un login nuevo, porque el nuevo token es distinto. Los servicios se liberan después del siguiente frame.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos (abiertos, no bloquean):
+  - BAJO-1 (cotización parcial). `cost_flow.dart:100-127`: si falla solo la cotización de la prioridad y la de la postulación sí llegó con costo mayor que 0 (cuota agotada), «Continuar sin prioridad» devuelve `proceed: true` sin mostrar ese costo conocido. Corrección: al descartar lo opcional, volver a cotizar lo que queda (`active = no opcionales; dropped = true; continue`) en vez de devolver.
+  - BAJO-2 (riesgo aceptado, se mantiene). Una postulación normal sigue admitiendo «Continuar» tras una cotización fallida. Con la cuota agotada, el servidor cobra la tarifa de catálogo (5) sin mostrarla. Es el mismo criterio aprobado en la web (M5a) y el diálogo lo advierte.
+  - BAJO-3. Tras un `401`, `_logout` deja `_audience = null` y la app vuelve a la bienvenida (tres pasos), no directamente al login. Corrección sugerida: conservar `_audience` en el cierre por vencimiento. No hay prueba de `ChambeayaApp` para este camino (ni para el token viejo ignorado); la prueba de `m5_correcciones_test.dart:661` dice «también por SSE» pero solo cubre REST.
+  - BAJO-4. Hay dos conexiones SSE permanentes por sesión (Puestos y Postulaciones, también dentro de `JobsHubPage` con la bandera encendida). Sugerencia: un único flujo compartido (broadcast) en `JobsServices`.
+  - BAJO-5 (texto). El paso 2 de la bienvenida, «Índice Chambeaya: La puntualidad, asistencia y desempeño construyen tu reputación» (`onboarding_page.dart`, `_commonSteps`), sigue pensado para turnos y no hay índice de reputación en puestos fijos. Conviene reescribirlo para la bandera apagada.
+  - BAJO-6 (preexistente, recorrido visual). Enter en el campo de contraseña no envía el login (`auth_page.dart`); anterior a `053`.
+- Documentación: el auditor corrigió en `docs/product/moneda-virtual.md` el alcance del `401`: rutas de puestos, moneda, referido, destacar perfil y avisos; cierra la sesión local sin llamar a la API y vuelve a la bienvenida, no al login. También corrigió una coma suelta en `apps/mobile_flutter/README.md`. La sección Flutter de `docs/guides/local-development.md` está al día. CRLF conservado.
+- Archivos revisados: `apps/mobile_flutter/lib/{main.dart,core/navigation/themed_route.dart,features/wallet/{cost_flow,wallet_page,wallet_sections}.dart,features/jobs/{api_client,apply_sheet,application_detail_page,job_detail_page,job_postings_page,job_postings_controller,jobs_models,jobs_services,my_applications_page,pdf_saver,job_events_source,jobs_hub_page}.dart,features/marketplace/worker_shell.dart,features/onboarding/onboarding_page.dart,features/auth/auth_page.dart}`, `apps/mobile_flutter/test/m5_correcciones_test.dart`, `apps/api/src/modules/{jobs/jobs.routes,currency/currency.routes,talent/talent.routes,auth/auth.service}.ts`. Editados: `docs/product/moneda-virtual.md`, `apps/mobile_flutter/README.md`, `docs/PROGRESO.md`.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: sin cambios en `pubspec.lock` (hash igual).
+  - `flutter analyze`: `No issues found! (ran in 7.9s)`.
+  - `flutter test`: `00:48 +262 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:37 +263: All tests passed!`.
+  - Recorrido visual del coordinador (`build/web` en `http://localhost:7357`, API real, `trabajador.demo`, 1280x800): MEDIO-1, BAJO-1, MEDIO-3, MEDIO-4 y MEDIO-5 conformes. Que un puesto recién publicado no llegue en vivo es lo esperado: la API solo envía avisos a su destinatario.
+- Riesgos: `NO_EJECUTADA`: Android/iOS o dispositivo real; cobro real con saldo; corte de red real del SSE; recorrido visual a 375 px de esta versión y del camino de `401` en la app real. Residuo en la base de desarrollo: puesto «Auxiliar de despacho» con la postulación de `trabajador.demo` preseleccionada, más lo ya declarado en `053` y `055`.
+- Siguiente paso: M5 (Flutter) queda cerrado; el coordinador puede hacer commit. Los bajos BAJO-1, BAJO-3, BAJO-4 y BAJO-5 quedan como mejoras para `implementador-sonnet` en una tarea posterior.
+
+### CN-20261110-057 — Corrección de los hallazgos MEDIO-1 a MEDIO-5 y BAJO-1 a BAJO-6 de `CN-20261110-055` (M5 Flutter)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261110-055` (auditoría `REQUIERE_CAMBIOS` de `CN-20261110-053`). Rama `moneda-virtual`, árbol de trabajo sin commit. No se tocó `apps/web`, `apps/api` ni lo de `CN-20261110-054`.
+- Alcance:
+  - MEDIO-1: si la cotización falla ya no se ejecuta una acción que siempre cobra sin haber mostrado el costo. `CostRequest.alwaysCharges` marca la prioridad y destacar el perfil: dar prioridad a una postulación y destacar el perfil solo ofrecen Reintentar o Cancelar; al postular con prioridad se ofrece «Continuar sin prioridad» (se envía `priority: false`) o Reintentar/Cancelar. Las acciones gratuitas conservan «Continuar».
+  - MEDIO-2: en web (`ApplicationDetailPage.isWeb`, por defecto `kIsWeb`) un `null` del selector de archivos muestra «Descarga iniciada.»; fuera de web sigue «Descarga cancelada.».
+  - MEDIO-3: `JobPostingsPage` recarga en silencio (`JobPostingsController.refreshSilently`, sin indicador de carga y conservando la lista si falla) ante avisos en vivo (`events.watch()`) o cambio de `revision`; el shell sube la revisión al volver a la pestaña Puestos y al postular.
+  - MEDIO-4: `pushThemed` (nuevo, `core/navigation/themed_route.dart`) reaplica el tema del contexto a las rutas; lo usan el detalle del puesto, «Mi postulación» y la billetera abierta desde un costo. La pila de navegación no cambia (el botón atrás sigue igual).
+  - MEDIO-5: con la bandera de turnos apagada la bienvenida y el login hablan de puestos fijos formales; encendida conservan el texto actual (`OnboardingPage` y `AuthPage` reciben `temporaryShiftsEnabled`, por defecto la bandera).
+  - BAJO-1: la cuota gratuita se oculta con `monthlyLimit` 0; `DemoJobsBackend` devuelve la cuota con límite 0 para prioridad y destacar, como la API real.
+  - BAJO-2: límites de la API (comprobados en `apps/api/src/modules/jobs/jobs.routes.ts`: `query` y `location` `max(100)`, `minSalaryCents` `max(10_000_000)`): el cliente limita texto y ubicación a 100 caracteres, el sueldo mínimo a S/ 100 000 (mensaje sin enviar la consulta) y `toQuery()` recorta como respaldo.
+  - BAJO-3: `ApiClient.onUnauthorized` (401 de cualquier ruta REST y del SSE) cierra la sesión local, vuelve al login y muestra «Tu sesión venció. Vuelve a ingresar.» (`main.dart`, sin llamar a `logout` en la API; tolera llamadas repetidas y clientes de una sesión anterior).
+  - BAJO-4: `_acceptedPriority` se limpia tras cualquier error que no sea reintentable tal cual (un 503 o un corte de red conservan lo aceptado).
+  - BAJO-5: `ApiClient.close()` y `JobsServices.dispose()` cierran el cliente HTTP propio; `_logout` libera los servicios tras el siguiente frame.
+  - BAJO-6: la prueba de `jobs_screens_test.dart:300` ahora reenvía sin prioridad y comprueba lo enviado y el saldo.
+- Archivos:
+  - Nuevos: `apps/mobile_flutter/lib/core/navigation/themed_route.dart`, `apps/mobile_flutter/test/m5_correcciones_test.dart` (31 pruebas).
+  - Lib: `apps/mobile_flutter/lib/main.dart`, `lib/features/wallet/{cost_flow,wallet_page,wallet_sections}.dart`, `lib/features/jobs/{api_client,apply_sheet,application_detail_page,job_detail_page,job_postings_page,job_postings_controller,jobs_models,jobs_services,my_applications_page,pdf_saver,job_events_source,demo_jobs_backend}.dart`, `lib/features/marketplace/worker_shell.dart`, `lib/features/onboarding/onboarding_page.dart`, `lib/features/auth/auth_page.dart`.
+  - Pruebas modificadas: `apps/mobile_flutter/test/jobs_screens_test.dart`.
+  - Docs: `docs/product/moneda-virtual.md` (sección Flutter: se quita el pendiente de los textos de turnos), `docs/guides/local-development.md`, `apps/mobile_flutter/README.md`.
+- Decisiones:
+  - MEDIO-4 se resolvió capturando el tema (como `showDialog`) en vez de un Navigator anidado: no cambia la pila ni el botón atrás. La hoja de postular y los diálogos ya heredaban el tema; la prueba en oscuro lo confirma.
+  - Texto nuevo con la bandera apagada. Bienvenida: pasos 3 y 4 «Costos informados» («Antes de toda acción con costo, ves cuánto es y cuánto te queda.») y «Puestos fijos formales» («Postula a empleos formales y sigue cada etapa del proceso hasta tu oferta.»); se reescribió también el paso 3 anterior, que decía «validar el turno». Login: título «Tu próximo empleo empieza aquí», descripción «Encuentra puestos fijos formales, postúlate en pocos pasos y sigue cada etapa de tu proceso.», beneficio «Puestos fijos formales», ruta «Busca → postúlate → recibe tu oferta» / «busca · postúlate · recibe tu oferta». Se ajustó también el texto del login de empresa («Publica puestos, revisa postulaciones y elige…»), por coherencia (esa pantalla no es alcanzable hoy).
+  - La postulación normal sigue permitiendo «Continuar» tras una cotización fallida (puede ser gratuita), como aceptó la auditoría.
+  - `DemoJobsBackend.applyPriorities` registra lo enviado en cada `apply`, también cuando el servidor falla.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; `pubspec.lock` y `pubspec.yaml` sin cambios (`git status`).
+  - `flutter analyze`: `No issues found! (ran in 4.4s)`.
+  - `flutter test`: `00:28 +262 ~1: All tests passed!` (antes `+231 ~1`: 31 pruebas nuevas; la omitida es el recorrido heredado de turnos).
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: `00:31 +263: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `√ Built build\web`.
+  - Comprobación de que la prueba falla sin el arreglo: solo para MEDIO-4 (sin `themes.wrap` el detalle sale claro: `Expected: Brightness.dark, Actual: Brightness.light`); el arreglo quedó restaurado. Para los demás no se revirtió el arreglo.
+- Riesgos:
+  - `NO_EJECUTADA`: Android/iOS o dispositivo real; cobro real con saldo (el saldo demo es 0); descarga del PDF en un navegador real (solo `isWeb` en pruebas y lectura de `file_picker_web`); recorrido visual de Flutter web con la API real (el tema oscuro se verificó con pruebas de widgets).
+  - MEDIO-3 abre una segunda conexión SSE (Puestos además de Postulaciones). Un 401 en ella se ignora en esa pestaña y lo gestiona `onUnauthorized`.
+  - `refreshSilently` recarga como máximo las 100 primeras filas ya cargadas.
+  - Tras una cotización fallida, la postulación normal permite «Continuar»; si ya se agotó la cuota gratuita el servidor la cobraría sin mostrar el costo (comportamiento aceptado en la auditoría, no modificado).
+  - Los textos nuevos de bienvenida y login son redacción del implementador.
+- Siguiente paso: `auditor-opus` reaudita `CN-20261110-057` sobre el árbol de trabajo de `moneda-virtual` (sin commit); el coordinador revisa `build/web` en el puerto 7357.
+
+### CN-20261110-056 — Auditoría de `CN-20261110-054` (corrección de BAJO-1 a BAJO-7 de `CN-20261013-052`, M5a)
+
+- Fecha: 2026-11-10 15:05 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261110-054` (corrección), que atiende los BAJO-1 a BAJO-7 de `CN-20261013-052`. Rama `moneda-virtual`, árbol sin commit. No se auditaron los cambios de `CN-20261110-053` (`apps/mobile_flutter/**` y las secciones Flutter de los docs), que revisa `CN-20261110-055`.
+- Alcance: diff sin commit de `apps/web/{app/page.tsx,features/jobs/*,playwright.config.ts,e2e/*,scripts/build-keeping-tracked-files.mjs}`, `apps/api/tests/integration/currency-actions.integration.test.ts` y los bullets de M5a de `docs/guides/local-development.md` y `docs/product/moneda-virtual.md`.
+- Verificación por hallazgo:
+  - BAJO-1: resuelto. El script guarda `tsconfig.json` y `next-env.d.ts`, ejecuta `npm run build` y los restaura al salir el hijo, conservando su código (probado con un build simulado que reescribe ambos archivos: salida 0 → 0 y 3 → 3, archivos restaurados, y `&&` no arranca `next start` si falla). Playwright 1.63 ejecuta las tareas de `webServer` en secuencia (`createPluginSetupTasks` en `TaskRunner`), así que el segundo build toma su copia después de que el primero restauró. Un build real que falló (Turbopack en una copia de auditoría) detuvo la suite con `Process from config.webServer was not able to start. Exit code: 1`. Tras la suite rápida completa, `git status` sin líneas para ambos archivos y hashes SHA-256 idénticos a los de antes.
+  - BAJO-2: resuelto. Cada ronda exige `completados + tolerados = 2 × (ronda + 1)` y la corrida exige al menos un barrido terminado; registrado `[BAJO-1 stress] barridos concurrentes: 8 terminados, 0 tolerados`.
+  - BAJO-3: resuelto. `inFlight` se marca tras validar y antes del primer `await`, y se libera en `finally` en todos los caminos (PDF inválido, error, 401, éxito): un segundo clic durante el envío, incluido uno que termina en error, se ignora; tras el error se puede reintentar.
+  - BAJO-4: resuelto (`aria-label` y el ícono con `aria-hidden`).
+  - BAJO-5: resuelto. Cuota oculta con `monthlyLimit` 0; el bloqueo distingue saldo, tope y «no disponible». La API real devuelve la cuota de `JOB_HIGHLIGHT` con límite 0 (`currency.catalog.ts`), como el fixture nuevo.
+  - BAJO-6: resuelto. Apagada: sin campana (única forma de abrir el panel de avisos) ni plan en barra lateral y Perfil; encendida: campana, plan y Membresía sin cambios (suite heredada y `membership.spec.ts` pasan).
+  - BAJO-7: resuelto. `listAll` sigue `nextCursor` de la API, que pagina por llave `(createdAt, id)` descendente con `id` único e inmutable: no repite ni salta puestos (un puesto creado durante el recorrido queda antes de la primera página y no se duplica). Tope de 20 páginas con aviso; ningún otro consumidor usa `limit: 100`.
+- Pruebas que fallan sin el arreglo (copia de `apps/web` fuera del repo con los siete archivos de código en su versión `HEAD` y las pruebas nuevas): `npx playwright test` de `fixed-jobs-{applicants,postings,flag}.spec.ts` → `14 failed, 20 passed`: fallan justo los 7 casos nuevos o modificados (BAJO-7, BAJO-4, BAJO-3, la prueba de la bandera apagada, «publicar fuera de la cuota», «destacar un puesto», «no culpa al tope diario») en escritorio y en móvil. La copia se borró al terminar.
+- Hallazgos críticos, altos y medios: ninguno.
+- Hallazgos bajos (no bloquean):
+  - BAJO-1 (nuevo, `apps/web/scripts/build-keeping-tracked-files.mjs:1-6,536-551`). La restauración depende de que el proceso de Node pueda correr su código: con un cierre forzado durante el build no se restaura (reproducido: `taskkill /T /F`, que es lo que usa Playwright en Windows para detener sus servidores, deja `tsconfig.json` modificado; en POSIX el valor por defecto es `SIGKILL`). Pasa, por ejemplo, si vence el `timeout` de 180 s del `webServer` o si Playwright se detiene en medio del build. Además, en `SIGINT`/`SIGTERM` restaura antes de que termine el hijo, que podría volver a escribir. El comentario del script y el README decían «también si se interrumpe». Corrección sugerida: guardar la copia también en disco (p. ej. en `.next-flag-off/`) y restaurarla al inicio de la siguiente corrida o en un `globalTeardown`, y en las señales esperar al `exit` del hijo. El auditor corrigió `apps/web/e2e/README.md` para describir el límite y el paso manual en ese caso.
+- Documentación: `docs/guides/local-development.md` y `docs/product/moneda-virtual.md` (M5a) describen el comportamiento actual; el auditor agregó el tope de 2000 puestos con aviso de `listAll` y corrigió en `apps/web/e2e/README.md` la afirmación sobre interrupciones. `docs/reference/` no cambia (sin cambios de API).
+- Validaciones (PostgreSQL 16-alpine desechable en `127.0.0.1:57220`, bases `chambeaya_test` y `chambeaya_shadow_test`; borrado al terminar; no se tocó el stack de compose ni el servidor del 7357):
+  - `npx tsc --noEmit` en `apps/api` y `apps/web`: código 0, sin errores.
+  - `npm test` (`apps/api`): `Test Files  36 passed (36)`, `Tests  627 passed (627)`.
+  - `prisma migrate deploy`: `All migrations have been successfully applied.`; `npm run test:integration`: `Test Files  21 passed (21)`, `Tests  232 passed (232)`; `currency-actions` aparte (dos veces): `24 passed (24)`.
+  - `npx playwright test` (`apps/web`, dos paneles compilados): `1 skipped`, `195 passed (4.7m)`, código 0. Después: `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` vacío y hashes iguales a los de antes.
+  - NO_EJECUTADA: e2e real (`npm run test:web:admin-real`), Flutter (fuera del alcance) e imágenes Docker.
+- Riesgos residuales: el BAJO-1 nuevo (cierre forzado durante el build); `listAll` hace hasta 20 peticiones seguidas y se repite en cada aviso SSE del Resumen; el texto «Esta acción no está disponible por ahora» es redacción nueva; siguen sin prueba automática la reconexión SSE y los `409` de moneda contra la API real; el panel solo tiene tema claro.
+- Decisión: `APROBADO`. BAJO-1 a BAJO-7 de `CN-20261013-052` quedan resueltos y con pruebas que fallan sin el arreglo; queda abierto solo el BAJO-1 nuevo.
+- Siguiente paso: `implementador-sonnet` puede atender el BAJO-1 nuevo en una corrección menor o diferirlo; M5a queda cerrado tras el commit de estos cambios.
+
+### CN-20261110-055 — Auditoría de `CN-20261110-053` (M5, parte Flutter: puestos fijos y billetera del trabajador, commit `a829882` + cambios sin commit)
+
+- Fecha: 2026-11-10 14:21 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: audita `CN-20261110-053` (implementación) y reconoce como parte de la entrega el commit `a829882` (nunca auditado antes). Rama `moneda-virtual`, árbol sin commit. No se auditaron los cambios de `CN-20261110-054` (`apps/web`, `apps/api/tests/integration/currency-actions.integration.test.ts`, `apps/web/scripts/` y sus secciones de docs).
+- Alcance: diff completo de `a829882` en `apps/mobile_flutter` (≈47 archivos) más los cambios sin commit de `apps/mobile_flutter/{lib,test,README.md}` y las secciones «App del trabajador: puestos fijos y billetera (M5, parte Flutter)» (`docs/guides/local-development.md`) y «Qué cubre M5 en Flutter (app del trabajador)» (`docs/product/moneda-virtual.md`). Contrato contrastado con `apps/api/src/modules/{jobs,currency}` (rutas, esquemas Zod, `workerApplicationView`, `eventView`, `CurrencyQuoteService`, `jobEvents`) y con la API real. Se incorporan los hallazgos del recorrido visual de Flutter web que hizo el coordinador (API real, 1280x800 y 375x812).
+- Contrato verificado sin discrepancias: rutas y verbos del trabajador (`/workers/job-postings`, `/workers/job-applications/*`, `/workers/currency/{balance,movements,catalog,rewards,quote}`, `/workers/me/referral`, `/workers/me/profile/highlight`, `/job-events`); cuerpo de postular (`answers` + `priority` opcional, `strict`); filtros de búsqueda; forma de `quote` (`cost`, `reason`, `freeQuota`, `dailyCap`, `withinDailyCap`, `refundWindowHours`, `currency`); `409 INSUFFICIENT_CURRENCY {cost, balance}`, `409 DAILY_SPEND_CAP_REACHED {dailyCap, spentToday}`, `503 SERIALIZATION_RETRY_EXHAUSTED` con `Retry-After` acotado; idempotencia (postular repetido no cobra dos veces: lo garantiza el servidor por `(puesto, trabajador)` y `instanceKey`); SSE con `Authorization`, `event: job` con `{type, applicationId, postingId, status, at}`, `401` sin reintento, reconexión con retroceso y cancelación limpia; streaming de SSE en web soportado por `http` 1.6.0 (`fetch` con `AbortController`). Privacidad: la app solo muestra lo que entrega `workerApplicationView` (el `detail` de un rechazo llega `null` y el cierre automático sale de `autoClosedReason`, corrección correcta); no hay registros (`print`) ni tokens en errores.
+- Hallazgos críticos y altos: ninguno.
+- Hallazgos medios:
+  - MEDIO-1 (cobro sin costo previo tras una cotización fallida). `apps/mobile_flutter/lib/features/wallet/cost_flow.dart:100` (`_UnknownCostChoice.continueAnyway`) y `:186`: si `quote` falla, «Continuar» ejecuta la acción aunque sea siempre de pago: prioridad (`apply_sheet.dart:93-98` envía `priority: true`; `application_detail_page.dart:216-236`) y destacar el perfil (`wallet_sections.dart:235`). Se cobran 10 monedas sin haber mostrado el costo, contra la regla «Antes de toda acción con costo se muestra el costo previo». La web (M5a) tiene un patrón parecido ya aprobado, pero allí la acción es una sola; aquí se arrastra la opcional. Corrección: ante una cotización fallida, descartar las peticiones opcionales (enviar `priority: false`) y, para acciones sin cuota gratuita (prioridad, destacar), ofrecer solo Reintentar/Cancelar. Agregar prueba que lo demuestre (la actual, `jobs_screens_test.dart:223`, no comprueba qué se envió ni el saldo).
+  - MEDIO-2 (descarga del PDF en web). `application_detail_page.dart:277-285` muestra «Descarga cancelada.» cuando el guardado devuelve `false`, y `pdf_saver.dart` usa `FilePicker.saveFile`, que en web (`file_picker_web` 4.0.0) dispara la descarga del navegador y **siempre** devuelve `null`. En web (canal oficial del trabajador, decisión del 2026-11-10) cada descarga correcta se anuncia como cancelada. Las pruebas usan un `PdfSaverFake` y no lo detectan. Corrección: con `kIsWeb` tratar `null` como «Descarga iniciada» (o devolver un estado de tres valores).
+  - MEDIO-3 (estado viejo en la lista de puestos; recorrido visual). `JobPostingsPage` (`job_postings_page.dart:88-99`, `job_postings_controller.dart:140`) solo actualiza `myApplication` con `markApplied` al postular; no escucha los avisos SSE ni la `revision` del shell. Reproducido por el coordinador: la tarjeta siguió en «Postulaste: Postulado» cuando la empresa ya había emitido la oferta (Postulaciones sí mostraba «Oferta»). Corrección: recargar en silencio (o actualizar la tarjeta por `postingId`) ante un aviso `event: job` o un cambio de `revision`, y al volver a la pestaña.
+  - MEDIO-4 (tema inconsistente; recorrido visual). El tema oscuro se aplica con un `Theme` local dentro de `WorkerShell` (`worker_shell.dart:256`), pero el detalle del puesto, «Mi postulación», la hoja de postular y la billetera abierta desde un costo se abren con `Navigator.of(context).push`/`showModalBottomSheet` sobre el navegador raíz del `MaterialApp` (tema claro fijo). Resultado: shell oscuro y pantallas hijas claras. Corrección: envolver esas rutas con el mismo `Theme` (p. ej. un `Navigator` anidado en el shell o un `builder` que reaplique `buildAppTheme(brillo actual)`), con prueba en modo oscuro.
+  - MEDIO-5 (textos de turnos con la bandera apagada; preexistente, recorrido visual). `features/onboarding/onboarding_page.dart:35-36` («Continuidad operativa en evolución», «encontramos el mejor reemplazo en minutos») y `features/auth/auth_page.dart:303-311,403,811` («Tu próximo turno empieza aquí», «Turnos cerca de ti», «lleva el control de cada turno», «Busca → postúlate → confirma») venden turnos temporales aunque el producto vigente (bandera apagada) es de puestos fijos. No los introdujo `a829882`, pero contradicen el criterio de M5 «sin ningún texto del flujo de turnos» (`worker_shell.dart`, comentario de `temporaryShiftsEnabled`). Corrección: condicionar esos textos a `temporaryShiftsEnabled` con un texto de puestos fijos.
+- Hallazgos bajos:
+  - BAJO-1. `cost_flow.dart:241-249` muestra «Usos gratuitos que te quedan este mes: 0 de 0.» para `APPLICATION_PRIORITY` y `PROFILE_HIGHLIGHT`: la API real devuelve `freeQuota` con `monthlyLimit: 0` (comprobado contra `GET /workers/currency/quote?actionKey=APPLICATION_PRIORITY`), mientras `DemoJobsBackend` devuelve `null` y lo oculta en las pruebas. La web ya lo corrigió en M5a. Corrección: mostrar solo si `monthlyLimit > 0` y alinear el servidor en memoria con la API.
+  - BAJO-2. Los campos de búsqueda no respetan los límites de la API: texto y ubicación de más de 100 caracteres y sueldo mínimo mayor que S/ 100 000 dan `400 INVALID_INPUT` (comprobado contra la API real) y la lista muestra el error genérico. `job_postings_page.dart:159,489,498`. Corrección: `maxLength: 100` y tope del sueldo.
+  - BAJO-3. Un `401` de las rutas REST solo muestra «Tu sesión venció. Vuelve a ingresar.» sin acción ni cierre de la sesión local; no hay manejo global en `main.dart`. Corrección: un `onSessionExpired` en `JobsServices` que llame a `_logout`.
+  - BAJO-4. `apply_sheet.dart:149-162`: `_acceptedPriority` solo se limpia con `409` de saldo o tope; tras otro error no reintentable (400, 409 de estado) el siguiente envío no vuelve a cotizar. El servidor vuelve a validar saldo, así que no cobra de más, pero el costo mostrado puede quedar viejo.
+  - BAJO-5. `JobsServices.dispose` (`jobs_services.dart:49`) no cierra el `http.Client` de `ApiClient`: queda uno por cada inicio de sesión.
+  - BAJO-6 (pruebas). `jobs_screens_test.dart:300` («tras un 409 de saldo con prioridad se puede reenviar sin ella») no llega a reenviar sin prioridad: termina con el cuadro abierto. El total real de pruebas nuevas es 69 (de `+161 -2` a `+231 ~1`), no 70. El resto de las pruebas sí comprueban los criterios (llamadas y saldo del servidor en memoria, rutas, cabeceras y cuerpos con `MockClient`, `401` sin reintento, cuenta regresiva de `Retry-After`).
+- Documentación: `docs/product/moneda-virtual.md` (sección Flutter) corregida por el auditor: la descarga del PDF en web es directa (no «Guardar como») y se aclara que los textos de bienvenida/login todavía hablan de turnos. `docs/guides/local-development.md` (sección Flutter) y `apps/mobile_flutter/README.md` describen el comportamiento actual. `docs/reference/api.md` no requiere cambios.
+- Archivos revisados: `apps/mobile_flutter/lib/{main.dart,core/navigation/*,core/safe_notify.dart,features/jobs/*,features/wallet/*,features/marketplace/worker_shell.dart,features/auth/auth_page.dart,features/onboarding/onboarding_page.dart}`, `apps/mobile_flutter/test/{jobs_api_contract_test,jobs_screens_test,wallet_page_test,theme_switch_cost_test,theme_toggle_state_persistence_test}.dart`, `apps/api/src/modules/jobs/{jobs.routes,jobs.service,jobs.events}.ts`, `apps/api/src/modules/currency/{currency.routes,currency.quote,currency.actions,currency.catalog}.ts`, `pubspec.lock` (`http` 1.6.0, `file_picker` 13.0.0). Editado: `docs/product/moneda-virtual.md`, `docs/PROGRESO.md`.
+- Validaciones (Flutter 3.44.0, `C:\Users\prueb\tools\flutter\bin\flutter.bat`, en `apps/mobile_flutter`):
+  - `flutter pub get --enforce-lockfile`: `Got dependencies!`; hash de `pubspec.lock` igual antes y después.
+  - `flutter analyze`: `No issues found! (ran in 9.6s)`.
+  - `flutter test`: `00:39 +231 ~1: All tests passed!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true` (suite completa, no solo dos archivos): `00:35 +232: All tests passed!`.
+  - API real (`http://127.0.0.1:4000/api`, `trabajador.demo`): `GET /workers/currency/quote?actionKey=APPLICATION_PRIORITY` → `cost: 10`, `freeQuota.monthlyLimit: 0`, `currency: "Chambitas"`; `GET /workers/currency/balance` → `{"currency":"Chambitas","balance":0}`; `GET /workers/job-postings?query=<101 caracteres>` → `400`; `minSalaryCents=20000000` → `400 INVALID_INPUT`; `GET /job-events` con token inválido → `401`; con token válido → `retry: 2000`.
+  - Recorrido visual de Flutter web (coordinador, API real, 1280x800 y 375x812): login, cinco pestañas, postular gratis, oferta y «Contratado» en vivo en Postulaciones, constancia y billetera correctos, sin desbordes a 375 px; hallazgos MEDIO-3, MEDIO-4 y MEDIO-5.
+- Riesgos:
+  - `NO_EJECUTADA`: Android/iOS o dispositivo real; cobro real con saldo (el saldo demo es 0); corte de red real del SSE; descarga del PDF en navegador comprobada solo por lectura del código de `file_picker_web`.
+  - Residuo en la base de desarrollo del recorrido del coordinador: un puesto cerrado con título mal codificado («Asistente de almac?n (recorrido Flutter web)», error de curl) y un puesto «Asistente de almacén» con la postulación de `trabajador.demo` contratada; más el residuo ya declarado en `CN-20261110-053`.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 a MEDIO-5 (y los bajos que convenga), con pruebas que fallen antes del arreglo, y registra una `CORRECCION` que referencie `CN-20261110-053` y esta auditoría; luego `auditor-opus` reaudita.
+
+### CN-20261110-054 — Corrección de los siete hallazgos bajos de `CN-20261013-052` (M5a)
+
+- Fecha: 2026-11-10 14:25 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261013-052` (auditoría `APROBADO` de `CN-20261013-051`, BAJO-1 a BAJO-7). Rama `moneda-virtual`, árbol de trabajo sin commit.
+- Alcance:
+  - BAJO-1: `next build` reescribía `apps/web/tsconfig.json` y `apps/web/next-env.d.ts` (con otro `distDir` y también el build normal, con rutas de tipos de producción). Los dos paneles de `playwright.config.ts` compilan ahora con `apps/web/scripts/build-keeping-tracked-files.mjs`, que guarda ambos archivos, ejecuta `npm run build` y los restaura byte a byte al terminar (también si el build falla o se interrumpe). Se quitó el paso manual de `apps/web/e2e/README.md`.
+  - BAJO-2: en la prueba de estrés BAJO-1 de `currency-actions`, `tolerantSweep` cuenta barridos terminados y tolerados (`completados + tolerados = 2 × ronda` en cada ronda) y se exige al menos un barrido terminado por corrida; el conteo se registra.
+  - BAJO-3: `OfferForm.submit` usa un `useRef` de en curso marcado antes del primer `await`; un doble clic con PDF adjunto emite una sola oferta y sube un solo archivo.
+  - BAJO-4: `aria-label="Nuevo puesto"` en el botón de la barra superior (nombre accesible en móvil).
+  - BAJO-5: `QuoteDetails` oculta la cuota gratuita con `monthlyLimit` 0; la fase `blocked` solo culpa al tope diario si `!withinDailyCap`, y si el saldo alcanza y está dentro del tope muestra «Esta acción no está disponible por ahora».
+  - BAJO-6: con la bandera de turnos apagada se oculta la campana de notificaciones y no se muestra el plan (barra lateral y Perfil de empresa); encendida, sin cambios.
+  - BAJO-7: nuevo `jobsApi.postings.listAll` (páginas de 100, tope 20 páginas); `applicants-view` y `overview-view` lo usan y avisan si se alcanza el tope.
+- Archivos:
+  - Web: `apps/web/scripts/build-keeping-tracked-files.mjs` (nuevo), `apps/web/playwright.config.ts`, `apps/web/app/page.tsx`, `apps/web/features/jobs/{applicant-detail,applicants-view,company-profile-view,cost-action,jobs-api,overview-view}.ts(x)`.
+  - Pruebas web: `apps/web/e2e/fixed-jobs-{applicants,flag,postings}.spec.ts`, `apps/web/e2e/fixtures/fixed-jobs-api.ts`, `apps/web/e2e/README.md`.
+  - API: `apps/api/tests/integration/currency-actions.integration.test.ts`.
+  - Docs: `docs/guides/local-development.md`, `docs/product/moneda-virtual.md` (bullets de M5a).
+- Decisiones:
+  - BAJO-1 se resuelve con un script de compilación en vez de un `globalTeardown`, para que los archivos queden restaurados aunque la suite se interrumpa; se aplica a ambos paneles porque el build normal también reescribe `next-env.d.ts`.
+  - BAJO-6: se ocultan la campana y el plan en lugar de reflejar avisos de puestos fijos en la campana (esos avisos viven en Postulantes en vivo; sin Membresía el plan no tiene camino).
+  - El fixture devuelve la cuota de `JOB_HIGHLIGHT` con límite 0 como la API real. La prueba `fixed-jobs-postings.spec.ts:61` afirmaba el texto defectuoso «Agotada (0 de 0 usadas)» y ahora comprueba que no aparece.
+  - Pruebas nuevas: doble clic síncrono en «Emitir oferta» con PDF (una subida, una oferta), aria-label de «Nuevo puesto», bloqueo `canExecute:false` sin culpar al tope (con `page.route` sobre `/api/business/currency/quote`), la campana y el plan ocultos con la bandera apagada, y 105 puestos en el Resumen y en el selector de Postulantes. La suite rápida pasa de 188 a 196 ejecuciones (98 casos).
+- Validaciones (PostgreSQL 16-alpine desechable en `127.0.0.1:57210`, bases `chambeaya_test` y `chambeaya_shadow_test`; borrado al terminar; no se usó el stack de compose):
+  - `npx prisma generate` (`apps/api`; el cliente no estaba generado) y `npx tsc --noEmit` en `apps/api` y en `apps/web`: sin errores.
+  - `npm test` (`apps/api`): 36 archivos, 627/627.
+  - `prisma migrate deploy` en la base nueva: `All migrations have been successfully applied.`
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`): `currency-actions` 24/24; el caso BAJO-1 repetido dos veces más, 1 passed | 23 skipped cada vez; `npm run test:integration` completo: 21 archivos, 232/232.
+  - Playwright rápida (`npx playwright test`, dos paneles compilados): primer intento sin Chromium instalado (los 196 casos fallaron al lanzar el navegador; se instaló con `npm run test:web:install`); segundo intento 193 passed, 1 skipped, 2 failed (la afirmación antigua de `fixed-jobs-postings.spec.ts:61`, corregida); corrida final: 195 passed, 1 skipped (4,2 min), EXIT=0.
+  - Criterio de BAJO-1: tras la corrida final, `git status --short apps/web/tsconfig.json apps/web/next-env.d.ts` no devolvió ninguna línea (ambos intactos, sin restauración manual).
+  - NO_EJECUTADA: `flutter analyze`, `flutter test`, e2e real (`npm run test:web:admin-real`) e imágenes Docker (no se tocó nada de esas áreas).
+- Riesgos:
+  - No se comprobó que las pruebas nuevas fallen sin el arreglo (solo que pasan con él).
+  - El mensaje «Esta acción no está disponible por ahora» es redacción nueva del implementador.
+  - `listAll` hace hasta 20 peticiones secuenciales; con más de 2000 puestos se avisa del tope.
+  - El script de compilación usa `spawn` con `shell:true` (aviso DEP0190 de Node, inocuo).
+  - Aún sin cubrir: reconexión SSE y 409 de moneda contra la API real, y el panel solo tiene tema claro.
+- Siguiente paso: `auditor-opus` reaudita `CN-20261110-054` sobre el árbol de trabajo de `moneda-virtual` (sin commit).
+
+### CN-20261110-053 — M5 (Flutter): verificación contra la API real y cierre de puestos fijos y billetera del trabajador (commit `a829882`)
+
+- Fecha: 2026-11-10 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261013-052` (auditoría `APROBADO` de M5a, web). Rama `moneda-virtual` sobre `a829882` («wip(mobile): pantallas de empleos y billetera en la app Flutter», recuperado del disco de una laptop anterior; nunca registrado ni auditado), sin commit.
+- Alcance:
+  - Revisión completa de `a829882` (M5, parte Flutter: puestos, postulaciones con ofertas y PDF, billetera con saldo, movimientos, premios, referido y costos previos) y comparación de cada llamada de `features/jobs/api_client.dart`, `jobs_repository.dart`, `wallet_repository.dart` y `job_events_source.dart` con las rutas de `apps/api/src/modules/{jobs,currency,talent}` y `docs/reference/api.md`: rutas, parámetros, cuerpos, formas de respuesta, `409 INSUFFICIENT_CURRENCY` `{cost, balance}`, `409 DAILY_SPEND_CAP_REACHED` `{cost, dailyCap, spentToday}`, `503` con `Retry-After`, cotización (`quote`) antes de toda acción con costo, nombre de la moneda leído de la respuesta de saldo y bandera `TEMPORARY_SHIFTS_ENABLED` apagada por defecto. Sin discrepancias de contrato.
+  - Verificación contra la API real del stack de desarrollo (script Dart con los repositorios reales de la app): buscar y abrir puesto, cotizar, postular (con y sin respuestas), idempotencia, prioridad sin saldo (409), preselección, entrevista, oferta con PDF, descarga del PDF, aceptar (y aceptar de nuevo), constancia, retirarse, movimientos, catálogo, premios, referido, 404 y 401.
+  - Correcciones: (1) la línea de tiempo del detalle mostraba «La empresa decidió no continuar» en un cierre automático porque la API no entrega al trabajador el `detail` de un rechazo; ahora el motivo sale de `autoClosedReason`. (2) Desbordes de layout con 320 px y texto 1.6x en `OfferCard`, costos, premios, movimientos y tarjeta de saldo. (3) Tras un `409` de saldo o tope diario al postular con prioridad quedaba aceptada la prioridad y el interruptor deshabilitado; ahora se vuelve a cotizar y se puede continuar sin ella. (4) Dos pruebas rotas por `a829882` (`theme_switch_cost_test`, `theme_toggle_state_persistence_test`).
+  - 70 pruebas nuevas (contrato de la API con `MockClient` y SSE, pantallas de puestos y postulaciones con costo previo, billetera).
+  - No se tocó `apps/web`, `apps/api`, `pubspec.yaml` ni `pubspec.lock`.
+- Archivos:
+  - Código: `apps/mobile_flutter/lib/features/jobs/{application_widgets,application_detail_page,jobs_format,apply_sheet}.dart`, `apps/mobile_flutter/lib/features/wallet/{wallet_page,wallet_sections}.dart`.
+  - Pruebas modificadas: `apps/mobile_flutter/test/{theme_switch_cost_test,theme_toggle_state_persistence_test}.dart`.
+  - Pruebas nuevas: `apps/mobile_flutter/test/{jobs_api_contract_test,jobs_screens_test,wallet_page_test}.dart`.
+  - Docs: `apps/mobile_flutter/README.md`, `docs/guides/local-development.md` (subsección «App del trabajador: puestos fijos y billetera (M5, parte Flutter)»), `docs/product/moneda-virtual.md` (sección «Qué cubre M5 en Flutter (app del trabajador)»).
+  - Revisados sin cambios: todo `a829882` (≈47 archivos) y `docs/reference/api.md`.
+- Decisiones:
+  - El nombre de la moneda sale siempre de la API; «monedas» solo mientras carga.
+  - Solo se pide confirmar si el costo total es mayor que 0; una cotización que falla no bloquea una acción gratuita (reintentar o continuar).
+  - Con turnos apagados la app tiene cinco pestañas (Puestos, Postulaciones, Billetera, Perfil, Invitaciones). Con la bandera encendida se conservan las cinco heredadas y se añaden Puestos fijos y Billetera.
+  - El recorrido legado de `theme_toggle_state_persistence_test` queda con `skip` cuando la bandera está apagada y se agregó la prueba equivalente para puestos fijos.
+  - El detalle de un puesto hace una cotización de sugerencia; las pruebas cuentan cotizaciones de forma relativa.
+  - Decisión del dueño del producto (2026-11-10): la versión web del trabajador es la app Flutter compilada para web (servida en `/` en producción); no se construye un panel Next.js separado para el trabajador.
+- Validaciones (Flutter 3.44.0 en `C:\Users\prueb\tools\flutter\bin`; API real en `http://127.0.0.1:4000/api`, demo sembrada; no se detuvo ni reconstruyó el stack):
+  - `flutter pub get --enforce-lockfile` (`apps/mobile_flutter`): `Got dependencies!`; `pubspec.lock` sin cambios.
+  - `flutter analyze`: `No issues found! (ran in 9.2s)`.
+  - `flutter test`: `00:34 +231 ~1: All tests passed!` (la omitida es el recorrido legado de `theme_toggle_state_persistence_test`, con la bandera apagada). Antes de los cambios, la línea base era `+161 -2` (las dos pruebas rotas de `a829882`).
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true test/theme_toggle_state_persistence_test.dart test/theme_switch_cost_test.dart`: `00:06 +8: All tests passed!`.
+  - `flutter build web --dart-define=API_BASE_URL=http://127.0.0.1:4000/api`: `√ Built build\web`.
+  - Script contra la API real (repositorios de la app): recorrido completo conforme (ver Alcance).
+- Riesgos:
+  - `NO_EJECUTADA`: recorrido manual de la UI con la API real (la capa de repositorio sí se verificó con la API real; las pantallas con el servidor en memoria y compilan en web), ejecución en Android/iOS o dispositivo real, y `npm test` de la API o las suites web (fuera de alcance).
+  - Un cobro con costo no se ejercitó contra la API real (el saldo demo es 0; el `409` de saldo sí se vio real); los cobros se probaron con el servidor en memoria.
+  - El flujo SSE (reconexión, `401` sin reintento) solo se prueba con `MockClient.streaming`, no con un corte de red real.
+  - Residuo en la base de desarrollo por la verificación real: puesto «Prueba Flutter M5 puesto» cerrado, con una postulación retirada y una oferta aceptada (constancia) de la cuenta demo.
+  - La lista de movimientos pagina solo por botón (no por scroll).
+  - `ErrorNotice` usa colores fijos (fondo claro con texto navy): legible en ambos temas, sin revisión visual en oscuro.
+- Siguiente paso: `auditor-opus` audita `CN-20261110-053` (diff de `apps/mobile_flutter/{lib,test,README.md}` y las dos secciones nuevas de docs) y reconoce `a829882` como entrega de M5 (Flutter) si no hay hallazgos.
+
+### CN-20261013-052 — Auditoría de `CN-20261013-051` (M5a: panel web de empresa y pendientes menores de API)
+
+- Fecha: 2026-10-13 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: audita `CN-20261013-051` (implementación) sobre `CN-20261012-050` (reauditoría `APROBADO` de `049`, cuyas observaciones (a), (c) y BAJO-4 se cierran aquí). Rama `moneda-virtual` sobre `20a90eb`, árbol final completo sin commit (la implementación se completó en dos ejecuciones; se auditó el resultado, no lo declarado).
+- Alcance: diff completo de API (historial de verificación paginado, fila `UNVERIFIED` por reemplazo, `Retry-After` en CORS, pruebas de contención) y del panel web (`apps/web/features/jobs/*`, `app/page.tsx`, `lib/business-api.ts`, `layout.tsx`, `business-auth.tsx`, `next.config.ts`, ambas configuraciones de Playwright, specs y fixtures nuevos), más la documentación afectada.
+- Hallazgos críticos y altos: ninguno.
+- Hallazgos medios: ninguno.
+- Hallazgos bajos (abiertos, no bloquean):
+  - BAJO-1 (infraestructura de pruebas). Compilar el segundo panel con `NEXT_DIST_DIR=.next-flag-off` hace que Next reescriba dos archivos versionados: `apps/web/tsconfig.json` (agrega `.next-flag-off/types/**/*.ts` y `.next-flag-off/dev/types/**/*.ts` al `include`) y `apps/web/next-env.d.ts` (importa tipos de `.next-flag-off`). Reproducido: tras `npx playwright test` ambos quedan modificados. Riesgo de commitearlos por accidente; la implementación los restauró a mano sin automatizarlo. Corrección sugerida: restaurarlos en un `globalTeardown`, o compilar el panel apagado desde una copia/tsconfig propio. Se documentó el paso manual en `apps/web/e2e/README.md`. Puertos 3100/3101 y carpeta `.next-flag-off` (ignorada por `.gitignore`) sin otros problemas; la suite tarda ~5,5 min.
+  - BAJO-2 (prueba de estrés BAJO-1 de `currency-actions`). `tolerantSweep` convierte el agotamiento de reintentos del barrido en `{refunded: 0}`: es coherente con producción (el programador registra y reintenta, y cada devolución es su propia transacción) y no oculta un doble reembolso (se siguen comprobando la cadena `sequence`/`balanceAfter` y la unicidad de `refundOfId`), pero si ambos barridos concurrentes fallaran en las 4 rondas la parte concurrente del escenario quedaría vacía sin aviso. Sugerencia: contar los barridos tolerados y exigir que al menos uno por corrida termine, o registrarlo. `account-deletion-race` solo acepta el `503` con `error`=`SERIALIZATION_RETRY_EXHAUSTED` y `retryable: true`, nunca un `500`, y verifica «todo o nada» en ambos casos: no enmascara defectos.
+  - BAJO-3 (`applicant-detail.tsx`, `OfferForm.submit`). Con un PDF adjunto, `step` pasa a `uploading` recién después de `await looksLikePdf(file)`: en ese intervalo el botón «Emitir oferta» sigue habilitado y un doble clic puede subir dos PDF y emitir dos versiones de la oferta (sin cobro de moneda). Corrección: un `useRef` de en curso o fijar el paso antes del primer `await`.
+  - BAJO-4 (accesibilidad, `app/page.tsx`). En móvil el botón «Nuevo puesto» de la barra superior queda sin nombre accesible (el `<span>` se oculta con `display: none` y no hay `aria-label`). Verificado en el navegador a 375 px.
+  - BAJO-5 (`cost-action.tsx`, `QuoteDetails`). Para acciones sin cuota gratuita (`JOB_HIGHLIGHT`) muestra «Cuota gratuita del mes: Agotada (0 de 0 usadas)»; debería ocultarse con `monthlyLimit` 0. Además la fase `blocked` asume «tope diario» siempre que el saldo alcanza, aunque `canExecute` sea falso por otra causa.
+  - BAJO-6 (UX con la bandera apagada). La campana de notificaciones queda como control muerto (siempre «No hay alertas pendientes… postulación o mensaje», no refleja los avisos de puestos fijos) y la barra lateral y el Perfil muestran el plan («Sin plan activado») sin camino a Membresía, que está oculta.
+  - BAJO-7 (`applicants-view.tsx`, `overview-view.tsx`). El selector de puesto y los conteos del Resumen leen solo los 100 puestos más recientes (`limit: 100`, sin paginar): con más puestos, los antiguos no aparecen y los totales quedan cortos.
+- Verificaciones con resultado conforme:
+  - Parte 0: `replaceDocument` corre dentro de la misma transacción `Serializable` de `withProfileRewards`, escribe la fila `UNVERIFIED` (autor nulo, motivo fijo, `documentVersion` del archivo verificado) solo si el anterior estaba verificado; rutas `.../documents/:kind/history` y `.../companies/:companyId/verification/history` protegidas con `guarded(..., 'ADMIN')`, cursor validado contra el mismo trabajador+tipo o empresa (`400 INVALID_CURSOR`), `limit` 1–100 y sin saltos ni repeticiones (prueba de integración). CORS: `exposedHeaders: ['Retry-After']` no cambia `origin` en ninguna rama (lista explícita, `false` en producción sin lista, `*` solo fuera de producción como antes).
+  - Bandera: apagada, sin peticiones a turnos/pagos/mensajes (el sondeo de pendientes ahora exige la bandera), sin textos ni enlaces de turnos en las vistas; encendida, la navegación legada sigue y la suite previa pasa completa.
+  - Seguridad del cliente: sin `dangerouslySetInnerHTML`; un título `<img src=x onerror=…>`, una descripción con `<script>` y un nombre `Ana <b>Audit</b>` se vieron como texto en el navegador. PDF por `fetch` con `Authorization`, solo `application/pdf`, abierto en pestaña sin `opener` vía `blob:` revocado; `mailto:` con prefijo fijo. SSE por `fetch`: se detiene con 401, cierra lector, temporizadores y `AbortController` al desmontar, retroceso exponencial con azar; la API filtra por `recipientUserId`.
+  - Privacidad: tarjeta y detalle sin correo, teléfono ni documento (comprobado también contra la API real); el documento de identidad solo en la constancia de aceptación.
+  - Costos: toda acción con costo pasa por `quote`; confirmación solo con `cost > 0`; un fallo de cotización permite continuar; `409 INSUFFICIENT_CURRENCY`/`DAILY_SPEND_CAP_REACHED` y `503` con cuenta regresiva de `Retry-After`. Doble clic en «Destacar por 10» contra la API real: un solo `ACTION_CHARGE` (−10). Reintentos tras tiempo agotado no cobran dos veces (publicar, destacar e invitar son idempotentes o responden 409 en la API).
+  - Máquina de estados: `allowedActions` coincide con `job-state.ts` (`postingAllowsProgress`, ofertables, entrevistables, `ACCEPTED -> HIRED` solo en puesto vigente); el texto de cierre coincide con `resolveOpenApplications`.
+  - Accesibilidad: diálogo con `role="dialog"`, `aria-modal`, foco inicial, Tab atrapado (12 Tab en el detalle: el foco siguió dentro), Escape cierra y el foco vuelve al botón «Revisar». Sin desbordes horizontales a 375 px.
+  - Nombre de la moneda: tomado siempre de la respuesta de saldo (se vio «Chambitas» desde la API); «monedas» solo como texto neutro mientras carga.
+- Validaciones ejecutadas (PostgreSQL 18 desechable en `127.0.0.1:57200`, bases `chambeaya_test`, `chambeaya_shadow_test` y `chambeaya_e2e_test`; detenido y borrado al terminar; no se usó el 5432):
+  - `prisma migrate deploy` en base nueva y `prisma migrate diff --from-migrations … --to-schema-datamodel … --exit-code`: `No difference detected` (código 0).
+  - `npx tsc --noEmit` en `apps/api` y en `apps/web`: sin errores.
+  - `npm test` (`apps/api`): 36 archivos, 627/627.
+  - Integración completa (`CHAMBEAYA_INTEGRATION_TESTS=true`) tres veces seguidas: 21 archivos, 232/232 en cada una (incluido el estrés BAJO-1, `account-deletion-race` y las dos pruebas nuevas de `currency-rewards`).
+  - Playwright rápida completa (`npx playwright test`, dos paneles compilados, incluye `next build` de ambos): 187 pasaron y 1 omitida (la habitual en móvil), 5,3 min.
+  - e2e real (`npm run test:web:admin-real`): 4/4, incluido `fixed-jobs-hire.spec.ts`.
+  - `flutter analyze`: `No issues found!`.
+  - Recorrido manual en el navegador integrado contra API real y panel compilado con la bandera apagada (escritorio 1280 px y móvil 375 px): crear borrador, publicar dentro de la cuota sin confirmación, destacar con costo y confirmación (doble clic, un cobro), postular por API, aviso en vivo de una segunda postulación sin recargar, ofertar, aceptar por API, constancia con documento, contratar (premio acreditado; saldo 115 → 140), Billetera en móvil.
+  - Tras cada compilación se restauraron `apps/web/tsconfig.json` y `apps/web/next-env.d.ts` (ver BAJO-1); el árbol quedó como lo dejó `051` salvo esta entrada y la nota en `apps/web/e2e/README.md`.
+- Documentación: `docs/reference/api.md` (historial paginado, fila por reemplazo, `Retry-After` expuesto), `docs/guides/local-development.md` (panel M5a) y `docs/product/moneda-virtual.md` («Qué cubre M5a») describen el comportamiento actual. El auditor agregó en `apps/web/e2e/README.md` el aviso de restaurar `tsconfig.json`/`next-env.d.ts` tras la suite rápida.
+- Riesgos residuales: `NO_EJECUTADA` `flutter test` e imágenes Docker. No hay prueba automática de reconexión SSE tras un corte (revisada por lectura de código) ni de los `409` de moneda contra la API real (solo simulada). La sesión del SSE se valida al abrir el flujo y no se revalida mientras sigue abierto (comportamiento de la API previo a este cambio). El bus de avisos sigue en proceso (una sola instancia de API). El panel solo tiene tema claro. La e2e real corre con la bandera encendida; la variante apagada se cubre con la API simulada y con el recorrido manual de esta auditoría.
+- Decisión: `APROBADO`. Sin hallazgos críticos, altos ni medios. Queda cerrado M5a (panel web de empresa) y los pendientes menores de API de `050` ((a) fila de historial por reemplazo, (c) historial paginado y rutas admin, BAJO-4 de contención en `account-deletion-race`), con los BAJO-1 a BAJO-7 como mejoras pendientes.
+- Siguiente paso: `implementador-sonnet` puede atender BAJO-1 a BAJO-7 en una corrección menor (reauditable) o diferirlos; siguen el panel web del trabajador, Flutter y M7.
+
+### CN-20261013-051 — M5a: panel web de empresa para puestos fijos y moneda virtual, más tres pendientes menores de API
+
+- Fecha: 2026-10-13 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261012-050` (reauditoría `APROBADO` de `049`, con las observaciones (a) y (c) y BAJO-4). Rama `moneda-virtual` sobre `20a90eb`, sin commit.
+- Alcance:
+  - Parte 0 (API). (a) Reemplazar el archivo de un documento verificado deja una fila `UNVERIFIED` en `WorkerDocumentVerificationChange` con autor nulo, motivo «verificación retirada por reemplazo», fecha y la versión del archivo que se verificó (reemplazar uno no verificado no escribe nada). (b) `account-deletion-race` acepta `503 SERIALIZATION_RETRY_EXHAUSTED` (`retryable: true`) y comprueba que no queda nada a medias; el barrido de la prueba de estrés BAJO-1 de `currency-actions` tolera el mismo agotamiento de reintentos. (c) El historial de `listDocuments` se pagina por documento (primera página de 20 más `historyNextCursor`; ya no se recorta el de un tipo por el otro), con rutas admin nuevas `GET /api/admin/workers/:workerId/documents/:kind/history` y `GET /api/admin/companies/:companyId/verification/history` (paginadas, `limit`/`cursor`, `INVALID_CURSOR`). Adicional: la API expone `Retry-After` en CORS (`Access-Control-Expose-Headers`) para que el panel lo lea. Sin migración.
+  - Parte 1 (web, `apps/web`). Con la bandera de turnos apagada la navegación es Resumen, Puestos, Postulantes, Talento, Billetera y Perfil de empresa, sin consultar ni mostrar nada de turnos (ni polling, ni textos, ni enlaces, ni metadatos de la pantalla de acceso). Encendida, esas vistas conviven con Turnos, Trabajadores, Mensajes, Pagos y Membresía sin cambios (el Resumen sigue siendo el legado).
+    - Puestos: lista con filtro por estado, vacantes cubiertas/total, destacado; crear/editar con todos los campos y validación espejo de la API; publicar, pausar, cerrar (con aviso de consecuencias) y destacar.
+    - Postulantes: selector de puesto, embudo con conteos y filtros por etapa, prioridad primero, tarjeta sin correo, teléfono ni documento, detalle con respuestas, entrevista, ofertas por versión con PDF, constancia de aceptación (único lugar con el documento de identidad), línea de tiempo y acciones según la máquina de estados; aviso de aceptadas en puesto cerrado; actualización en vivo por SSE.
+    - Talento: búsqueda con destacados, invitar y desbloquear contacto y CV con costo previo, «ya desbloqueado» idempotente, invitaciones enviadas.
+    - Billetera: saldo, cuota gratuita, tope diario, catálogo, premios con condición y topes, movimientos paginados.
+    - Costos: toda acción con costo consulta `quote`; solo pide confirmar si el costo es mayor que 0; las gratuitas nunca se bloquean por saldo ni por un fallo de la cotización; manejo de `409 INSUFFICIENT_CURRENCY`, `409 DAILY_SPEND_CAP_REACHED` y `503` con cuenta regresiva del `Retry-After`.
+- Archivos:
+  - API: `src/app.ts`, `src/modules/currency/{currency.routes,currency.verification}.ts`, `src/modules/talent/talent.service.ts`, `tests/cors.test.ts`, `tests/integration/{account-deletion-race,currency-actions,currency-rewards}.integration.test.ts`.
+  - Web (nuevos): `apps/web/features/jobs/*` (`jobs-api.ts`, `jobs-context.tsx`, `job-events.ts`, `cost-action.tsx`, `posting-form.tsx`, `postings-view.tsx`, `applicants-view.tsx`, `applicant-detail.tsx`, `talent-view.tsx`, `wallet-view.tsx`, `overview-view.tsx`, `company-profile-view.tsx`, `pdf-button.tsx`, `ui.tsx`, `validation.ts`, `format.ts`, `labels.ts`, `errors.ts`, `use-resource.ts`, `use-paged.ts`, `use-countdown.ts`, `jobs.css`), `e2e/fixed-jobs-{postings,applicants,wallet-talent,flag}.spec.ts`, `e2e/fixtures/{fixed-jobs-api,fixed-jobs-ui}.ts`, `e2e-real/fixed-jobs-hire.spec.ts`.
+  - Web (modificados): `app/page.tsx` (navegación, carga condicionada a la bandera, vistas nuevas, toast que reinicia su temporizador), `app/layout.tsx`, `components/business-auth.tsx`, `lib/business-api.ts` (`ApiError` con `details` y `retryAfterSeconds`, `request` exportado), `next.config.ts` (`NEXT_DIST_DIR`), `playwright.config.ts` (segundo panel con la bandera apagada en 3101), `playwright.admin-real.config.ts`, `e2e/fixtures/business-api.ts` (mock del saldo), `e2e/README.md`, `.gitignore`.
+  - Docs: `docs/reference/api.md`, `docs/guides/local-development.md`, `docs/product/moneda-virtual.md` (sección «Qué cubre M5a»; sin avances en la tabla de alcances).
+- Decisiones:
+  - El nombre de la moneda se lee siempre de `currency` en las respuestas de la API (saldo); no hizo falta un endpoint nuevo. Antes de cargarlo se usa «monedas».
+  - «Costo relevante» = costo mayor que 0. Una cotización que falla no bloquea: se ofrece reintentar o continuar y el servidor sigue siendo la autoridad.
+  - El SSE usa `fetch` (con `Authorization`) y no `EventSource`; reconexión con retroceso exponencial, detección de flujo mudo (70 s), parada con 401 y cierre limpio al desmontar.
+  - Diálogos en un portal sobre `document.body` (el `transform` de la animación de la vista dejaba la barra superior por encima, bug real visto en móvil) y teclado a nivel de documento (Escape/Tab siguen funcionando si el elemento enfocado desaparece).
+  - Con la bandera encendida el Resumen sigue siendo el legado para no alterar las pruebas existentes; el panel es solo en tema claro (el panel actual no tiene tema oscuro; los textos nuevos usan un gris con contraste AA).
+  - `playwright.admin-real.config.ts` enciende ahora la bandera en API y panel: los specs de turnos reales ya no podían funcionar con ella apagada (preexistente desde M0).
+  - Corrección menor de comportamiento: `showToast` reinicia su temporizador (un aviso nuevo ya no lo corta el del anterior).
+  - La barra lateral ahora se desplaza (`overflow-y: auto`): con las dos familias de vistas el menú superaba la altura de la pantalla y «Cerrar sesión» quedaba inalcanzable.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:57100`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_e2e_test`; detenido y borrado al terminar; no se usó el 5432):
+  - `npx tsc --noEmit` (`apps/api`): sin errores. `npm test` (`apps/api`): 36 archivos, 627/627.
+  - Integración completa (`CHAMBEAYA_INTEGRATION_TESTS=true`): 21 archivos, 232/232 en la primera corrida. En la segunda, 1 fallo en `currency-actions … (BAJO-1)`: el barrido de la propia prueba agotó reintentos `Serializable` (`P2034`), la intermitencia ya conocida de `048`/`049`. Se ajustó la prueba (el barrido tolera el agotamiento y el barrido final se reintenta) y quedó 3/3 en repeticiones aisladas (24/24). `currency-rewards` 27/27 y `account-deletion-race` 5/5. No se repitió la suite completa tras ese ajuste.
+  - `prisma migrate deploy` en base nueva y `prisma migrate diff --from-migrations … --to-schema-datamodel … --exit-code`: `No difference detected` (código 0; no hay migración nueva).
+  - `npx tsc --noEmit` (`apps/web`, incluye pruebas): sin errores. No existe eslint en el web.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se ejecutó en cada arranque de Playwright y en la suite real); `next-env.d.ts` y `tsconfig.json` se restauraron (Next los modifica al compilar con otro `distDir`).
+  - Playwright rápida completa (`npm run test:web`, dos paneles compilados): 188 ejecuciones (94 casos × escritorio y móvil), 187 pasaron y 1 se omite (la omitida es la de siempre en móvil). En una corrida previa `membership` móvil falló una vez por el temporizador del aviso bajo carga (preexistente); aislada pasó 12/12 y la corrida final pasó completa. 40 ejecuciones nuevas (20 casos de puestos fijos por proyecto).
+  - e2e real (`npm run test:web:admin-real`, API y PostgreSQL reales): 4/4, incluido `fixed-jobs-hire.spec.ts` (publicar desde el panel, postular y aceptar por API, ofertar y contratar desde el panel, estado `HIRED`/`FILLED` y premio verificados por API).
+  - `flutter analyze`: `No issues found!`.
+  - Revisión visual en un navegador real (Chromium de Playwright, escritorio y móvil 375 px) de Puestos, detalle del postulante y Billetera sobre la API simulada, y del Postulantes real en la suite real; se corrigieron el diálogo tapado por la barra superior y la etiqueta del selector de puesto.
+- Riesgos:
+  - `NO_EJECUTADA` `flutter test` y las imágenes Docker. No se ejecutó la suite de integración completa por tercera vez tras ajustar la prueba BAJO-1.
+  - La API simulada de Playwright no puede mantener una conexión SSE abierta con cabeceras ya enviadas: en pruebas el estado queda en «Conectando…» hasta el primer aviso; el indicador «en vivo» y la reconexión se vieron contra la API real pero no tienen una prueba automática de reconexión tras un corte.
+  - El panel es solo claro: no se verificó contraste en tema oscuro porque no existe. El resumen con la bandera encendida no incluye las métricas nuevas.
+  - El historial de verificaciones tiene API pero no pantalla del admin. El bus SSE sigue en proceso (varias instancias de la API no se avisan entre sí). Los 409 de moneda se prueban con una API simulada y con la real solo el flujo feliz.
+  - Se cambió `playwright.admin-real.config.ts` (banderas encendidas) y se agregó un segundo servidor al `playwright.config.ts`: la suite rápida ahora compila dos copias del panel (~2 min más) y necesita libres los puertos 3100 y 3101.
+  - Abrir PDF usa `window.open` y un `blob:`; con ventanas emergentes bloqueadas se descarga.
+- Siguiente paso: `auditor-opus` audita `CN-20261013-051` sobre el árbol de trabajo de `moneda-virtual` (`20a90eb` más lo no comiteado); nada se declara aprobado. Quedan el panel web del trabajador, Flutter y M7.
+
+### CN-20261012-050 — Reauditoría de `CN-20261012-049` (cierre de BAJO-1, BAJO-2 y BAJO-3 de `CN-20261012-048`)
+
+- Fecha: 2026-10-12 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20261012-049` (corrección), `CN-20261012-048` (auditoría de M6 con BAJO-1 a BAJO-3) y `CN-20261012-047` (M6). Rama `moneda-virtual` sobre `66b3fbb`, sin commit. Se contrastó `049` con el `git diff` completo y con los archivos nuevos (`operations/transaction-errors.ts`, la migración `20261012200000_verification_history` y `tests/transaction-errors.routes.test.ts`).
+- Hallazgos: ninguno crítico, alto ni medio.
+  - BAJO-1 (cerrado). `translateTransactionError` reutiliza `isRetryableTransactionError` (`P2034`, `P2010` con `40001`/`40P01` y `PostgresError` sin código) y responde `503 SERIALIZATION_RETRY_EXHAUSTED` con `Retry-After: 1` y `retryable: true`. Se usa en los `sendError` de moneda (incluye las rutas del admin de moneda y de verificación) y de puestos, en el `guard` de `admin.routes.ts` y en talento. Va después de los errores de negocio, así que no los tapa. Sondas: un disparador `40001` y otro `40P01` sobre `JobApplication` dan `503`, sin postulación, movimiento ni `CurrencyActionUse`, y con la cadena del libro intacta. Un error genérico (`P0001`) y un `23505` crudo dan `500`, sin `Retry-After`. Repetir la postulación ya aplicada sigue respondiendo `200` (idempotente). La prueba de estrés solo acepta `201` o ese `503` exacto y comprueba que la postulación exista si y solo si la respuesta fue `201`. Pasó en 6 de 6 corridas.
+  - BAJO-2 (cerrado). En talento, `400` queda solo para `ZodError` y `503` para la contención. `P2003`/`P2025` responden `404 RESOURCE_NO_LONGER_EXISTS`, `TalentError`, `TalentInvitationError`, `CandidateUnlockError` y `CurrencyError` siguen igual, y todo lo demás responde `500`. Sondas: CV con `40001` → `503`, sin fila y sin archivo huérfano; CV con error genérico → `500`, sin archivo. Sin regresión en los errores de negocio: zod `400`, cuerpo vacío `400`, `SPECIALTY_NOT_FOUND` `404`, `WORKER_ACCOUNT_REQUIRED` `403`, `PROFILE_NOT_VISIBLE` `409`, `limit` inválido `400`, `INVALID_CV_UPLOAD` `400`, `TALENT_PROFILE_NOT_AVAILABLE` `404`, sin sesión `401`, cursor basura `200`. Ningún error de negocio de talento lanza un `Error` genérico (`grep` de `throw new` en `talent.service.ts`); el cursor captura su propio `JSON.parse`. Web y Flutter no dependen de `INVALID_TALENT_REQUEST` ni comparan `400`/`500`/`503` (`grep` en `apps/web/src` y `apps/mobile_flutter/lib`), así que el cambio de `400` a `500` no los rompe. Efecto menor aceptado: un `P2003` por una especialidad borrada en plena carrera saldría como `404 RESOURCE_NO_LONGER_EXISTS`.
+  - BAJO-3 (cerrado). `verifyDocument` compara la versión bajo `FOR UPDATE` de la fila. Si no coincide, responde `409 DOCUMENT_CHANGED` sin premio ni historial. El reemplazo (`upsert`) espera ese bloqueo y después borra la verificación. Sonda: 12 rondas de verificar y reemplazar a la vez dieron 11 veces `200/201` y 1 vez `409/201`. Nunca quedó verificado un archivo distinto del revisado. La versión es SHA-256 truncado de `id:storageKey`, y la clave es un `randomUUID`: no se puede adivinar, no contiene el `id` ni la clave, y una versión de otro trabajador, una inventada o en mayúsculas da `409`. Una versión de más de 64 caracteres, numérica o vacía da `400`. Listado, descarga, `POST` y `DELETE` responden `403` a trabajador propio, trabajador ajeno y empresa (15 de 15) y `401` sin sesión. Traversal: un `workerId` con `..%2F` o con SQL da `404`, y un `kind` ajeno a la lista da `400` (zod); `pathFor` además exige `basename`. Cabeceras: `Content-Type` sale de la fila (el servidor lo fija al subir), además de `nosniff`, `private, no-store` y `Content-Disposition` con `filename*` codificado. Un nombre con comillas, CRLF y `..\` no inyecta cabeceras. El `DELETE` exige `reason` de 3 a 500 caracteres (`400` sin cuerpo o con 501). El historial guarda autor, fecha, motivo y versión. Antifarmeo: 4 ciclos de reemplazar, verificar ambos y retirar ambos dejan exactamente 2 `DOCUMENT_VERIFIED`. Empresa: 8 rondas de `verify, unverify, verify, unverify` simultáneos dieron todo `200`, 22 filas que alternan `VERIFIED`/`UNVERIFIED`, la última coherente con el estado y un solo `COMPANY_VERIFIED`.
+  - BAJO-4 (nuevo, documentación, corregido por esta auditoría): `listDocuments` lee los 40 cambios más recientes entre ambos tipos y muestra hasta 20 por tipo. Con muchos cambios de un tipo, el historial del otro puede salir recortado. `api.md` decía «hasta 20 cambios por tipo»; ya describe el límite real. No exige cambio de código antes de M5; conviene paginar el historial cuando el panel lo muestre.
+  - Observaciones (sin cambio exigido): (a) reemplazar el archivo borra la verificación sin fila de historial. Se reconstruye porque el último `VERIFIED` tiene una `documentVersion` distinta de la vigente. Sería deseable una fila `UNVERIFIED` con autor nulo y motivo «reemplazado por el trabajador» antes de mostrar el historial en M5. (b) No hay ruta para leer el historial de la empresa; quedó documentado en `api.md`. (c) `account-deletion-race` exige `< 500`, así que un `503` legítimo bajo contención extrema la haría fallar. Es el mismo tipo de intermitencia que BAJO-1, aunque no apareció en 6 corridas ni en las 3 de `049`. Se recomienda que esa prueba acepte `503 SERIALIZATION_RETRY_EXHAUSTED` como tarea menor, sin bloquear. (d) La prueba de estrés no cuenta movimientos por cada `503` (sí verifica la cadena del libro); la sonda lo cubrió.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:56250`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_fresh_test`, `chambeaya_seed_test` y `chambeaya_probe_test`; detenido y borrado al terminar; no se tocó el 5432; la sonda `tests/audit050/` se borró):
+  - `prisma migrate deploy` en base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - Migración sobre datos sembrados: migraciones hasta `20261012100000`; 3 usuarios, una empresa verificada y 2 documentos (uno verificado). Al aplicar `20261012200000`, el `md5` de todas las filas previas de `User`, `Company` y `WorkerDocument` es idéntico. Las verificaciones y sus autores se conservan, `uploadedAt` queda nulo y los historiales quedan vacíos. El SQL solo contiene `CREATE TYPE`, `ADD COLUMN` nula, `CREATE TABLE`, índices y claves foráneas.
+  - `npx tsc --noEmit` (`apps/api`): sin errores. `npm test`: 36 archivos, 626/626.
+  - Integración completa (`CHAMBEAYA_INTEGRATION_TESTS=true`) 3 veces: 21 archivos, 230/230 las tres.
+  - `currency-actions`, `currency-catalog`, `currency-ledger`, `currency-rewards`, `job-postings` y `account-deletion-race` repetidas 3 veces: 6 archivos, 88/88 cada vez.
+  - Sonda propia (4 pruebas, base aparte): todas pasaron; resultados arriba.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se restauró `apps/web/next-env.d.ts`). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores.
+- Documentación: `docs/reference/api.md` corrige el límite del historial en `GET /api/admin/workers/:workerId/documents` y aclara que el historial de empresa todavía no tiene ruta de lectura. `deployment.md` y `moneda-virtual.md` son coherentes con el código y no se tocaron. No se tocó código de producto.
+- Archivos: revisados todos los del `git diff` y los nuevos de `049`. Modificados por esta auditoría: `docs/reference/api.md` y esta entrada.
+- Riesgos: `NO_EJECUTADA` `flutter test`, Playwright web, `e2e-real/` e imágenes Docker (el cambio no toca web ni Flutter). No se midió cuántos `503` reales produjo la prueba de estrés: el camino del `503` se cubrió con disparadores. Las carreras se ejercitaron con desfases, no con puntos de sincronización deterministas. El `503` no elimina la contención: el cliente debe reintentar, y web y Flutter todavía no leen `Retry-After`. Persisten las observaciones (a) a (c), el bus SSE en proceso y las cuentas múltiples por persona.
+- Siguiente paso: **BAJO-1, BAJO-2 y BAJO-3 de `CN-20261012-048` quedan cerrados** con esta auditoría `APROBADO`, que referencia `049` (y `047`/`048`). Pendientes: el commit de `049` en `moneda-virtual`; como tarea menor, opcional, de `implementador-sonnet`, las observaciones (a) y (c) y la paginación del historial (BAJO-4) antes de mostrarlo en M5; M5 (interfaces) y M7.
+
+### CN-20261012-049 — Corrección de los hallazgos BAJOS de `CN-20261012-048` (503 por reintentos agotados, errores de talento y verificación ligada al archivo)
+
+- Fecha: 2026-10-12 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261012-047` (implementación de M6) y `CN-20261012-048` (auditoría `APROBADO` con BAJO-1, BAJO-2 y BAJO-3). Rama `moneda-virtual` sobre `66b3fbb`, sin commit.
+- Alcance:
+  - BAJO-1: mapeo central de «reintentos de serialización agotados» (`P2034`, `P2010` con `40001`/`40P01` y el `PostgresError` sin código) a `503 SERIALIZATION_RETRY_EXHAUSTED` con `Retry-After: 1`, `message` y `retryable: true`, sin efectos aplicados. La prueba de estrés `currency-actions … (BAJO-1)` acepta ahora `201` o ese `503` y comprueba que un `503` no dejó postulación (existe si y solo si fue `201`) y que el libro queda consistente; cualquier otro estado sigue fallando.
+  - BAJO-2: el manejador de `talent.routes.ts` ya no responde `400` a todo: `400` solo para validación (`ZodError`), `503` por reintentos agotados, `404 RESOURCE_NO_LONGER_EXISTS` para cuenta o registro ya borrado (`P2003`/`P2025`), los errores de negocio de talento como antes y `500 INTERNAL_ERROR` para un fallo inesperado.
+  - BAJO-3: (a) `POST …/documents/:kind/verification` exige `{documentVersion}` y responde `409 DOCUMENT_CHANGED` si el archivo vigente ya no es el revisado; la comprobación va bajo el bloqueo de la fila del documento. (b) Nuevas rutas solo `ADMIN`: `GET /api/admin/workers/:workerId/documents` (versión opaca, tamaño, fecha, estado e historial; sin clave de almacenamiento) y `GET …/documents/:kind/file` (archivo con `X-Document-Version`). (c) `DELETE …/verification` (documentos y empresa) exige `{reason}` y guarda autor, fecha y motivo en un historial; las verificaciones también quedan registradas. Premios sin cambio: uno por tipo, así que verificar y retirar en bucle no se puede farmear.
+  - Observaciones de `048` (a), (b) y (c): sin cambio de código; documentadas en `api.md`.
+- Archivos:
+  - Nuevos: `apps/api/src/modules/operations/transaction-errors.ts`, `apps/api/prisma/migrations/20261012200000_verification_history/migration.sql`, `apps/api/tests/transaction-errors.routes.test.ts`.
+  - Modificados: `apps/api/prisma/schema.prisma`, `apps/api/src/app.ts`, `modules/admin/admin.routes.ts`, `modules/currency/{currency.routes,currency.verification}.ts`, `modules/jobs/jobs.routes.ts`, `modules/talent/{talent.routes,talent.service}.ts`, `apps/api/tests/integration/{currency-actions,currency-rewards}.integration.test.ts`, `docs/reference/api.md`, `docs/guides/deployment.md`, `docs/product/moneda-virtual.md`.
+- Decisiones:
+  - Un solo helper (`translateTransactionError`/`sendTransactionError`, apoyado en `isRetryableTransactionError`) usado por los manejadores de moneda, puestos fijos, talento y administración. Las rutas del trabajador del módulo de turnos conservan su contrato `409 CONCURRENT_UPDATE`. `404` por registro borrado solo se activa donde la ruta lo pide (`missingRecordCode`), para no ocultar errores en otras.
+  - En talento, un error inesperado pasa de `400` a `500` (antes se confundía con entrada inválida). Es un cambio de contrato deliberado; las 609 pruebas unitarias previas siguen pasando.
+  - Versión del documento = SHA-256 truncado de `id:storageKey`: opaca, cambia con cada archivo y no expone la clave. `updatedAt` no sirve porque verificar también lo cambia. Se agregó `WorkerDocument.uploadedAt` (nula en filas antiguas; el API usa `createdAt`) para mostrar la fecha de subida real; los dos `upsert` de talento la renuevan.
+  - Historial: tablas `WorkerDocumentVerificationChange` y `CompanyVerificationChange` con autor `ON DELETE SET NULL` y sin trigger de solo lectura (el autor puede quedar nulo). Reemplazar el archivo borra la verificación sin fila de historial (lo hace el trabajador, no un admin). Retirar algo ya no verificado es idempotente: no escribe fila y no exige otra cosa que el motivo válido.
+  - Migración aditiva: un tipo, una columna nula y dos tablas; no toca datos.
+  - `createApp` acepta `documentStorage` y comparte la misma instancia entre talento y la revisión del admin (por defecto, `DOCUMENT_STORAGE_ROOT`, como antes).
+  - Contrato nuevo para el panel del admin: la verificación de documentos exige `documentVersion` y los `DELETE` exigen `reason` (`400` si faltan). No hay panel que lo use todavía (M5).
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:56149`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_fresh_test` y `chambeaya_seed_test`; detenido y borrado al terminar; no se usó el 5432):
+  - `npx tsc --noEmit` (`apps/api`, incluye pruebas): sin errores.
+  - `npm test` en `apps/api`: 36 archivos, 626/626 (antes 35/609; suma `transaction-errors.routes.test.ts`, 17 pruebas).
+  - `CHAMBEAYA_INTEGRATION_TESTS=true vitest run --config vitest.integration.config.mts tests/integration` completa, 3 veces seguidas: 21 archivos, 230/230 las tres (antes 224; suma 6 pruebas de `currency-rewards`: lista y descarga solo ADMIN sin clave de almacenamiento, `409 DOCUMENT_CHANGED`, reemplazo simultáneo durante la verificación en 6 rondas, historial y anti-farmeo, autor nulo al borrar al admin, y el `503` real con un disparador `40001` sobre `CurrencyRewardGrant` que revierte el guardado de perfil). `currency-actions … (BAJO-1)` pasó en las tres.
+  - `prisma migrate deploy` en base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - Migración sobre datos sembrados: migraciones hasta `20261012100000`, un trabajador, un admin y un documento verificado; tras aplicar `20261012200000` los conteos no cambian (1 documento, 2 usuarios), el documento conserva su verificación y autor, `uploadedAt` queda nulo y el historial queda vacío.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se restauró `apps/web/next-env.d.ts`). `flutter analyze` en `apps/mobile_flutter`: `No issues found!`. `git diff --check`: sin errores (solo avisos LF/CRLF).
+- Riesgos:
+  - `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` e imágenes Docker (el cambio no toca web ni Flutter).
+  - El `503` no elimina la contención: bajo ráfagas extremas el cliente debe reintentar. La prueba de estrés ya no es intermitente porque acepta el `503`, pero por su naturaleza probabilística no demuestra que el `503` ocurra; el camino real del `503` se cubre con el disparador `40001` y con pruebas unitarias de las tres formas del error.
+  - Las pruebas de borrado simultáneo (`account-deletion-race`) siguen exigiendo `< 500` y no aceptan `503`; no lo han producido en las 3 corridas, pero un `503` legítimo ahí las haría fallar. El `404 RESOURCE_NO_LONGER_EXISTS` de talento por cuenta borrada se prueba por unidad (error de Prisma simulado), no con una carrera real.
+  - Cambio de contrato en talento: un fallo inesperado ahora es `500` y no `400`. Cambio de contrato en las verificaciones del admin (versión y motivo obligatorios).
+  - No se reabrieron el oráculo de referidos, el código numérico ignorado ni `HIRE_CONFIRMED` sin límite propio (solo documentados). El reemplazo de archivo por el trabajador no deja fila de historial. Un `DELETE` de verificación ya retirada responde `200` con `alreadyUnverified: true`.
+- Siguiente paso: `auditor-opus` reaudita `CN-20261012-049` sobre el árbol de trabajo de `moneda-virtual` (`66b3fbb` más lo no comiteado), con referencia a `047` y `048`; nada se declara aprobado. Quedan M5 (interfaces) y M7.
+
+### CN-20261012-048 — Auditoría de `CN-20261012-047` (M6: premios automáticos, `PROFILE_HIGHLIGHT` y cierre de BAJO-A)
+
+- Fecha: 2026-10-12 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20261012-047` (implementación de M6) y `CN-20261007-046` (cierre de M4 con BAJO-A abierto). Rama `moneda-virtual` sobre `092bf8c`, sin commit. Se contrastó `047` con el `git diff` y los archivos nuevos: la migración `20261012100000_currency_rewards`, `currency.{rewards,profile-rewards,referrals,verification,reward-status}.ts`, `profile-completeness.ts`, las rutas admin de verificación, los referidos en `auth.service.ts`, los ganchos `afterHire`/`afterCompanyResponse`, el destacado y la búsqueda en `talent.service.ts`, el borrado en `admin.routes.ts` y las pruebas.
+- Hallazgos: ninguno crítico, alto ni medio.
+  - BAJO-1 (preexistente de M4, no lo introduce `047`): `currency-actions … (BAJO-1)` falló en 1 de 3 corridas completas con `500 INTERNAL_ERROR`. La causa es `P2034`: se agotaron los reintentos `Serializable` de una postulación con prioridad mientras corrían barridos de devolución sobre la misma cuenta. Pasó en 3 de 3 repeticiones aisladas. M6 no toca esa ruta: en `JobService.run` solo agrega la traducción de `P2003`. La auditoría `046` ya medía 0 a 2 `P2034` por cada 24 postulaciones con ese mismo código. No hay efectos parciales, pero sí un defecto menor: un conflicto transitorio sale como `500` y la prueba es intermitente en CI. Sugerencia: traducir los reintentos agotados a `503` con un código propio (p. ej. `CONCURRENT_UPDATE_RETRY`) en un solo lugar y ajustar la prueba.
+  - BAJO-2 (talento, error mal clasificado): el manejador genérico de `talent.routes.ts` convierte todo error que no sea de negocio en `400 INVALID_TALENT_REQUEST`. Sonda: un `40001` forzado con un disparador en `CurrencyRewardGrant` agota los reintentos del guardado de perfil, ahora `Serializable`. La API responde `400` y no deja efecto (0 experiencias guardadas): la atomicidad es correcta, pero el cliente recibe «petición inválida» y no reintenta. Lo mismo ocurre cuando subir el CV o destacar el perfil llega con la cuenta ya borrada: responde `400`, no `500` como suponía `047`. Sugerencia: mapear los errores reintentables agotados a `503` y `P2003`/`P2025` a `404`.
+  - BAJO-3 (verificaciones): `POST …/documents/:kind/verification` no recibe el documento revisado (`id`, `storageKey` o `updatedAt`). Si el trabajador reemplaza el archivo justo antes, el admin verifica uno que no vio. Además, la API no ofrece al admin ninguna ruta para ver los documentos, y quitar una verificación no guarda autor, fecha ni historial. Hoy el impacto es pequeño: un premio de 10 por tipo, y `verified` no se muestra a las empresas. Antes de mostrar «verificado» en M5 conviene ligar la verificación al archivo revisado y guardar el historial.
+  - Observaciones (sin cambio exigido): (a) el registro distingue un código de referido válido de uno inválido cuando el correo ya existe (`409 DUPLICATE_ACCOUNT` frente a `400`). Es un oráculo de enumeración sobre 32^8 códigos con límite de intentos, y el código no expone datos personales. (b) Un `referralCode` que no es texto (p. ej. un número) se ignora sin error y la cuenta se crea sin referido. (c) `HIRE_CONFIRMED` no tiene límite mensual propio. Con cuentas cómplices, una empresa puede acumular premios hasta el tope global de 600 al mes; con `APPLICANTS_RESPONDED_ON_TIME` el máximo es 100 al mes. Entra en el riesgo de cuentas múltiples ya declarado. (d) Un cursor de talento manipulado con un instante pasado revela qué perfiles visibles estaban destacados en ese momento; no expone perfiles ocultos. (e) Completar el perfil retiene el borrado (`409`). No contradice la decisión vigente del dueño (`045`: «otro premio» retiene), pero amplía mucho las cuentas retenidas. Quedó documentado en `moneda-virtual.md` para que el dueño lo considere, con la anonimización como salida futura.
+- Verificado sin hallazgo con sondas propias contra PostgreSQL real (`zz-audit048-probe`, en una base aparte, borrada al terminar):
+  - BAJO-A, cerrado. 12 rondas de borrado de un trabajador simultáneas con guardar el perfil, subir el CV, destacar el perfil y registrar a otro con su código: 0 respuestas `500`. Si gana el borrado, `204`, y las acciones tardías reciben `400`. Si la acción con cobro gana, el borrado responde `409`. Una cuenta con perfil completo responde `409 CURRENCY_LEDGER_RETAINED`. 6 rondas de dos borrados de empresa simultáneos con la verificación de esa empresa: `204`/`404`/`404`, o `409`/`409` con verificación `200` cuando el premio ganó. Nunca hubo `500` ni `40P01`. Las suites nuevas de borrado pasaron en las 6 corridas.
+  - Premios. Tope diario 25 con perfil completo y dos verificaciones simultáneas, 4 rondas: suma ≤ 25 siempre (se pagaron 20 y el perfil completo quedó pendiente). Verificar, quitar la verificación, volver a subir y re-verificar 3 veces da exactamente 2 `DOCUMENT_VERIFIED`. Solo un `ADMIN` verifica (`403` para un trabajador), y la verificación guarda autor y fecha. Un `40001` forzado dentro del premio se propaga: hecho y premio se revierten juntos. Un error genérico en el premio conserva el hecho (`200`, experiencia guardada, sin movimiento). Al quitar el disparador, el siguiente guardado paga una sola vez. Contratación y respuesta: preseleccionar, entrevistar y rechazar a la vez dan `409,409,200` y un solo premio.
+  - Referidos. Un código mal formado o inexistente responde `400 INVALID_REFERRAL_CODE` y no crea la cuenta (conteo de usuarios igual). Funciona en minúsculas. Tres registros simultáneos con el mismo correo y código dan `201,409,409` y un solo `WorkerReferral`. El `CHECK` rechaza el auto-referido en la base. 4 guardados simultáneos que completan el perfil del referido pagan un solo `REFERRAL`; borrar y rehacer la experiencia no repite. `GET /workers/me/referral` responde `403` a una empresa. El registro de empresas sigue deshabilitado (`403`).
+  - Búsqueda de talento. 8 perfiles, 3 destacados (uno oculto) y `limit` 2. A mitad de la paginación vencen los destacados y otro perfil compra uno. Resultado: 7 filas únicas, igual a los visibles, con los dos destacados vigentes primero. El oculto nunca aparece, tampoco con un cursor de instante pasado. 5 cursores basura (no base64, tipos erróneos, fecha inválida, JSON no lista y 5000 caracteres) dan `200`. El cursor antiguo (un `id`) da `200`.
+  - Contención del guardado `Serializable`. 10 guardados simultáneos del mismo trabajador: 10 `200` en 0,9 s. 12 trabajadores distintos: 12 `200` en 0,5 s. 36 operaciones mezcladas de perfil, CV y foto: 0 `500` en 1,5 s, y nunca más de un `PROFILE_COMPLETE` por trabajador.
+  - Revisado en código: la clave `{actionKey}:{hecho}` es única y se reutiliza como clave de idempotencia (`reward:`). La cuenta se bloquea antes de leer los topes; si dos premios del mismo titular compiten, la transacción `Serializable` aborta a uno. `tryGrant` propaga `P2034` y `P2010`/`40001`/`40P01`, y si `ROLLBACK TO SAVEPOINT` falla relanza el error original. Los premios no escriben en `CurrencyActionUse`. `afterCompanyResponse` solo se dispara desde `APPLIED` con actor empresa; el cierre o la cobertura de un puesto resuelven solo `OFFER`/`ACCEPTED` y no lo disparan. `PROFILE_HIGHLIGHT` no tiene ventana de devolución. Las listas de premios no exponen `factKey`, `movementId` ni identificadores ajenos.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:56048`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_fresh_test`, `chambeaya_seed_test` y `chambeaya_probe_test`; detenido y borrado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - Migración sobre datos sembrados: migraciones hasta `20261007120000`, y después 4 usuarios, 1 empresa, perfil, CV, cuenta con bono y cargo, y `DAILY_SPEND_CAP_WORKER` editado a 300. Al aplicar `20261012100000`, los conteos y el saldo no cambian (2 movimientos, saldo 40), el ajuste editado conserva 300, se agregan los 8 ajustes con `isProvisional = true` y las columnas nuevas quedan nulas.
+  - `tsc --noEmit` (`apps/api`): sin errores. `npm test`: 35 archivos, 609/609.
+  - Integración completa (`CHAMBEAYA_INTEGRATION_TESTS=true`) 3 veces: 224/224, 223/224 (BAJO-1) y 224/224.
+  - `currency-actions`, `currency-catalog`, `currency-ledger`, `job-postings`, `currency-rewards` y `account-deletion-race` repetidas 3 veces: 6 archivos, 82/82 cada vez.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se restauró `apps/web/next-env.d.ts`). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores.
+- Documentación: `docs/reference/api.md` corrige el límite residual de BAJO-A: las rutas de talento responden `400`, no `500`, y los reintentos agotados también salen como `400`. `docs/product/moneda-virtual.md` marca M6 como cerrado y documenta que, desde M6, cualquier premio retiene el borrado. `docs/guides/deployment.md` agrega una sección sobre la migración `20261012100000_currency_rewards` (sin variables nuevas, retención del borrado, cursor opaco compatible y sin premios retroactivos). No se tocó código de producto.
+- Archivos: revisados todos los del `git diff` y los nuevos de `047`. Modificados por esta auditoría: `docs/reference/api.md`, `docs/product/moneda-virtual.md`, `docs/guides/deployment.md` y esta entrada.
+- Riesgos: `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` e imágenes Docker (el cambio no toca web ni Flutter). Las carreras se ejercitaron con desfases y disparadores, no con puntos de sincronización deterministas. Persisten el `500` (o el `400` en talento) por reintentos `Serializable` agotados, el bus SSE en proceso y las cuentas múltiples por persona. Todo valor del catálogo y de los ajustes es provisional.
+- Siguiente paso: **M6 queda cerrado**, junto con BAJO-A de `CN-20261007-046` y `PROFILE_HIGHLIGHT`, con esta auditoría `APROBADO`, que referencia `047`. Pendientes: el commit de M6 en `moneda-virtual` (M4 ya está en `092bf8c`); BAJO-1 a BAJO-3 como tarea menor de `implementador-sonnet` (recomendado antes de M5 para BAJO-3); que el dueño revise la observación (e); M5 (interfaces) y M7.
+
+### CN-20261012-047 — M6: ganar monedas (premios automáticos), `PROFILE_HIGHLIGHT` y cierre de BAJO-A
+
+- Fecha: 2026-10-12 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261007-046` (cierre de M4, con BAJO-A abierto) y `CN-20261007-043`/`045` (M4). Rama `moneda-virtual` sobre `092bf8c`, sin commit.
+- Alcance: SOLO API y datos (sin web ni Flutter; eso es M5).
+  - Parte A (BAJO-A): borrados simultáneos del mismo titular dan un `204` y el resto `404`; un borrado simultáneo con una acción del propio titular no responde `500` (ni interbloqueo `40P01` ni FK `P2003`).
+  - Parte B (M6): los siete premios del catálogo (`PROFILE_COMPLETE`, `DOCUMENT_VERIFIED`, `INVITATION_RESPONDED`, `REFERRAL`, `COMPANY_VERIFIED`, `APPLICANTS_RESPONDED_ON_TIME`, `HIRE_CONFIRMED`), atómicos con su hecho, idempotentes por hecho, con tope diario y mensual de premios configurable; referidos; verificaciones del admin; rutas de lectura de premios del actor.
+  - Parte C: `PROFILE_HIGHLIGHT` implementado (campos `highlightedAt/Until`, ruta para destacarlo y orden preferente estable en la búsqueda de talento). No queda diferido.
+- Archivos:
+  - Nuevos: `apps/api/prisma/migrations/20261012100000_currency_rewards/migration.sql`, `apps/api/src/modules/currency/{currency.rewards,currency.profile-rewards,currency.referrals,currency.verification,currency.reward-status}.ts`, `apps/api/src/modules/talent/profile-completeness.ts`, `apps/api/tests/currency.rewards.test.ts`, `apps/api/tests/integration/{currency-rewards,account-deletion-race}.integration.test.ts`.
+  - Modificados: `apps/api/prisma/schema.prisma`, `apps/api/src/app.ts`, `modules/admin/admin.routes.ts`, `modules/auth/auth.service.ts`, `modules/currency/{currency.actions,currency.hooks,currency.quote,currency.routes,currency.settings}.ts`, `modules/jobs/{jobs.errors,jobs.service}.ts`, `modules/talent/{talent.routes,talent.service,talent_invitation.service}.ts`, `apps/api/tests/{currency.actions,talent.routes}.test.ts`, `apps/api/tests/integration/currency-actions.integration.test.ts` (dos expectativas que M6 cambia a propósito), `docs/reference/api.md`, `docs/product/moneda-virtual.md`.
+- Decisiones:
+  - **Núcleo común** (`CurrencyRewardService`): un premio nace de un hecho con clave `{actionKey}:{hecho}` en `CurrencyRewardGrant.factKey` (único) y como clave de idempotencia del movimiento (`reward:{factKey}`); la cuenta se bloquea, el monto sale del catálogo vigente (entrada ausente, inactiva o no `REWARD` = sin premio) y el premio se escribe en la transacción `Serializable` del hecho. `tryGrant` lo aísla con un `SAVEPOINT`: un fallo técnico revierte solo el premio (se registra `REWARD_FAILED`) y el hecho se conserva; los `40001`/`40P01` se propagan para reintentar hecho y premio juntos. Los premios no escriben en `CurrencyActionUse`, así que no cuentan para el tope de gasto.
+  - **Tope de premios** por titular y día/mes de Lima (`REWARD_CAP_*`, excluye el bono de bienvenida): un premio que no cabe entero no se otorga y, si el hecho puede reevaluarse (perfil, verificación, referido), se reintenta después. `INVITATION_RESPONDED`, `APPLICANTS_RESPONDED_ON_TIME` y `HIRE_CONFIRMED` no se reintentan (el hecho ocurre una sola vez).
+  - **Perfil completo**: lista fija de ocho secciones (titular ≥ 10 caracteres, presentación ≥ 40, distrito, día y periodo de disponibilidad, una especialidad, una experiencia, CV y foto), evaluada dentro de la transacción de `PATCH /workers/me/profile`, `PUT .../cv` y `PUT .../photo`; una sola vez por trabajador. Los umbrales son del código, no ajustes.
+  - **Verificaciones**: no existían; se agregaron rutas admin mínimas `POST/DELETE /api/admin/workers/:id/documents/:kind/verification` y `.../companies/:id/verification` (autor y fecha; idempotentes; reintentan el premio). Subir un archivo nuevo borra la verificación del documento; el premio es uno por tipo (clave por trabajador y tipo).
+  - **Referidos**: código propio aleatorio de 8 caracteres (`GET /workers/me/referral`), `referralCode` opcional en `POST /auth/register` (inválido = `400 INVALID_REFERRAL_CODE` sin crear la cuenta; con el código válido, cuenta y `WorkerReferral` en una transacción). Se paga al referidor solo cuando el referido completa el perfil; referido único, `CHECK` sin auto-referido, límite mensual `REFERRAL_MONTHLY_LIMIT`; un referido que no cabe queda pendiente y se premia en su próximo guardado. El registro con Google no admite código.
+  - **Respuesta a tiempo**: nuevo gancho `afterCompanyResponse` en `JobService.record` (la empresa saca la postulación de `APPLIED`); paga una vez por postulación si el evento de llegada (`APPLIED` o `APPLICATION_REOPENED`) está dentro de `APPLICANT_RESPONSE_WINDOW_HOURS`, con tope mensual por empresa. `HIRE_CONFIRMED` usa el gancho `afterHire` existente (ahora con `userId`).
+  - **`PROFILE_HIGHLIGHT`**: `POST /workers/me/profile/highlight` cobra con `CurrencyActionService` (cuota, tope de gasto, idempotencia por perfil y secuencia) y fija `highlightedAt/Until`. La búsqueda ordena primero los destacados con un cursor opaco `[tramo, id, instante]`: la partición usa el instante de la primera página (`highlightedAt <= instante < highlightedUntil`), así un destacado que vence o se compra a mitad de la paginación no repite ni salta filas; un cursor antiguo (un `id`) continúa en el tramo resto. La tarjeta suma `isHighlighted`. Perfil oculto: `409 PROFILE_NOT_VISIBLE`.
+  - **BAJO-A**: el borrado bloquea primero la fila de `User` (`FOR UPDATE`) y corre en `Serializable` con `withSerializableRetry`; el `P2025` se traduce a `404 WORKER_NOT_FOUND`/`COMPANY_NOT_FOUND`. Como algunas acciones toman sus bloqueos en otro orden, el interbloqueo restante se reintenta; la acción de puestos que llega con la cuenta ya borrada responde `404 RESOURCE_NO_LONGER_EXISTS` (traducción de `P2003` en `JobService.run`). Comprobado que sin el cambio de `admin.routes.ts` la prueba nueva falla con `P2025` y `40P01`.
+  - Una sola migración aditiva (`20261012100000_currency_rewards`): tablas `CurrencyRewardGrant` y `WorkerReferral`, columnas `User.referralCode`, `WorkerDocument.verifiedAt/verifiedById`, `Company.verifiedAt/verifiedById`, `WorkerTalentProfile.highlightedAt/highlightedUntil`, dos `CHECK` y ocho filas de ajustes (`ON CONFLICT DO NOTHING`). No modifica ni borra datos.
+  - Valores provisionales nuevos (editables con historial, `isProvisional = true`): `REWARD_CAP_DAILY_WORKER`/`_COMPANY` = 100, `REWARD_CAP_MONTHLY_WORKER`/`_COMPANY` = 600, `REFERRAL_MONTHLY_LIMIT` = 5, `APPLICANT_RESPONSE_WINDOW_HOURS` = 72, `APPLICANT_RESPONSE_MONTHLY_LIMIT` = 20, `PROFILE_HIGHLIGHT_DURATION_HOURS` = 168. Los montos de los premios siguen siendo los provisionales del catálogo de M2.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55947`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_fresh_test` y `chambeaya_seed_test`; no se usó el puerto 5432):
+  - `npx tsc --noEmit` (`apps/api`, incluye pruebas): sin errores.
+  - `npm test` en `apps/api` (unitarias): 35 archivos, 609/609 (antes 34/596; suma `currency.rewards.test.ts` y dos pruebas del cursor de talento).
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration`: 21 archivos; 223/224 en la corrida completa final. El único fallo es `currency-actions … (BAJO-1)` (`500` por reintentos `Serializable` agotados en una postulación concurrente, riesgo ya declarado en `CN-20261007-046`). **No lo introduce este cambio**: el mismo archivo sobre el código de `HEAD` falló 1 de 5 corridas, el código nuevo 0 de 5 y 4 de 4 aislado; en las tres repeticiones siguientes pasó.
+  - Suites de moneda y puestos repetidas 3 veces seguidas (`currency-actions`, `currency-catalog`, `currency-ledger`, `job-postings`, `currency-rewards`, `account-deletion-race`): 6 archivos, 82/82 en cada una.
+  - `prisma migrate deploy` en base nueva y sobre una base con datos sembrados (4 usuarios, 6 movimientos, documentos, perfiles, una invitación y un ajuste editado): correcto; los conteos no cambian, el ajuste editado conserva su valor (300) y se agregan las 8 filas nuevas. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected`.
+  - `npm run build --workspace=@chambeaya/web`: correcto (`apps/web/next-env.d.ts` restaurado tras el build).
+  - `flutter analyze` en `apps/mobile_flutter`: `No issues found!`. `git diff --check`: sin errores (solo avisos LF/CRLF).
+- Cobertura de las pruebas nuevas: perfil completo una sola vez (editar, borrar y volver a completar), cuatro guardados simultáneos con un solo premio, entrada inactiva y reintento al reactivarla, fallo del premio con el hecho conservado (disparador SQL), tope diario y mensual (el premio se omite, el hecho se conserva y se reintenta con cupo; no cuenta para el tope de gasto), verificación de documentos (uno por tipo, reemplazo, autorización, `404`/`400`, cuatro verificaciones simultáneas), invitación respondida (aceptar, rechazar, anulada, vencida, ajena, responder a la vez), referidos (código inválido, pago solo con perfil completo, único, límite mensual con dos registros y dos perfiles simultáneos y pendiente que se premia), empresa verificada (autorización, tres verificaciones simultáneas, idempotencia), respuesta a tiempo (una por postulación, fuera de plazo, límite mensual, ventana configurable), contratación (doble confirmación simultánea, falla sin premio), lista de premios (aislamiento, sin claves internas, entrada inactiva oculta), ajustes con historial, `PROFILE_HIGHLIGHT` (cobro único con doble clic simultáneo, cotización, orden y cursor, vencimiento a mitad de la paginación, perfil oculto, sin saldo) y borrados bajo concurrencia (cinco borrados del mismo trabajador y de la misma empresa, 16 rondas de borrado contra acciones del trabajador y 12 contra acciones de la empresa con desfases variables, cadena del libro intacta).
+- Documentación: `docs/reference/api.md` (sección «Ganar monedas: premios automáticos (M6)», errores nuevos, orden de la búsqueda de talento, premio de la invitación y cierre del límite de BAJO-A en M4) y `docs/product/moneda-virtual.md` (reglas de premios, anti-fraude, valores provisionales y qué se decidió por diseño). No se tocó el roadmap ni se agregaron avances parciales.
+- Riesgos:
+  - `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker (el cambio no toca web ni Flutter).
+  - `currency-actions … (BAJO-1)` es una prueba de estrés probabilística que ya fallaba de forma intermitente sobre `HEAD`; el `500` por reintentos `Serializable` agotados persiste como riesgo de M4.
+  - Cualquier premio de M6 deja un movimiento que no es el bono de bienvenida: a partir de ahí `DELETE /api/admin/workers|companies/:id` responde `409 CURRENCY_LEDGER_RETAINED` (decisión vigente de M4; el dueño debe saber que, por ejemplo, completar el perfil basta para retener la cuenta).
+  - `tryGrant` registra un fallo técnico del premio y sigue: es un fallo silencioso salvo por el log `REWARD_FAILED`. `INVITATION_RESPONDED`, `APPLICANTS_RESPONDED_ON_TIME` y `HIRE_CONFIRMED` no se reintentan si el tope o el catálogo los bloquea en ese instante.
+  - Una misma persona puede crear cuentas con DNI y correo distintos para cobrar referidos o premios; el costo de un perfil completo y los topes lo acotan, pero no hay detección de duplicados por persona. El registro con Google no admite código de referido.
+  - La traducción de `P2003` cubre las acciones de puestos fijos; otras rutas (perfil, documentos) podrían responder `500` en esa misma carrera extrema. Las carreras se ejercitan con desfases temporales, no con puntos de sincronización deterministas.
+  - Guardar el perfil ahora es una transacción `Serializable` (con reintento): más contención entre guardados simultáneos del mismo trabajador. El cursor de la búsqueda de talento pasó a ser opaco (un cursor antiguo sigue aceptándose). Todo valor de catálogo y ajuste sigue siendo provisional.
+- Siguiente paso: `auditor-opus` audita `CN-20261012-047` sobre el árbol de trabajo de `moneda-virtual` (`092bf8c` más lo no comiteado); nada se declara aprobado. Quedan M5 (interfaces) y M7 (compra de monedas).
+
+### CN-20261007-046 — Reauditoría de `CN-20261007-045` y cierre de M4
+
+- Fecha: 2026-10-07 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20261007-043` (implementación de M4), `CN-20261007-044` (auditoría `REQUIERE_CAMBIOS`) y `CN-20261007-045` (corrección). Rama `moneda-virtual` sobre `29d7fc6`, sin commit. Se contrastó `045` con el `git diff` y los archivos nuevos (`migration.sql` de `20261007120000_welcome_bonus_deletable`, `admin.routes.ts`, `jobs.service.ts`, `jobs.errors.ts`, `currency.actions.ts`, `currency.refunds.ts`, `currency.config.ts`, compose y `.env*.example`).
+- Alcance y resultado por hallazgo de `044`:
+  - MEDIO-1 cerrado. Sondas: re-postular tras aceptar y retirarse da `409 APPLICATION_HAS_ACCEPTED_OFFER`, también con 3 re-postulaciones simultáneas (una con prioridad), sin evento ni cobro. Filas heredadas en `APPLIED` e `INTERVIEW` con oferta aceptada: ofertar da `409 APPLICATION_HAS_ACCEPTED_OFFER` y contratar `409 INVALID_STATE_TRANSITION`; nunca `500`. Sin regresión: rechazar la oferta, re-postular (`200 APPLIED`) y emitir la v2 (`201`, `1:DECLINED, 2:PENDING`).
+  - MEDIO-2 cerrado. El trigger se revisó con SQL directo sobre una base con datos sembrados. El `DELETE` del bono sin permiso, con el permiso de otra cuenta, o en una cuenta con un cargo, un ajuste u otro premio falla con `CURRENCY_MOVEMENT_APPEND_ONLY`. También fallan el `UPDATE` con permiso, el borrado del cargo con permiso y el borrado de bono y cargo en una misma sentencia. El permiso `is_local=true` desaparece al confirmar. La comparación `IS DISTINCT FROM` cubre un `REWARD` con `actionKey` nulo: el conteo de Prisma no lo cuenta, pero el trigger lo rechaza y la API responde `409`. Ninguna ruta, salvo el borrado `ADMIN`, invoca `set_config`; un trabajador recibe `403`. Por HTTP: un trabajador o una empresa recién registrados se borran con `204`; con cualquier otro movimiento la respuesta es `409`. Las cadenas `sequence`/`balanceAfter` de las demás cuentas quedan intactas (0 rotas en 12 cuentas).
+  - MEDIO-3 cerrado. Con el monto editado y cuentas mixtas, dos regularizaciones simultáneas y 5 `grantForWorker` simultáneos sobre una cuenta sin bono dan `200`/éxito. Resultado: 0 bonos duplicados, 0 trabajadores sin bono, la cuenta previa conserva 50 y el alta nueva recibe el monto editado. `grantReward` solo bloquea la cuenta, así que no puede formar un ciclo de bloqueos.
+  - BAJO-1 cerrado. Prueba: 3 barredores contra 4 postulaciones con prioridad simultáneas sobre la misma cuenta, 6 rondas, 3 ejecuciones. Ya no aparece ningún `P2002 (accountId, sequence)`. Solo quedan `P2034` por reintentos agotados (0 a 2 de 24 postulaciones y como máximo 1 pasada de barrido abortada, sin efectos), que es el límite conocido de `Serializable`. Siempre se cumplió: una devolución por cobro (92/92 y 96/96 `refundOfId` únicos), ningún cobro sin devolver y la cadena consistente.
+  - BAJO-2 cerrado. Ambos compose reenvían `CURRENCY_REFUND_INTERVAL_MS` vacía por defecto, y `refundSchedulerIntervalMs` trata el vacío como 300000. Está documentada en los dos `.env*.example` y en `deployment.md`.
+- Hallazgos nuevos: ninguno crítico, alto ni medio.
+  - BAJO-A (concurrencia, admin): ahora un titular recién registrado sí llega al borrado, y aparecen `500` donde antes había `409`. Dos o tres `DELETE /api/admin/workers/:id` simultáneos del mismo titular dan un `204` y `500` (`P2025` en `tx.user.delete`) en vez de `404`. Un borrado simultáneo con una acción del propio titular da `500` (interbloqueo `40P01` entre el `FOR UPDATE` de la cuenta y el bloqueo de la postulación, o FK `P2003`): la postulación del trabajador en 6/6 rondas y la publicación de la empresa en 2/4. En todos los casos la transacción se revierte entera: ni borrado parcial ni libro corrupto. El caso del doble borrado ya existía para cuentas sin moneda, y `045` lo declaró como riesgo. Sugerencia para una tarea posterior: mapear `P2025` a `404` y envolver el borrado en `withSerializableRetry`, o bloquear las postulaciones antes que la cuenta. Queda documentado en `api.md`.
+  - Observación: `GET /api/workers/job-applications/:id` de una postulación `WITHDRAWN` con oferta aceptada sigue mostrando `currentOfferId` de esa oferta. Es coherente con la constancia y no requiere cambio.
+  - Observación: con SQL directo y privilegios de aplicación, el mismo `set_config` permite borrar el bono de una cuenta que solo tiene el bono sin borrar la cuenta. El saldo derivado vuelve a 0 y la cadena sigue válida. Es el riesgo que `045` declaró.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:56046`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_fresh_test` y `chambeaya_seed_test`; detenido y borrado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en una base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - Migración sobre datos sembrados: se aplicaron las migraciones hasta `20261007100000`, se sembraron 4 usuarios, 1 empresa, 4 cuentas y 6 movimientos (bono, cargo, ajuste y otro premio), y después se aplicó `20261007120000`. Las filas quedaron idénticas, sin pérdida.
+  - `tsc --noEmit` (`apps/api`): sin errores. `npm test`: 34 archivos, 596/596.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true` integración completa: 19 archivos, 200/200 en dos ejecuciones. Una primera ejecución lanzada en segundo plano terminó con código 1 y su salida se perdió por el filtro `tail`; coincidió con la creación del archivo de sondas en el mismo directorio. Las dos repeticiones posteriores, sin ese archivo, pasaron.
+  - `currency-actions`, `currency-catalog`, `currency-ledger` y `job-postings` repetidas 3 veces: 4 archivos, 58/58 cada vez.
+  - Sondas propias (`zz-audit046-probe`, en una base aparte, borradas al terminar): las descritas arriba.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se restauró `apps/web/next-env.d.ts`). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores.
+- Documentación: `docs/product/moneda-virtual.md`. Se corrigió la viñeta de cierre y cobertura, que aún decía que una aceptada quedaba en `ACCEPTED` sobre un puesto cerrado (contradecía «caducados ocultos» de M4), y la fila M4 del plan pasa a cerrada. `docs/reference/api.md`: límite conocido de BAJO-A. `docs/guides/deployment.md` está al día (compose, variable, migración, regularización y borrado). No se tocó código de producto.
+- Archivos: revisados todos los del `git diff` y los nuevos de `043`/`045`. Modificados por esta auditoría: `docs/product/moneda-virtual.md`, `docs/reference/api.md` y esta entrada.
+- Riesgos: `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker (el reenvío de compose se revisó leyendo el código, no se arrancó Docker). BAJO-A sigue abierto. Las carreras se ejercitaron con desfases y compuertas, no con puntos de sincronización deterministas. Persisten el `500` posible por reintentos `Serializable` agotados y el bus SSE en proceso. Todos los valores del catálogo y de los ajustes son provisionales. Restan `PROFILE_HIGHLIGHT` (diferido) y los premios de M6.
+- Siguiente paso: **M4 queda cerrado** con esta auditoría `APROBADO`, que referencia `043` y `045`. Siguen pendientes el commit de M4 en `moneda-virtual` (M3 ya está en `29d7fc6`), BAJO-A como tarea menor de `implementador-sonnet` y M5 (interfaces).
+
+### CN-20261007-045 — Corrección de la auditoría `CN-20261007-044` sobre M4
+
+- Fecha: 2026-10-07 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261007-043` (implementación de M4) y `CN-20261007-044` (auditoría `REQUIERE_CAMBIOS`). Rama `moneda-virtual` sobre `29d7fc6`, sin commit.
+- Alcance: MEDIO-1, MEDIO-2, MEDIO-3, BAJO-1 y BAJO-2 de `044`; las observaciones (a) a (c) quedan documentadas como decisiones vigentes sin cambiar comportamiento.
+  - MEDIO-1: `apply` no reabre una postulación `WITHDRAWN` que conserve una oferta `ACCEPTED` (`409 APPLICATION_HAS_ACCEPTED_OFFER`; la postulación y su constancia no cambian, sin evento ni cobro). `issueOffer` responde el mismo `409` si la postulación ya tiene una oferta aceptada (defensa para filas heredadas), por lo que el índice `JobOffer_one_open_per_application_key` ya no es alcanzable como `500`. Revisados los caminos hacia `APPLIED`/`INTERVIEW`: solo la reapertura desde `WITHDRAWN` los alcanzaba; `REJECTED`/`HIRED` son terminales.
+  - MEDIO-2 (decisión del dueño): el bono solo no retiene el borrado. Migración `20261007120000_welcome_bonus_deletable`: reemplaza la función del trigger `prevent_currency_movement_mutation` para permitir únicamente un `DELETE` de un movimiento `REWARD`/`WELCOME_BONUS` cuando la transacción declaró la cuenta con `set_config('chambeaya.welcome_bonus_delete_account', <id>, true)` y la cuenta no tiene ningún otro movimiento (el trigger lo vuelve a comprobar). `UPDATE` y cualquier otro `DELETE` siguen bloqueados. En `admin.routes.ts`, tras el `FOR UPDATE` de la cuenta, se cuentan los movimientos que no son el bono (`>0` → `409 CURRENCY_LEDGER_RETAINED`); si no, se declara el permiso, se borra el bono y se sigue con el borrado de la cuenta y del titular. Además `CURRENCY_MOVEMENT_APPEND_ONLY` se mapea a `409`.
+  - MEDIO-3: `grantReward` bloquea la cuenta y, si ya existe un movimiento con esa clave en la misma cuenta, lo cuenta como otorgado (`alreadyHad`) sin comparar el monto; la regularización continúa. El alta nueva con el monto editado funciona.
+  - BAJO-1: `CurrencyRefundService.processNext` corre en `Serializable` dentro de `withSerializableRetry`.
+  - BAJO-2: `CURRENCY_REFUND_INTERVAL_MS` reenviada en ambos compose y agregada (vacía, documentada) a `.env.example` y `.env.production.example`.
+- Archivos:
+  - Nuevos: `apps/api/prisma/migrations/20261007120000_welcome_bonus_deletable/migration.sql`.
+  - Código: `apps/api/src/modules/jobs/{jobs.service,jobs.errors}.ts`, `apps/api/src/modules/admin/admin.routes.ts`, `apps/api/src/modules/currency/{currency.actions,currency.refunds}.ts`.
+  - Pruebas: `apps/api/tests/integration/currency-actions.integration.test.ts` (5 pruebas nuevas), `apps/api/tests/admin.routes.test.ts` (doble de Prisma adaptado al nuevo conteo).
+  - Configuración: `docker-compose.yml`, `docker-compose.production.yml`, `.env.example`, `.env.production.example`.
+  - Documentación: `docs/reference/api.md`, `docs/product/moneda-virtual.md`, `docs/guides/deployment.md`.
+- Decisiones:
+  - El permiso del trigger es una variable de configuración local a la transacción y atada a la cuenta, más la comprobación de «ningún otro movimiento» dentro del propio trigger; no hay función pública ni deshabilitación del trigger. Quien tenga SQL directo con privilegios de aplicación podría invocar el mismo mecanismo sobre una cuenta solo con bono; no abre el borrado de ningún otro movimiento.
+  - La carrera se resuelve como antes: el `FOR UPDATE` de la cuenta antes de contar y el `23001` mapeado a `409`; el borrado espera a quien tenga la cuenta bloqueada y luego ve su movimiento.
+  - La reapertura bloqueada por oferta aceptada responde `409` con el `status` actual y no toca la postulación.
+  - Observaciones (a) puesto pagado reutilizable, (b) prioridad conservada al re-postular y (c) desbloqueo permanente: aceptadas por el dueño; documentadas en `moneda-virtual.md`, sin cambio de código.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:56045`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_fresh_test` y `chambeaya_seed_test`; detenido y eliminado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en una base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - La migración nueva aplicada sobre una base con datos sembrados (usuario, cuenta y movimiento `WELCOME_BONUS`): aplica sin pérdida y el `DELETE` directo de ese movimiento sigue fallando con `CURRENCY_MOVEMENT_APPEND_ONLY`.
+  - `tsc --noEmit` (`apps/api`): sin errores. `npm test` (unitarias): 34 archivos, 596/596.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration`: 19 archivos, 200/200.
+  - `currency-actions`, `currency-catalog`, `currency-ledger` y `job-postings` repetidas 3 veces: 4 archivos, 58/58 cada vez.
+  - La prueba de BAJO-1 (barrido simultáneo con compras de prioridad sobre la misma cuenta, 4 rondas) falla con `500` al quitar el aislamiento `Serializable` (verificado 2 veces) y pasa con él.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se restauró `apps/web/next-env.d.ts`). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores (solo avisos LF/CRLF).
+- Cobertura nueva: re-postulación tras aceptar y retirarse (`409`, sin cambios), oferta sobre fila heredada en `APPLIED` con oferta aceptada (`409`, no `500`); borrado de trabajador y empresa recién registrados (`204`, bono y cuenta desaparecen); `409` con ajuste, cargo o premio distinto del bono; SQL directo bloqueado (sin permiso, permiso de otra cuenta, `UPDATE`, borrar el bono o el ajuste con otros movimientos); carrera con un movimiento confirmado durante el borrado (`409`); regularización con monto editado y cuentas mixtas, y alta nueva con el monto editado; barrido contra cobros simultáneos.
+- Riesgos:
+  - `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker (no se tocó web ni Flutter; el cambio de compose no se probó con Docker).
+  - Las carreras se ejercitan con desfases de tiempo y una compuerta de transacción, no con puntos de sincronización deterministas en todos los casos. Persisten el `500` posible si se agotan los reintentos de `Serializable` y el bus SSE en proceso.
+  - Un borrado de cuenta que compita con una acción de la misma cuenta que cree la cuenta después de la comprobación del titular (p. ej. el trabajador actuando mientras se borra) conserva el comportamiento anterior (`409` o error de FK según el instante); no se amplió.
+  - Todos los valores del catálogo y de los ajustes siguen siendo provisionales.
+- Siguiente paso: `auditor-opus` reaudita `CN-20261007-045` contra `CN-20261007-043` y `CN-20261007-044` (diff: árbol de trabajo de `moneda-virtual` sobre `29d7fc6`). Nada se declara aprobado; M4 sigue sin cerrarse.
+
+### CN-20261007-044 — Auditoría de `CN-20261007-043` (M4: acciones conectadas a la moneda virtual y ajustes sobre M3)
+
+- Fecha: 2026-10-07 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20261007-043` (implementación de M4), posterior a `CN-20261006-042` (cierre de M3). Rama `moneda-virtual` sobre `29d7fc6`, sin commit. Se auditó el árbol final completo, sin dar por cierto lo declarado en `043`, porque la implementación se cortó a mitad y se completó en una segunda ejecución.
+- Alcance: se contrastó `043` con el `git diff` y los archivos nuevos: la migración `20261007100000_currency_actions`, `currency.{actions,hooks,quote,refunds,settings,welcome}.ts`, `jobs.retention.ts`, `candidate_unlock.service.ts`, las rutas, la tarea de `server.ts` y las pruebas. Se revisaron la atomicidad del cobro, la idempotencia, la concurrencia, la cuota y el tope diario, la devolución, la privacidad, la Parte A, el orden de búsqueda, la migración y la documentación.
+- Hallazgos: ninguno crítico ni alto.
+  - MEDIO-1 (corrección; Parte A): si el trabajador acepta una oferta, se retira y vuelve a postular, la postulación vuelve a `APPLIED` pero conserva la oferta `ACCEPTED`, que es inmutable. Desde ahí `POST /api/business/job-applications/:id/offers` responde `500 INTERNAL_ERROR`, porque choca con el índice único parcial `JobOffer_one_open_per_application_key`. La postulación queda sin salida: la empresa no puede ofertar ni contratar. Además, el trabajador ve `currentOfferId` apuntando a la oferta aceptada antigua. Reproducido con una sonda: reapply `200 APPLIED`, nueva oferta `500`. El origen es `jobs.service.ts` `apply` junto con `canReopenApplication` (`job-state.ts`), que admite cualquier `WITHDRAWN`. Sugerencia: no reabrir una postulación con una oferta `ACCEPTED` (`409`), y agregar una prueba.
+  - MEDIO-2 (producto/operación): con `WELCOME_BONUS` activo, toda cuenta nueva tiene un movimiento desde el alta. Por eso `DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` responden siempre `409 CURRENCY_LEDGER_RETAINED`, aunque la cuenta no tenga actividad ni ofertas aceptadas (sonda: un registro recién creado da `409`). La regularización extiende el bloqueo a todas las cuentas existentes. Esto contradice lo que `043` declara («sin romper el borrado legítimo») y no estaba documentado; esta auditoría lo documentó. El dueño del producto debe decidirlo, por ejemplo eximir del bloqueo un libro que solo tiene el bono, o anonimizar.
+  - MEDIO-3 (corrección): la regularización `POST /api/admin/currency/welcome-bonus/backfill` deja de funcionar si se edita el monto de `WELCOME_BONUS`. `grantReward` reenvía la misma clave de idempotencia con el monto nuevo, y `appendMovementTx` responde `409 IDEMPOTENCY_KEY_REUSED`. La pasada se aborta en la primera cuenta que ya tenía el bono, y las cuentas posteriores nunca se regularizan (sonda: `409`). Sugerencia: si ya existe un movimiento con esa clave, tratarlo como `alreadyHad`, sea cual sea el monto.
+  - BAJO-1 (concurrencia): `CurrencyRefundService.processNext` usa `READ COMMITTED` y no reintenta. Un cobro `Serializable` que tomó su instantánea antes de que se confirmara la devolución de la misma cuenta lee una secuencia vieja y falla con `P2002 (accountId, sequence)`. Ese error no se reintenta y llega como `500` sin efectos. Sonda: barrido simultáneo con postulaciones con prioridad sobre la misma cuenta, 6 rondas, 8 de 24 respuestas `500`; los errores capturados son `P2002` sobre `(accountId, sequence)` y `P2034` agotados. El libro siempre queda consistente. En producción es raro, porque exige que el barrido devuelva a esa misma cuenta en ese instante. Sugerencia: ejecutar la devolución en `Serializable` con `withSerializableRetry`, o tratar ese `P2002` como reintentable.
+  - BAJO-2 (despliegue): `docker-compose.production.yml` y `docker-compose.yml` no reenvían `CURRENCY_REFUND_INTERVAL_MS` al servicio `api`, y la variable falta en `.env.example`/`.env.production.example`. En Docker no se puede apagar ni ajustar la tarea. Quedó documentado como pendiente en `deployment.md`.
+  - Observaciones de producto (sin cambio exigido): (a) pausar, editar todo el puesto y volver a publicarlo es gratis: un puesto pagado puede reutilizarse para otro empleo (sonda: `chargedAmount 0`). Es coherente con «solo la primera publicación cuenta», pero conviene confirmarlo. (b) La prioridad de una postulación se conserva al reabrirla, sin nuevo cobro. (c) El desbloqueo gratuito por una postulación vigente queda permanente aunque después la empresa la rechace. (d) La elegibilidad de devolución de `APPLICATION_PRIORITY` cuenta los eventos de la empresa anteriores a una reapertura. (e) Una invitación borrada por cascada no se devuelve. (f) La migración no resuelve las postulaciones `ACCEPTED` que ya existían sobre puestos cerrados antes de M4. (g) Un cursor de búsqueda sin segmento (anterior a M4) puede duplicar filas.
+- Verificado sin hallazgo, con sondas propias contra PostgreSQL real (`zz-audit044-probe`, borrada al terminar):
+  - Devolución con trabajadores reales: 3 `PrismaClient` independientes y un **proceso Node aparte** (`tsx`) barriendo a la vez 24 cobros (`APPLICATION_EXTRA` y `APPLICATION_PRIORITY`) se repartieron el trabajo (p. ej. 2/1/0/21 y 8/7/5/4). Resultado: 24 devoluciones, 24 `refundOfId` distintos, cada una igual y de signo contrario a su cargo y en la misma cuenta, y los saldos restaurados. Una segunda pasada no devuelve nada.
+  - Tope diario: dos prioridades simultáneas con tope 15 dan `200` y `409 DAILY_SPEND_CAP_REACHED`. A las 00:00 de Lima (05:00Z) el tope se reinicia y la siguiente da `200`.
+  - Cotización: no crea cuentas ni usos. La postulación ajena se cotiza como `CHARGE` (no revela `isPriority`). El puesto de otra empresa no aparece como pagado. Un `ADMIN` recibe `403`.
+  - Desbloqueo: dos clics simultáneos dan `201` y `200` con un solo cobro. Sin desbloqueo, el contacto da `403` y el CV también; otra empresa recibe `403`; un trabajador recibe `403`.
+  - Búsqueda con 3 destacados (uno vencido) y 7 puestos, con `limit` 1, 2 y 3: 7 filas únicas, los 2 destacados vigentes primero y el vencido en el tramo normal.
+  - Migración sobre una base con datos de M3 sembrados (postulaciones `ACCEPTED` con oferta aceptada, `REJECTED` por cierre, `REJECTED` manual con `decisionReason` igual al código, `WITHDRAWN`): aplica sin pérdida. Rellena `autoClosedReason` solo en el cierre real, no en el manual. Siembra los 3 ajustes. Después, borrar el usuario o la empresa por SQL falla con `RESTRICT`.
+  - Revisado en código: cobro dentro de la transacción `Serializable` de la acción (los ganchos se reejecutan en cada reintento y son idempotentes por `instanceKey`); bloqueo de la cuenta antes de leer la cuota y el tope; el tope no cuenta devoluciones ni acciones gratuitas; re-postulación solo desde `WITHDRAWN`; `CONTRACT_RECORDS_RETAINED` también por `23001`; lo básico (aceptar, rechazar, retirarse, responder invitaciones) no pasa por el cobro; las rutas de ajustes, regularización y devolución son solo `ADMIN`.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:56044`, bases `chambeaya_test`, `chambeaya_shadow_test`, `chambeaya_fresh_test` y `chambeaya_m3seed_test`; detenido y eliminado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en una base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - `tsc --noEmit` (`apps/api`): sin errores. `npm test`: 34 archivos, 596/596.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration`: 19 archivos, 195/195 (incluye las suites de turnos con la bandera M0 encendida).
+  - `currency-actions`, `currency-catalog`, `currency-ledger` y `job-postings` repetidas 3 veces: 4 archivos, 53/53 cada vez.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se revirtió `apps/web/next-env.d.ts`). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores.
+- Documentación: `docs/reference/api.md`: la re-postulación responde `200` (no `201`); la migración sí rellena datos; el borrado administrativo explica `CONTRACT_RECORDS_RETAINED`, el borrado explícito de postulaciones y la consecuencia del bono. `docs/guides/deployment.md`: nueva sección de la migración M4, `CURRENCY_REFUND_INTERVAL_MS` (valores y desactivación), la falta de reenvío en compose, la regularización del bono y el bloqueo del borrado. `docs/product/moneda-virtual.md` es coherente; los valores provisionales y las decisiones ya estaban. No se tocó código de producto.
+- Archivos: revisados todos los del `git diff` y los nuevos de `043`. Modificados por esta auditoría: `docs/reference/api.md`, `docs/guides/deployment.md` y esta entrada.
+- Riesgos: `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker (el cambio no toca web ni Flutter). Las carreras se ejercitaron con desfases de tiempo, no con puntos de sincronización deterministas. Persisten los límites ya conocidos: `500` posible si se agotan los reintentos de `Serializable` y el bus SSE en proceso. Todos los valores del catálogo y de los ajustes son provisionales.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 y MEDIO-3, y si es posible BAJO-1 y BAJO-2, con pruebas de integración. El dueño del producto decide MEDIO-2 y las observaciones (a) a (c). `auditor-opus` reaudita. M4 **no** queda cerrado.
+
+### CN-20261007-043 — M4: acciones conectadas a la moneda virtual y ajustes de producto sobre M3
+
+- Fecha: 2026-10-07 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261006-042` (cierre de M3). Rama `moneda-virtual` sobre `29d7fc6`, sin commit. Retoma una ejecución anterior cortada: el árbol ya contenía M4 casi completo y sin registrar; esta entrada lo valida, lo completa (documentación, validaciones y registro) y no duplica archivos ni migraciones.
+- Alcance: SOLO API y datos (sin web ni Flutter; eso es M5).
+  - Parte A (ajustes del dueño del producto sobre M3): re-postulación flexible (`WITHDRAWN` reactiva la misma fila con evento `APPLICATION_REOPENED`, sin segundo cobro; `REJECTED` por la empresa no puede); constancia conservada (FK `RESTRICT`, `409 CONTRACT_RECORDS_RETAINED` también por el `23001`); caducados ocultos (las postulaciones `ACCEPTED` de un puesto cerrado o cubierto pasan a `REJECTED` con `autoClosedReason`, evento y aviso SSE, y las listas del trabajador las excluyen salvo `history=true`).
+  - Parte B (M4): cobro atómico en la transacción de la acción (`CurrencyActionService`), idempotente por instancia; cuota gratuita real por mes de Lima; `JOB_PUBLISH_EXTRA`, `APPLICATION_EXTRA`, `JOB_HIGHLIGHT`, `APPLICATION_PRIORITY`, `TALENT_INVITE`, `CANDIDATE_CONTACT_UNLOCK`; bono de bienvenida con ruta de regularización; devolución automática programada; tope diario configurable; rutas `quote` y ajustes de administración.
+- Archivos:
+  - Nuevos: `apps/api/prisma/migrations/20261007100000_currency_actions/migration.sql`, `apps/api/src/modules/currency/{currency.actions,currency.hooks,currency.quote,currency.refunds,currency.settings,currency.welcome}.ts`, `apps/api/src/modules/jobs/jobs.retention.ts`, `apps/api/src/modules/talent/candidate_unlock.service.ts`, `apps/api/tests/{currency.actions,m4.routes}.test.ts`, `apps/api/tests/integration/currency-actions.integration.test.ts`.
+  - Modificados: `apps/api/prisma/schema.prisma`, `apps/api/src/{app,server}.ts`, `modules/admin/admin.routes.ts`, `modules/auth/auth.service.ts`, `modules/currency/{currency.catalog.service,currency.catalog,currency.config,currency.routes,currency.service}.ts`, `modules/jobs/{job-state,jobs.errors,jobs.events,jobs.routes,jobs.service}.ts`, `modules/talent/{talent.routes,talent_invitation.service}.ts`, `apps/api/tests/admin.routes.test.ts`, `apps/api/tests/integration/job-postings.integration.test.ts`, `docs/reference/api.md`, `docs/product/moneda-virtual.md`.
+- Decisiones:
+  - Una sola migración (`20261007100000_currency_actions`), solo aditiva salvo tres FK de `CASCADE` a `RESTRICT` y un relleno de `autoClosedReason` en filas ya cerradas por M3. Los valores de enum nuevos no se usan dentro de la misma migración.
+  - El cobro se hace con el cliente transaccional de la acción (no hay transacción propia del libro); la garantía es `Serializable` con reintento, el bloqueo `FOR UPDATE` de la cuenta y los únicos de `instanceKey`, `idempotencyKey` y `(accountId, sequence)`. Solo la primera publicación de un puesto cuenta como `JOB_PUBLISH_EXTRA`; la clave de postulación es por (puesto, trabajador) para que re-postular no cobre de nuevo.
+  - Devolución: una transacción por cobro con `FOR UPDATE SKIP LOCKED` (varias instancias de la API sin interbloqueos); `refundOfId` único y la clave `refund:{movimiento}` aseguran una sola devolución por cobro. El plazo se congela al cobrar. Tarea en proceso con `CURRENCY_REFUND_INTERVAL_MS` (0/off la desactiva; no corre bajo pruebas) y ruta de administración para una pasada.
+  - Tope diario por usuario y día de Lima; no aplica a devoluciones, premios ni gratuitas.
+  - Valores provisionales nuevos: `DAILY_SPEND_CAP_WORKER` y `DAILY_SPEND_CAP_COMPANY` = 200 monedas/día, `JOB_HIGHLIGHT_DURATION_HOURS` = 168, intervalo de devolución 5 min (todos editables por el admin con historial, salvo el intervalo, que es una variable de entorno). Documentados en `moneda-virtual.md`.
+  - Bono de bienvenida: se otorga al registrar un trabajador y al crear una empresa desde administración (un fallo no deshace el alta); para cuentas existentes, `POST /api/admin/currency/welcome-bonus/backfill`, idempotente. No se migra masivamente.
+  - `PROFILE_HIGHLIGHT` DIFERIDO: la búsqueda de talento tiene orden y cursor propios sin campo de destacado y cambiarlos no es un cambio acotado. Los premios M6 no se implementaron.
+  - Decisiones del dueño del producto marcadas como resueltas en `moneda-virtual.md`: DNI visible solo tras la aceptación, constancia conservada (la anonimización es alcance futuro), re-postulación flexible y caducados ocultos.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55943`, bases `chambeaya_test`, `chambeaya_shadow_test` y `chambeaya_fresh_test`, detenido y eliminado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en una base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected`.
+  - `tsc --noEmit` (`apps/api`): sin errores. `npm test` (unitarias): 34 archivos, 596/596.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration`: 19 archivos, 195/195.
+  - Suites de moneda y de puestos (`currency-actions`, `currency-catalog`, `currency-ledger` y `job-postings`) repetidas 3 veces seguidas: 4 archivos, 53/53 en cada una.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se restauró `apps/web/next-env.d.ts`). `flutter analyze` en `apps/mobile_flutter`: `No issues found!`. `git diff --check`: sin errores (solo avisos LF/CRLF).
+- Cobertura de las pruebas de integración: doble publicación y doble postulación simultáneas con saldo justo (nunca saldo negativo ni doble cobro), ráfaga de 8 publicaciones con saldo para 4, dos clics en desbloquear contacto, devolución por dos workers a la vez (invitación y postulación), atomicidad (la prioridad sin saldo revierte también la postulación), carrera entre re-postulación y retiro, rechazo de la empresa sin re-postulación, borde de mes en Lima, tope diario y su historial, `quote` sin efectos, orden de destacados y prioridad con cursores estables, cierre y cobertura con resolución de aceptadas, borrado de cuentas con y sin ofertas aceptadas.
+- Documentación: `docs/reference/api.md` (sección «Acciones conectadas a la moneda virtual (M4)», constancia conservada, re-postulación, historial, ganchos) y `docs/product/moneda-virtual.md` (valores provisionales nuevos, decisiones resueltas, alcance M4). `docs/guides/deployment.md` no se tocó: no menciona la variable `CURRENCY_REFUND_INTERVAL_MS`; el auditor debe decidir si la documenta.
+- Riesgos:
+  - `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker (el cambio no toca web ni Flutter).
+  - La concurrencia depende de `Serializable` con reintentos: con mucha contención puede responder `500` sin efecto aplicado. El bus SSE es en proceso. La tarea de devolución corre en cada instancia (seguro por diseño, validado con workers concurrentes en un mismo proceso, no con procesos separados).
+  - Todo valor del catálogo y de los ajustes es provisional. Los PDF de ofertas de cuentas con constancia se conservan; la anonimización posterior no existe aún.
+  - Resta PROFILE_HIGHLIGHT y los premios de M6.
+- Siguiente paso: `auditor-opus` audita `CN-20261007-043` (diff: el árbol de trabajo de `moneda-virtual` sobre `29d7fc6` más lo no comiteado de M3 en `039`-`042` si aún no se comiteó). Nada se declara aprobado.
+
+### CN-20261006-042 — Reauditoría de `CN-20261006-041` y cierre de M3
+
+- Fecha: 2026-10-06 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20261006-041` (corrección), contra `CN-20261006-040` (auditoría `REQUIERE_CAMBIOS`) y `CN-20261006-039` (M3). Rama `moneda-virtual` sobre `7aa8403`, sin commit.
+- Alcance: se contrastó `041` con el árbol (`jobs.service.ts`, `job-state.ts`, pruebas y `api.md`). Se revisaron los caminos que pueden dejar un puesto abierto sin vacantes libres, la retirada de ofertas al cerrar o cubrir, las carreras nuevas que introduce esa retirada y las regresiones en la máquina de estados y en las carreras ya probadas.
+- Estado de los hallazgos de `040`:
+  - MEDIO-1: resuelto. `updatePosting` rechaza `vacancies <= filledVacancies` (`400 VACANCIES_BELOW_FILLED`) bajo `FOR UPDATE` del puesto. `publish` y `apply` exigen una vacante libre (`409 POSTING_FILLED`). No queda otro camino: `CLOSED` y `FILLED` no tienen salidas (publicar, pausar o editar dan `409`). Un `PAUSED` no puede quedar lleno, porque la última contratación lo pasa a `FILLED` también desde la pausa. La edición y la contratación se serializan por el bloqueo del puesto. La sonda de `040` reproducida da `400` y deja `vacancies` intacto.
+  - BAJO-2: resuelto. `releasePendingOffers` corre en la misma transacción del cierre y de la última contratación. Solo toca postulaciones `OFFER`: retira la oferta `PENDING`, pasa la postulación a `REJECTED` y registra un evento con `POSTING_CLOSED`/`POSTING_FILLED` y un aviso SSE tras confirmar. `ACCEPTED`, `HIRED` y las demás etapas no se tocan (verificado). El cierre idempotente no repite nada.
+  - BAJO-1 y BAJO-3: siguen abiertos como decisiones de producto, documentadas en `api.md` y, por esta auditoría, también en `moneda-virtual.md`.
+- Hallazgos: ninguno crítico, alto ni medio.
+  - Observación (producto, sin cambio exigido): si una oferta se acepta antes del cierre o de la última contratación de otro candidato, la postulación queda `ACCEPTED` sobre un puesto `CLOSED`/`FILLED`. No se puede contratar (`409`), el trabajador no recibe aviso y la empresa debe rechazarla a mano. Es coherente con el alcance declarado en `041`, pero la interfaz de M5 debe mostrarlo, o el producto debe decidir si se cierra de forma automática. Quedó documentado en `api.md` y `moneda-virtual.md`.
+- Sonda propia de carreras (`zz-audit042-probe`, borrada al terminar). Desfases de 0 a 42 ms para ejercitar los dos órdenes, 16 rondas por caso y 3 corridas:
+  - Cierre contra aceptación: la aceptación gana (`200`, `ACCEPTED`, oferta `ACCEPTED`) o pierde (`409`, `REJECTED`, oferta `WITHDRAWN`). Ambos órdenes aparecieron.
+  - Última contratación contra la aceptación de otra oferta: la contratación siempre da `200` y el puesto queda `FILLED`. La otra postulación queda `ACCEPTED` o `REJECTED`/`WITHDRAWN`. El contratado sigue `HIRED`.
+  - Cierre contra emisión de oferta: la oferta pierde (`409`) o gana (`201`) y luego el cierre la retira (`REJECTED`).
+  - Edición de vacantes (`3→2`) contra contratación en pausa: la edición gana (`200`, después `FILLED 2/2`) o pierde (`400`, `PAUSED 2/3`), y después publicar da `409` o `200`.
+  - Invariantes comprobadas en cada ronda: `PUBLISHED`/`PAUSED` ⇒ `filled < vacancies`; ningún `OFFER` ni oferta `PENDING` en un puesto `CLOSED`/`FILLED`; a lo sumo una oferta `PENDING|ACCEPTED` por postulación; `HIRED = filledVacancies`. Ningún `500` y ningún aviso `REJECTED` a `HIRED`/`ACCEPTED`. 15/15 pruebas en las 3 corridas.
+- Verificado sin regresión: la tabla de transiciones no cambió (`releasePendingOffers` usa `OFFER→REJECTED`, válida para la empresa). El orden de bloqueo es puesto y luego postulaciones `OFFER` en el cierre, y postulación, puesto y luego `OFFER` ajenas en la contratación. Ningún camino bloquea una postulación `OFFER` y luego el puesto (aceptar, rechazar, ofertar y retirarse no bloquean el puesto), así que no hay ciclo. Las carreras de `039`/`040` (contrataciones simultáneas, doble postulación, aceptación contra retirada o rechazo) siguen en la suite y pasan.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55842`, bases `chambeaya_test`, `chambeaya_shadow_test` y `chambeaya_fresh_test`, detenido y eliminado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en una base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - `tsc --noEmit` (`apps/api`): sin errores. `npm run test --workspace=@chambeaya/api`: 32 archivos, 570/570.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration`: 18 archivos, 176/176. `job-postings` sola, 3 corridas seguidas: 16/16 cada una.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se revirtió `apps/web/next-env.d.ts`). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores (solo avisos LF/CRLF).
+- Documentación: `docs/reference/api.md` documenta la postulación `ACCEPTED` que queda sobre un puesto cerrado o cubierto, y el resultado de las carreras del cierre o la última contratación. `docs/product/moneda-virtual.md` agrega las reglas de vacantes libres y de retirada de ofertas, y las decisiones pendientes BAJO-1 y BAJO-3. `docs/guides/deployment.md` no requiere cambios (no hay migración nueva). No se tocó código de producto.
+- Archivos: revisados `apps/api/src/modules/jobs/{job-state,jobs.service}.ts`, `apps/api/tests/job-state.test.ts`, `apps/api/tests/integration/job-postings.integration.test.ts` y `docs/reference/api.md`. Modificados por esta auditoría: `docs/reference/api.md`, `docs/product/moneda-virtual.md` y esta entrada.
+- Riesgos: `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker (el cambio no toca web ni Flutter). La sonda ejercita las carreras con desfases de tiempo, no con puntos de sincronización deterministas. La concurrencia depende de `Serializable` con 6 reintentos: con mucha contención puede responder `500` sin efecto aplicado. El bus SSE es en proceso. Siguen pendientes de producto BAJO-1, BAJO-3, las interpretaciones de `039` (`REJECTED` por cierre o cobertura) y la observación de las postulaciones `ACCEPTED` sobre un puesto cerrado o cubierto. Los PDF de ofertas quedan huérfanos al borrar cuentas (de `039`).
+- Cierre: con esta auditoría `APROBADO` queda **cerrado M3** (`CN-20261006-039`, con su corrección `CN-20261006-041`).
+- Siguiente paso: `implementador-sonnet` comitea el árbol de `039` a `042`. El dueño del producto decide BAJO-1, BAJO-3 y el tratamiento de las postulaciones `ACCEPTED` sobre un puesto cerrado o cubierto antes de M4/M5. M4 conecta los ganchos con el catálogo de M2.
+
+### CN-20261006-041 — Corrección de M3: puesto sin vacantes libres y ofertas colgadas
+
+- Fecha: 2026-10-06 11:20 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261006-039` (implementación de M3) y `CN-20261006-040` (auditoría, REQUIERE_CAMBIOS: MEDIO-1 y BAJO-2). Rama `moneda-virtual` sobre `7aa8403`; sin commit.
+- Alcance: MEDIO-1 y BAJO-2. BAJO-1 (DNI en la constancia) y BAJO-3 (borrado en cascada de la constancia) no se cambian: son decisiones de producto y quedan documentadas como pendientes en `api.md`.
+- Archivos: `apps/api/src/modules/jobs/job-state.ts`, `apps/api/src/modules/jobs/jobs.service.ts`, `apps/api/tests/job-state.test.ts`, `apps/api/tests/integration/job-postings.integration.test.ts`, `docs/reference/api.md`.
+- Decisiones:
+  - MEDIO-1: `updatePosting` rechaza con `400 VACANCIES_BELOW_FILLED` cuando `vacancies <= filledVacancies` (antes solo `<`). La regla: mientras el puesto esté abierto el total debe superar lo cubierto; un puesto cubierto se cierra con la transición a `FILLED`/`CLOSED`. Defensa adicional con el helper puro `postingHasFreeVacancies`: `publish` (antes del gancho `beforePublish`) y `apply` (antes de `beforeApply`) responden `409 POSTING_FILLED` si no quedan vacantes libres. El publish idempotente no se ve afectado.
+  - BAJO-2: al cerrar (`CLOSE`) o cubrir (última contratación) un puesto, en la misma transacción cada postulación en `OFFER` con oferta `PENDING` pasa su oferta a `WITHDRAWN` y la postulación a `REJECTED`, con evento `REJECTED` (detalle `POSTING_CLOSED` o `POSTING_FILLED`) y aviso SSE al trabajador (publicado tras confirmar). Se eligió `REJECTED` y no dejar la postulación en `OFFER` sin oferta vigente, que sería un estado colgado. Las demás postulaciones abiertas (`APPLIED`, `SHORTLISTED`, `INTERVIEW`, `ACCEPTED`) no se tocan. Sin migración ni enum nuevo.
+  - Se ajustó una prueba existente: con 2 de 3 vacantes cubiertas, bajar a 2 ahora da `400` y subir a 3 da `200`.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55741`, bases `chambeaya_test`, `chambeaya_shadow_test` y `chambeaya_fresh_test`; detenido y eliminado al terminar; no se tocó el de 5432):
+  - `tsc --noEmit` en `apps/api`: sin errores.
+  - `npm run test --workspace=@chambeaya/api`: 32 archivos, 570/570 (1 prueba unitaria nueva).
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api` (suite completa, incluye `job-postings`) ejecutada 3 veces seguidas: 176/176 las 3 veces (2 pruebas nuevas: la sonda de la auditoría con SQL forzado y las ofertas pendientes al cerrar y al cubrir, con aviso SSE y línea de tiempo).
+  - `prisma migrate deploy` en base fresca y `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0). No se añadió migración.
+  - `npm run build --workspace=@chambeaya/web`: correcto (`apps/web/next-env.d.ts` restaurado). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores de espacios.
+- Riesgos:
+  - El cierre y la última contratación ahora actualizan también las postulaciones en `OFFER` del puesto dentro de la misma transacción `Serializable`; con mucha contención pueden agotarse los reintentos y responder `500` sin efecto aplicado (misma limitación que el resto). No hay ciclo de bloqueos nuevo: esas filas solo se actualizan en esa operación y la aceptación del trabajador no bloquea el puesto.
+  - Interpretación a confirmar con el producto: `REJECTED` para ofertas retiradas por cierre o cobertura del puesto (el trabajador no ve el detalle, solo el estado del puesto).
+  - Pendientes de decisión de producto (no cambiados): BAJO-1 (DNI visible en la constancia), BAJO-3 (constancia y borrado de cuenta) y las interpretaciones de `039`.
+  - `NO_EJECUTADA`: suite Playwright web, `e2e-real/`, `flutter test` e imágenes Docker (no se toca web ni Flutter).
+- Siguiente paso: `auditor-opus` reaudita `CN-20261006-041` (MEDIO-1 y BAJO-2); M3 queda cerrado solo con una auditoría `APROBADO`.
+
+### CN-20261006-040 — Auditoría de `CN-20261006-039` (M3: puestos fijos y embudo de selección)
+
+- Fecha: 2026-10-06 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20261006-039` (rama `moneda-virtual` sobre `7aa8403`, sin commit), posterior a `CN-20261005-038` (M2 aprobado).
+- Alcance: se contrastó `039` con el `git diff`, los archivos nuevos (`modules/jobs/*`, migración `20261006100000_job_postings`, pruebas) y `docs/product/moneda-virtual.md`. Se revisaron la máquina de estados por actor, la idempotencia, los estados terminales, las vacantes bajo concurrencia, la inmutabilidad y el versionado de la oferta, la privacidad y el aislamiento, la subida y descarga del PDF, la validación, el SSE, los ganchos `JobHooks`, la bandera M0, la migración y la documentación.
+- Hallazgos: ninguno crítico ni alto.
+  - MEDIO-1 (corrección; bloquea el cierre): un puesto puede quedar `PUBLISHED` sin vacantes y seguir recibiendo postulaciones que nunca podrán contratarse. `updatePosting` (`jobs.service.ts`) solo rechaza `vacancies < filledVacancies`, así que en `PAUSED` se puede bajar `vacancies` hasta igualar lo cubierto. El puesto no pasa a `FILLED`, se vuelve a publicar y acepta postulaciones. `confirmHire` responde entonces `409 POSTING_FILLED` aunque el estado sea `PUBLISHED`. Esto contradice `api.md` y `moneda-virtual.md`, que dicen que al llenarse el puesto pasa a `FILLED` y deja de recibir postulaciones. En M4 la postulación extra costará monedas. Reproducido con una sonda: puesto con 2 vacantes y 1 contratado; pausa, `PATCH {vacancies: 1}` `200`, `publish` `200 PUBLISHED`, postulación `201` y `vacanciesRemaining: 0`. Corrección sugerida: si `vacancies === filledVacancies` tras la edición, responder `400 VACANCIES_BELOW_FILLED` o pasar el puesto a `FILLED` en la misma transacción. Como defensa adicional, `publish` y `apply` deben exigir vacantes libres. Hace falta una prueba de integración.
+  - BAJO-1 (privacidad/producto): tras la aceptación, la empresa ve el número de DNI del trabajador (`User.identifier`) dentro de `acceptanceSnapshot`, en `GET /api/business/job-applications/:id`. Verificado: el detalle no expone el correo, pero sí el DNI. Para formalizar un contrato es razonable, pero `api.md` decía "nunca documento de identidad" sin matiz. Esta auditoría corrigió el texto. El dueño del producto debe confirmarlo, y también si el DNI debe ser parte de la acción de costo de M4.
+  - BAJO-2 (consistencia): al cerrar o cubrir un puesto, las postulaciones abiertas no se tocan. Quedan en `APPLIED`/`SHORTLISTED`/`INTERVIEW`, y las `OFFER` conservan una oferta `PENDING` que ya no se puede aceptar (`409 POSTING_NOT_OPEN`). El trabajador no recibe ningún aviso. Sugerencia: retirar las ofertas pendientes y avisar al trabajador al pasar a `CLOSED`/`FILLED`, o documentarlo para la interfaz de M5.
+  - BAJO-3 (producto/legal): la constancia "inmutable" desaparece por cascada si se borra la cuenta del trabajador o de la empresa, y el PDF queda huérfano en el almacenamiento. Es una decisión documentada en `039`, pero contrasta con el libro de moneda, que bloquea el borrado (`409`). Debe validarse con el criterio legal pendiente de `moneda-virtual.md`.
+  - Observaciones, sin cambio exigido:
+    - `X-File-Name` admite caracteres de control (`\r\n`, comillas, `../`). La clave de almacenamiento es un UUID y la cabecera de descarga se codifica, así que no hay traversal ni inyección de cabeceras (verificado); la ruta del CV ya hacía lo mismo.
+    - Repetir `accept` sobre una postulación `HIRED` responde `409`, no `200` idempotente.
+    - Los ganchos se reejecutan en cada reintento de `Serializable` (documentado en `api.md` por esta auditoría).
+    - Las interpretaciones del implementador no son riesgosas en M3, pero conviene confirmarlas con el producto: rechazar la oferta deja la postulación `WITHDRAWN`; la empresa puede rechazar tras la aceptación (la oferta sigue `ACCEPTED` con su constancia y la postulación pasa a `REJECTED`, verificado); sin re-postulación (un retiro accidental es definitivo).
+- Verificado sin hallazgo:
+  - Máquina de estados: no se retrocede, los terminales no tienen salidas y `HIRED` solo lo confirma la empresa. Entrevista solo desde `APPLIED`/`SHORTLISTED`/`INTERVIEW` y oferta solo hasta `OFFER`, así que no se regresa de `OFFER` a `INTERVIEW`. La idempotencia se resuelve antes de escribir.
+  - Vacantes, con sonda propia en PostgreSQL real: en 4 rondas, 8 contrataciones simultáneas de 8 aceptados para 1 o 2 vacantes. Siempre exactamente `vacancies` `200` y el resto `409`, `filledVacancies = vacancies`, `HIRED = vacancies`, `FILLED` y ningún `500`. Seis ofertas simultáneas con salarios distintos, en 3 rondas: versiones 1..6 contiguas y una sola `PENDING`. Aceptación contra reoferta, en 5 rondas: una sola oferta abierta o aceptada y ningún `500`. Ocho postulaciones simultáneas del mismo trabajador dejan una fila (`201` y 7 `200`). Orden de bloqueo postulación→puesto sin inversión en ningún camino.
+  - Inmutabilidad: el `UPDATE` por SQL de una oferta `ACCEPTED` falla por el trigger y el `DELETE` por cascada funciona. Índice único parcial `PENDING|ACCEPTED`.
+  - Privacidad y aislamiento: un `ADMIN` recibe `403` en las rutas de empresa y de trabajador. Otra empresa y otro trabajador reciben `404` en postulaciones y documentos. Subir el PDF a una postulación ajena da `404` y no deja archivo. `Content-Type` incorrecto o sin firma `%PDF-` dan `400`. Un documento ya consumido da `400`. El trabajador no ve el motivo del rechazo. La empresa no ve el correo.
+  - SSE: sin sesión `401`. Un `ADMIN`, otro trabajador y otra empresa conectados no reciben avisos ajenos.
+  - Ganchos: `beforeApply` y `afterHire` que lanzan revierten todo (sin postulación; puesto en `PUBLISHED`, `filledVacancies` 0, postulación `ACCEPTED`, sin evento `HIRED`) y no publican avisos.
+  - M0: `app.ts` solo agrega rutas; las suites de turnos pasan con la bandera encendida (`tests/setup.ts`). No hay empresas suspendidas ni sin verificar en el modelo actual, así que no aplica.
+  - Migración: solo agrega (`CREATE TYPE/TABLE/INDEX`, FK, `CHECK`, función y trigger).
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55947`, bases `chambeaya_test`, `chambeaya_shadow_test` y `chambeaya_fresh_test`, detenido y eliminado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en una base nueva: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - `npm run build --workspace=@chambeaya/api` (tsc): correcto. `npm run test --workspace=@chambeaya/api`: 32 archivos, 569/569.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration`: 18 archivos, 174/174. `job-postings` junto con la sonda propia (8 pruebas, borrada al terminar): 3 corridas seguidas, 22/22 cada una.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se revirtió `apps/web/next-env.d.ts`). `flutter analyze`: `No issues found!`. `git diff --check`: sin errores.
+- Documentación: `docs/reference/api.md` aclara que la empresa ve el DNI en la constancia tras la aceptación, y que los ganchos se reejecutan en los reintentos y deben escribir solo con `tx`. `docs/guides/deployment.md` y `docs/product/moneda-virtual.md` son coherentes con el código, salvo la regla que viola MEDIO-1. No se tocó código de producto.
+- Archivos: revisados todos los del `git diff` y los nuevos. Modificados por esta auditoría: `docs/reference/api.md` y esta entrada.
+- Riesgos: `NO_EJECUTADA` `flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker (el cambio no toca web ni Flutter). La concurrencia depende de `Serializable` con 6 reintentos; con mucha contención puede responder `500` sin efecto aplicado. El bus SSE es en proceso.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 con una prueba de integración y, opcionalmente, BAJO-2. `auditor-opus` reaudita. M3 **no** queda cerrado. El dueño del producto confirma BAJO-1, BAJO-3 y las interpretaciones.
+
+### CN-20261006-039 — M3: puestos fijos formales y embudo de selección (solo API y datos)
+
+- Fecha: 2026-10-06 11:05 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261005-038` (M2 aprobado). Implementa M3 de `docs/product/moneda-virtual.md`. Rama `moneda-virtual` sobre `7aa8403`; sin commit.
+- Alcance: modelo `JobPosting` (puesto fijo), `JobApplication` (postulación única por puesto y trabajador), `JobOffer` (oferta versionada con constancia inmutable), `JobOfferUpload` (PDF previo a la oferta) y `JobApplicationEvent` (línea de tiempo). Máquina de estados centralizada y pura (`job-state.ts`: embudo `APPLIED → SHORTLISTED → INTERVIEW → OFFER → ACCEPTED → HIRED` con salidas `REJECTED`/`WITHDRAWN`, transiciones por actor, idempotencia; y ciclo del puesto `DRAFT/PUBLISHED/PAUSED/CLOSED/FILLED`). Rutas de empresa (`/api/business/job-postings*`, `/job-applications*`: crear, editar, publicar, pausar, cerrar, listar puestos y postulantes con filtro por etapa, mover etapa, programar entrevista, subir PDF, emitir oferta, confirmar contratación, rechazar, CV y documento) y de trabajador (`/api/workers/job-postings*`, `/job-applications*`: buscar con filtros y paginación, detalle, postular con respuestas de filtro, listar, ver línea de tiempo, retirarse, aceptar o rechazar oferta, documento). Flujo SSE `GET /api/job-events` con avisos a la contraparte. No hay interfaz web ni Flutter, no se cobran ni devuelven monedas, y los turnos temporales no se tocaron.
+- Archivos: `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261006100000_job_postings/migration.sql` (nueva), `apps/api/src/modules/jobs/{job-state,jobs.errors,jobs.events,jobs.service,jobs.routes}.ts` (nuevos), `apps/api/src/app.ts`, `apps/api/tests/job-state.test.ts` (nuevo), `apps/api/tests/jobs.routes.test.ts` (nuevo), `apps/api/tests/integration/job-postings.integration.test.ts` (nuevo), `docs/reference/api.md`, `docs/product/moneda-virtual.md`, `docs/guides/deployment.md`.
+- Decisiones:
+  - Enums en inglés, como el resto del esquema y la decisión de M2 (el dueño los nombró en español); el mapeo está en `api.md`. Rechazar una oferta deja la postulación en `WITHDRAWN` con el evento `OFFER_DECLINED` (`REJECTED` es siempre de la empresa); es una interpretación mía de "salidas RECHAZADO y RETIRADO", ajustable.
+  - `filledVacancies` es un contador que solo incrementa la confirmación de una contratación, con `UPDATE ... WHERE filledVacancies < vacancies` bajo `FOR UPDATE` del puesto, más `CHECK (filledVacancies <= vacancies)`; ningún cuerpo lo acepta (`.strict()`). Al llegar al total el puesto pasa a `FILLED` y deja de recibir postulaciones.
+  - Concurrencia: `Serializable` con `withSerializableRetry`, `FOR UPDATE` de la postulación y luego del puesto (orden fijo), `UNIQUE (postingId, workerId)` y reintento ante `P2002` en la doble postulación (la segunda responde `200` idempotente con la misma postulación). Los avisos en tiempo real se publican solo después de confirmar la transacción.
+  - Oferta versionada: una nueva crea la versión siguiente y deja la pendiente `SUPERSEDED`; índice único parcial (una oferta pendiente o aceptada por postulación). Al aceptar se guarda `acceptanceSnapshot` (fecha, empresa, trabajador, puesto, condiciones, huella sha256 del documento) y un trigger de PostgreSQL bloquea todo `UPDATE` posterior de una oferta `ACCEPTED`. Solo se borra por cascada. Por eso la oferta no guarda el autor (un `SET NULL` sería un `UPDATE`); el autor queda en el evento.
+  - Documento de oferta: PDF subido antes (`PUT .../offer-documents`, hasta 5 MB, firma `%PDF-`, extensión `.pdf`) al almacenamiento privado existente (`PrivateDocumentStorage`); se enlaza con `documentId` al emitir la oferta y se consume una sola vez. Descarga solo con sesión de la empresa dueña o del trabajador de esa postulación.
+  - Privacidad: la empresa ve nombre, titular y distrito del candidato, nunca correo, teléfono ni documento (el contacto será una acción de costo en M4); el CV solo mientras el candidato siga en proceso y su perfil sea visible. El trabajador no ve datos de otros candidatos ni el motivo de un rechazo. Recursos ajenos responden `404`.
+  - Un puesto solo se edita en borrador o en pausa; las preguntas de filtro no cambian con postulaciones existentes; las vacantes no bajan de lo cubierto. Quien se retiró o fue rechazado no puede volver a postular al mismo puesto.
+  - Puntos de extensión de M4: `JobHooks` (`beforePublish`, `beforeApply`, `afterHire`) invocados dentro de la transacción de cada operación, sin cobrar nada hoy; si lanzan, la operación se revierte (probado con publicar).
+  - Una bandera de configuración nueva no es necesaria: los puestos fijos son el flujo principal.
+- Diferido: chat de la postulación (`Conversation` exige un `CompanyWorkerContact` y está atada a turnos; reutilizarla obliga a crear contactos y ampliar el modelo, se difiere a M5 y está documentado); interfaces web y Flutter (M5); cobro y premios (M4); firma digital. Los PDF de ofertas quedan huérfanos en el almacenamiento si se elimina la cuenta, el puesto o la postulación (las filas sí caen en cascada; la baja de cuentas de `admin.routes.ts` no los limpia).
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55891`, bases `chambeaya_test`, `chambeaya_shadow_test` y una base fresca; detenido y eliminado al terminar; no se tocó el de 5432):
+  - `npm run build --workspace=@chambeaya/api` (`tsc --noEmit`): sin errores.
+  - `npm run test --workspace=@chambeaya/api`: 32 archivos, 569 pruebas, correctas (incluye 36 nuevas: máquina de estados, validación de entradas, roles y subida de PDF con tamaño y tipo, avisos).
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api`: 18 archivos, 174 pruebas, correctas (14 nuevas). El archivo nuevo corrió además 4 veces seguidas sin fallos.
+  - Pruebas de integración nuevas: embudo completo y vacantes derivadas; oferta con versiones, constancia y trigger de inmutabilidad (por SQL también); documento con huella y permisos; aislamiento entre empresas y trabajadores (404, sin correo ni documento ni otros candidatos); paginación por cursor y filtros; ciclo y reglas de edición del puesto (incluye el gancho fallido que revierte la publicación); entrevistas, rechazos y retiradas idempotentes; dos contrataciones simultáneas por la última vacante (`200` y `409 POSTING_FILLED`), cuatro simultáneas para dos vacantes, seis postulaciones simultáneas del mismo trabajador (una sola fila y un solo evento), aceptación contra retirada (4 rondas) y aceptación contra rechazo; cierre del puesto antes de contratar; avisos SSE solo a la contraparte; baja de cuentas con oferta aceptada.
+  - `prisma migrate deploy` en una base fresca: correcto. `prisma migrate diff --from-migrations ... --to-schema-datamodel ... --shadow-database-url ... --exit-code`: `No difference detected`.
+  - `npm run build --workspace=@chambeaya/web`: correcto (se revirtió el cambio automático de `apps/web/next-env.d.ts` que genera el build). `flutter analyze` (`apps/mobile_flutter`): `No issues found!`. `git diff --check`: sin errores de espacios (solo avisos LF/CRLF).
+- Riesgos:
+  - Bajo mucha contención sobre una misma postulación o puesto los seis reintentos de `Serializable` pueden agotarse y responder `500`; el estado final sigue siendo correcto (misma limitación documentada del libro de moneda).
+  - El bus de avisos es en proceso: con varias instancias solo avisa a los clientes de la misma instancia (igual que el feed de turnos).
+  - PDF huérfanos al dar de baja cuentas (ver Diferido). La subida del PDF escribe el archivo antes de la transacción y lo borra si esta falla; un corte del proceso entre ambos pasos deja un archivo sin fila.
+  - Interpretaciones de producto a confirmar: rechazar oferta = `WITHDRAWN`; la empresa puede rechazar incluso tras la aceptación; el trabajador puede retirarse tras aceptar; salto de etapas permitido hacia entrevista u oferta; sin reaplicar tras retirarse o ser rechazado; rango salarial obligatorio y en PEN.
+  - `NO_EJECUTADA` suite Playwright web, `e2e-real/`, `flutter test` e imágenes Docker: el cambio no toca web ni Flutter.
+  - Persiste la observación de proceso: el ID `CN-20261001-032` existe también en la rama `pagos-liquidacion-pausada`.
+- Siguiente paso: `auditor-opus` audita `CN-20261006-039`; nada queda aprobado hasta esa auditoría. M4 conecta los ganchos con el catálogo de M2; M5 trae interfaces y el chat.
+
+### CN-20261005-038 — Auditoría de `CN-20261005-037` (M2: catálogo de moneda y corrección de BAJO-4)
+
+- Fecha: 2026-10-05 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20261005-037` (rama `moneda-virtual` sobre `99c5d03`, sin commit). Corrige BAJO-4 de `CN-20261001-036`.
+- Alcance: se contrastó `037` con el `git diff` del árbol, los archivos nuevos y `docs/product/moneda-virtual.md`. Se revisaron BAJO-4, la autorización por rol, la validación, el historial, la siembra, la cuota del mes de Lima, la semántica "inactiva o ausente = gratis", la concurrencia de ediciones, la migración, el efecto de `TRUNCATE "User" CASCADE` y la documentación.
+- Hallazgos: ninguno crítico, alto ni medio.
+  - BAJO-1 (pruebas): la prueba de ediciones concurrentes (`currency-catalog.integration.test.ts`) ordena el historial solo por `createdAt`, con precisión de milisegundos y sin desempate por `id`. Dos cambios en el mismo milisegundo podrían ordenarse al revés y fallar la prueba sin que haya un error real. La ruta `/changes` sí desempata por `id`. Mejora sugerida: ordenar por `[createdAt, id]` o encadenar por `oldValue`→`newValue`.
+  - Observación: `TRUNCATE "User" CASCADE` vacía el catálogo solo en bases de prueba. En `src/`, `prisma/seed.ts` y `apps/web/e2e-real/` no hay ningún `TRUNCATE`. El borrado normal de un usuario aplica `SET NULL` a `updatedById`/`changedById` y no borra entradas, así que producción no se ve afectada. Tras una corrida de integración la base `_test` queda sin catálogo. Toda suite futura (M4) que dependa del catálogo debe restablecerlo como hace la de `037`.
+  - Observación de producto: la devolución de 72 h sembrada en `TALENT_INVITE`, `APPLICATION_EXTRA` y `APPLICATION_PRIORITY` es coherente con "si la otra parte no responde en el plazo". Las demás acciones de costo no esperan respuesta de nadie. Es un valor provisional: lo confirma el dueño del producto. El "tope de gasto diario" de `moneda-virtual.md` no es parte de M2 y debe planificarse para M4.
+- Verificado sin hallazgo:
+  - BAJO-4: `SELECT ... FOR UPDATE` sobre la cuenta antes de contar, en las dos rutas. `23001` se reconoce por el mensaje del `PrismaClientUnknownRequestError` y se traduce a `409 CURRENCY_LEDGER_RETAINED` si la restricción es de moneda; si no, a `RELATED_RECORDS_EXIST`. Se reprodujo de forma independiente con una sonda temporal (borrada): un `psql` aparte mantiene abierta una transacción con un movimiento (cuenta existente bloqueada, o cuenta creada en la misma transacción) durante 2 s. En las 4 variantes (trabajador o empresa, cuenta previa o nueva) el resultado fue `409 CURRENCY_LEDGER_RETAINED`. El borrado esperó unos 1,4 s y se conservaron usuario y movimiento.
+  - Rutas de administración solo para `ADMIN` (`403` a los demás roles, `401` sin sesión). La lectura de trabajador y empresa devuelve solo las entradas activas del propio actor (`BUSINESS` se traduce a `COMPANY`), sin `id`, autor, `updatedAt` ni `isProvisional`.
+  - `PATCH` estricto: monto entero de 1 a 1 000 000, cuota de 0 a 10 000, devolución de 1 a 8760 o nula (todo dentro de Int32). Motivo de 3 a 500 caracteres, al menos un campo, y clave, actor y tipo rechazados. Además hay `CHECK` en la base. Cuota o devolución en un `REWARD` da `400`. Se escribe una fila de historial por campo cambiado, con valor anterior, nuevo, motivo, autor y fecha. Un cambio sin diferencias no escribe nada. La primera edición apaga `isProvisional`. Una entrada inexistente da `404`. El cursor se valida por entrada.
+  - Concurrencia: con el bloqueo `FOR UPDATE` en `READ COMMITTED`, la lectura posterior ve el valor confirmado. `createdAt` lo fija el motor de Prisma al insertar, después del bloqueo (verificado en el registro de consultas). Una sonda de 25 rondas de 6 ediciones simultáneas no rompió la cadena `oldValue`→`newValue` del historial.
+  - Siembra: `migrate deploy` en una base nueva deja 16 filas, todas con `isProvisional = true`, que coinciden campo por campo con `DEFAULT_CURRENCY_CATALOG`. La migración solo agrega (`CREATE TYPE/TABLE/INDEX`, FK, `INSERT`) y `migrate diff` queda vacío.
+  - Cuota del mes de Lima: ventana `[inicio, fin)` a las 05:00 UTC, con pruebas del último segundo de octubre, cambio de año y febrero de año bisiesto. `charge` se activa cuando `used >= cuota` (con cuota 3 los usos 1 a 3 son gratis). Una entrada ausente o inactiva da `charge: false` y premio 0. `resolve` no escribe en el libro.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55733`, bases `chambeaya_test` y `chambeaya_shadow_test`, detenido y eliminado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy`: correcto. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url --exit-code`: `No difference detected` (código 0).
+  - `npm run build --workspace=@chambeaya/api` (tsc): correcto. `npm run test --workspace=@chambeaya/api`: 30 archivos, 533/533.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration`: 9 corridas completas. La primera dio 1 fallo en 160 (no se capturó el detalle). Las 8 siguientes dieron 160/160. Además, `currency-catalog` y `currency-ledger` juntos pasaron 12 veces seguidas (18/18).
+  - Sondas propias de la carrera de BAJO-4 y del orden del historial (descritas arriba), borradas al terminar.
+  - `npm run build --workspace=@chambeaya/web`: correcto. `git diff --check`: sin errores.
+- Documentación: `docs/guides/deployment.md` agrega la migración M2: solo agrega, siembra valores provisionales, exige PostgreSQL 13 o posterior por `gen_random_uuid()` y deben revisarse antes de M4. `docs/guides/local-development.md` explica que el catálogo se edita por API y que `TRUNCATE` lo vacía en pruebas. `docs/reference/api.md` aclara cómo se guardan `oldValue`/`newValue` (`"null"` para una devolución sin plazo). `docs/product/moneda-virtual.md` es coherente con el código. No se tocó código de producto.
+- Archivos: revisados todos los del `git diff` y los 5 nuevos. Modificados por esta auditoría: `docs/guides/deployment.md`, `docs/guides/local-development.md`, `docs/reference/api.md` y esta entrada.
+- Riesgos: no se identificó el fallo aislado de la primera corrida de integración. No se repitió en 8 corridas completas ni en 12 de las suites de moneda. Pudo ser BAJO-1 o una prueba ya existente sensible a tiempos. `NO_EJECUTADA` `flutter analyze`/`flutter test`, la suite Playwright web, `e2e-real/` y las imágenes Docker: el cambio no toca Flutter ni el panel, y solo se compiló el panel. La carrera de BAJO-4 se detecta comparando el texto del mensaje de Prisma (`23001`, nombre de la restricción); si cambia ese formato al actualizar Prisma, la prueba de integración lo detectaría. `freeRemaining` siempre iguala la cuota hasta M4. Los valores del catálogo, la lista de claves y la siembra están en TS y en SQL a la vez, y los protege una prueba.
+- Cierre: con esta auditoría `APROBADO` quedan **cerrados M2 (`CN-20261005-037`) y BAJO-4 de `CN-20261001-036`**.
+- Siguiente paso: `implementador-sonnet` comitea el árbol de `037` y `038`. Opcionalmente corrige BAJO-1 en la siguiente entrega. El dueño del producto confirma los valores provisionales y la interpretación de la devolución antes de M4. M4 aporta el contador real de usos, la devolución automática y el tope de gasto diario.
+
+### CN-20261005-037 — M2: catálogo de costos y premios de la moneda virtual y corrección de BAJO-4
+
+- Fecha: 2026-10-05 17:50 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261001-036` (reauditoría `APROBADO` de M0/M1; este cambio corrige su BAJO-4 e implementa M2 de `docs/product/moneda-virtual.md`). Rama `moneda-virtual` sobre `99c5d03`; sin commit.
+- Alcance:
+  - BAJO-4: `DELETE /api/admin/workers/:id` y `/companies/:id` ahora bloquean la cuenta (`SELECT ... FOR UPDATE`) antes de contar movimientos, y el `guard` reconoce SQLSTATE `23001` (Prisma lo entrega como `PrismaClientUnknownRequestError`, no `P2003`) con la restricción de moneda en el mensaje y responde `409 CURRENCY_LEDGER_RETAINED`; cualquier otra violación `RESTRICT` responde `409 RELATED_RECORDS_EXIST`. Pruebas de integración de la carrera en las dos variantes (cuenta ya existente bloqueada; cuenta que aparece durante el borrado, que reproduce el `23001`), para trabajador y empresa. Se comprobó que fallan con el código anterior (4 fallos) y pasan con la corrección. `docs/reference/api.md` corregido (ya no dice que responde `500`).
+  - M2 (solo API y administración): catálogo `CurrencyCatalogEntry` (única por acción y actor; tipo `COST`/`REWARD`, monto entero > 0, activo, cuota gratuita mensual, plazo de devolución en horas, bandera `isProvisional`) e historial `CurrencyCatalogChange` (una fila por campo: valor anterior y nuevo, motivo, autor, fecha). Rutas: `GET /api/admin/currency/catalog`, `PATCH /api/admin/currency/catalog/:entryId` (cuerpo estricto, motivo obligatorio), `GET /api/admin/currency/catalog/changes` (paginado, filtro por entrada), y lectura `GET /api/workers/currency/catalog` y `GET /api/business/currency/catalog` (solo entradas activas del propio actor, sin ids ni datos internos, con cuota restante). Servicio puro de resolución `resolveCatalogAction` y `CurrencyCatalogService.resolve`: costo o premio vigente, cuota restante del mes calendario de Lima y si aplica cobro; sin escribir en el libro. Migración `20261005120000_currency_catalog` que solo agrega y siembra los valores provisionales.
+- Archivos: `apps/api/src/modules/admin/admin.routes.ts`, `apps/api/src/modules/currency/currency.catalog.ts` (nuevo), `currency.catalog.service.ts` (nuevo), `currency.routes.ts`, `apps/api/src/app.ts`, `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261005120000_currency_catalog/migration.sql` (nueva), `apps/api/tests/currency.catalog.test.ts` (nuevo), `apps/api/tests/admin.routes.test.ts`, `apps/api/tests/integration/currency-catalog.integration.test.ts` (nuevo), `apps/api/tests/integration/currency-ledger.integration.test.ts`, `docs/reference/api.md`, `docs/product/moneda-virtual.md`.
+- Decisiones:
+  - Valores PROVISIONALES sembrados por migración (el dueño del producto los ajustará): bono de bienvenida 50 (trabajador y empresa); costos de empresa: publicar extra 10 con 3 gratis al mes, destacar 10, invitar 5, desbloquear contacto 10; costos de trabajador: postular extra 5 con 10 gratis al mes, prioridad 10, destacar perfil 10; premios de trabajador: perfil completo 20, documento verificado 10, invitación respondida 5, referido 20; premios de empresa: verificada 20, postulantes respondidos a tiempo 5, contratación confirmada 20. Devolución a las 72 h solo en invitar, postular extra y prioridad (donde la otra parte puede no responder); el resto sin devolución (`null`). Es una interpretación mía de "devolución a las 72 h"; ajustable.
+  - `actor` reutiliza `CurrencyAccountOwnerType` (`WORKER`/`COMPANY`), no valores nuevos en español. `WELCOME_BONUS` ("ambos") son dos filas, una por actor. `actionKey` es texto validado por la aplicación (`CURRENCY_ACTION_KEYS`) y no un enum de base, para no exigir migración por cada acción nueva; clave, actor y tipo no son editables.
+  - Una entrada inactiva o ausente resuelve como gratuita y sin premio (nunca bloquea). Cuota y devolución solo valen en `COST` (validación `400 CATALOG_FIELD_NOT_APPLICABLE` y `CHECK` en la base).
+  - Las ediciones se serializan con `SELECT ... FOR UPDATE` de la fila; un cambio sin diferencias no escribe historial; solo se registran los campos que cambian. La primera edición apaga `isProvisional`.
+  - Los usos del mes los entrega un `CurrencyUsageCounter` inyectable. Como M2 no conecta acciones reales no hay nada que contar: el valor por defecto (`NO_ACTIONS_CONNECTED_YET`) devuelve 0 y la cuota restante es la cuota completa. M4 debe aportar el contador real (usos gratuitos y cobrados) y la devolución automática.
+  - El historial no tiene trigger de solo lectura (como `PlatformSettingChange`), porque `changedById` pasa a nulo por `ON DELETE SET NULL` al borrar un administrador y un trigger lo impediría; se probó que la fila se conserva.
+  - `TRUNCATE "User" CASCADE` de otras suites vacía también el catálogo (FK a `User`); la prueba de integración nueva lo restablece desde `DEFAULT_CURRENCY_CATALOG`, y una prueba unitaria verifica que esos valores coinciden con el `INSERT` de la migración.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55612`, bases `chambeaya_test` y `chambeaya_shadow_test`, detenido y eliminado al terminar; no se tocó el de 5432):
+  - `prisma migrate deploy` en base nueva: correcto, incluida `20261005120000_currency_catalog`; 16 filas sembradas.
+  - `prisma migrate diff --from-migrations ... --to-schema-datamodel ... --shadow-database-url ... --exit-code`: `No difference detected` (código 0).
+  - `npm run build --workspace=@chambeaya/api` (`tsc --noEmit`): sin errores.
+  - `npm run test --workspace=@chambeaya/api`: 30 archivos, 533 pruebas, correctas (incluye fronteras de mes en Lima: `2026-11-01T04:59:59Z` sigue en octubre, `05:00:00Z` es noviembre, cambio de año y febrero; autorización por rol; validación estricta; coincidencia de los valores con la migración; mapeo de `23001`).
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api`: 17 archivos, 160 pruebas, correctas (12 nuevas: 8 del catálogo, con historial, paginación, concurrencia de 6 ediciones, borrado del administrador y resolución sin tocar el libro, y 4 de la carrera de BAJO-4).
+  - `git diff --check`: sin errores de espacios (solo avisos LF/CRLF del árbol de trabajo).
+- Riesgos: no se tocó el panel web ni Flutter, así que `NO_EJECUTADA` la compilación web, la suite Playwright, `e2e-real/` y las pruebas Flutter (no aplican a este cambio, pero no se corrieron). No se construyeron imágenes Docker. La cuota gratuita aún no se descuenta de nada: hasta M4 el contador devuelve 0, de modo que `freeRemaining` siempre iguala la cuota. Los valores sembrados son provisionales y la devolución de 72 h es una interpretación. No hay interfaz de administración (M5): el catálogo se edita solo por API. La lista de claves y el catálogo sembrado están en código y SQL a la vez; los protege una prueba. La carrera de borrado depende de tiempos (espera de 500 ms antes de liberar la transacción) y comprueba que el borrado quedó bloqueado antes de liberar. Persiste la observación de proceso: el ID `CN-20261001-032` también existe en la rama `pagos-liquidacion-pausada`.
+- Siguiente paso: `auditor-opus` audita `CN-20261005-037`; nada queda aprobado hasta esa auditoría. M4 debe conectar el contador de usos y la devolución automática.
+
+### CN-20261001-036 — Reauditoría de `CN-20261001-035` y cierre de M0 y M1
+
+- Fecha: 2026-10-05 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20261001-035` (corrección, rama `moneda-virtual`, sin commit) contra `CN-20261001-034` (`REQUIERE_CAMBIOS`), `CN-20261001-032` (M0) y `CN-20261001-033` (M1).
+- Alcance: contraste de lo declarado en `035` con el `git diff` del árbol de trabajo y `docs/product/moneda-virtual.md`; verificación de cada hallazgo de `034`; búsqueda de regresiones en el borrado de superadmin (política `409 CURRENCY_LEDGER_RETAINED` y carrera), la migración `20261005100000`, `Dockerfile.production`/compose y las pruebas Flutter.
+- Estado de los hallazgos de `034`:
+  - ALTO-1 — resuelto. `_ResultsColumn` declara y recibe `temporaryShiftsEnabled` y la hoja modal pasa la bandera a `_Detail`. `WorkerShell` entrega la bandera de compilación; el valor por defecto `true` de `WorkerDiscoveryPage` solo lo usan las pruebas. No hay otra entrada de UI a `applyToShift`. `flutter analyze` limpio.
+  - ALTO-2 — resuelto en lo que importa (datos y archivos). El conteo, el borrado de la cuenta vacía y el del usuario van en una transacción; los archivos se eliminan solo después de confirmar. Un titular sin cuenta, o con cuenta vacía, se sigue borrando (`204`). El bloqueo solo aplica con movimientos, así que no impide bajas legítimas. Queda BAJO-4.
+  - MEDIO-1 — resuelto: `onDelete: Restrict` y `prisma migrate diff` vacío.
+  - BAJO-1 — resuelto: `docker compose config` resuelve las tres variables (en producción `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED` como argumento de compilación, con `ARG`/`ENV` en `Dockerfile.production`, antes de `next build`).
+  - BAJO-2 — resuelto: el comentario y `api.md` describen la garantía real (SSI, único y `CHECK`).
+  - BAJO-3 — resuelto: la migración nueva solo hace `DROP INDEX` del índice no único redundante (lo cubre el único sobre las mismas columnas); el ajuste ya no repite `relatedEntity`; hay pruebas del valor por defecto de la bandera y del nombre, y la integración usa `virtualCurrencyName()`.
+- Hallazgos: ninguno crítico, alto ni medio.
+  - BAJO-4 (no bloqueante para M1; corregir antes de M4). La carrera "movimiento confirmado entre el conteo y el borrado" responde `500 INTERNAL_ERROR`, no `409`. `035` y `api.md` decían "nunca `500`". La FK `RESTRICT` produce SQLSTATE `23001` (`restrict_violation`). Prisma lo entrega como `PrismaClientUnknownRequestError` y no como `P2003`, así que `isCurrencyForeignKeyViolation` (`apps/api/src/modules/admin/admin.routes.ts`) nunca lo detecta, y el mapeo `P2003 → 409 RELATED_RECORDS_EXIST` tampoco cubre borrados con FK `RESTRICT`. Se reprodujo de forma determinista con una sonda temporal (borrada): otra conexión bloquea la cuenta con `FOR UPDATE`, inserta un movimiento y confirma mientras `DELETE /api/admin/workers/:id` y `/companies/:id` esperan. Resultado: `500` en ambos casos, con usuario, cuenta y movimiento intactos y sin archivos tocados. No hay pérdida de datos. En M1 solo los administradores crean movimientos, así que la carrera exige dos administradores simultáneos sobre el mismo titular. Arreglo sugerido: reconocer `23001` y el nombre de la restricción `Currency…` (o tomar `FOR UPDATE` sobre la cuenta antes de contar), con una prueba de integración de esa carrera.
+  - Observación: el ID `CN-20261001-032` sigue duplicado con la rama `pagos-liquidacion-pausada`. Se debe renumerar al integrar.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55488`, bases `chambeaya_test` y `chambeaya_shadow_test`, eliminado al terminar; no se tocó el servidor de 5432):
+  - `prisma migrate deploy` en una base nueva: correcto, incluida `20261005100000_currency_ledger_cleanup`. `prisma migrate diff --from-migrations --to-schema-datamodel --shadow-database-url`: `No difference detected`.
+  - `npm run build --workspace=@chambeaya/api` (tsc): correcto. `npm run test --workspace=@chambeaya/api`: 29 archivos, 519/519.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api`: 16 archivos, 148/148.
+  - La sonda de carrera (BAJO-4) dio 2 fallos esperados (`500`). En la misma sonda, borrar un trabajador y una empresa sin cuenta de moneda dio `204`.
+  - `npm run build --workspace=@chambeaya/web`: correcto.
+  - Flutter (`C:\flutter`): `flutter analyze` sin errores (`No issues found!`). `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: 163/163. `flutter test` con la bandera apagada: 163/163. La prueba `theme_toggle` conserva la cobertura de persistencia en las dos corridas. El toque real de "Postular ahora" solo se ejercita con la bandera encendida, y con la bandera apagada se comprueba que el botón no aparece. Por eso ambas corridas son necesarias.
+  - `docker compose -f docker-compose.yml config` y `-f docker-compose.production.yml --env-file .env.production.example config`: válidos y con las variables reenviadas.
+- Documentación: `docs/reference/api.md` (Moneda virtual, "Borrado de titulares") corregido: describe el `500` de la carrera y el `23001`. `docs/guides/deployment.md`, `docs/guides/local-development.md` y `docs/product/moneda-virtual.md` describen el comportamiento actual y no requirieron cambios.
+- Archivos: revisados todos los del `git diff` y los dos archivos nuevos. Modificados por esta auditoría: `docs/reference/api.md` y esta entrada. No se tocó código de producto.
+- Riesgos: `NO_EJECUTADA` la suite Playwright web (`npm run test --workspace=@chambeaya/web`) sobre este árbol (el panel no cambió desde `034`, donde pasó 153/1 omitida). `NO_EJECUTADA` `e2e-real/`. No se construyeron imágenes Docker (solo `compose config`). Un fallo de almacenamiento tras el borrado deja archivos huérfanos, registrados solo en el log. La concurrencia del libro (BAJO-2) sigue siendo probabilística bajo carga alta.
+- Cierre: con esta auditoría `APROBADO` quedan **cerrados M0 (`CN-20261001-032`) y M1 (`CN-20261001-033`)**, con sus correcciones `CN-20261001-035`.
+- Siguiente paso: `implementador-sonnet` corrige BAJO-4 con una prueba de integración de la carrera antes de M4 o junto con el siguiente cambio de moneda, y comitea el árbol de `035` y `036`. Los alcances G–J siguen pausados.
+
+### CN-20261001-035 — Corrección de los hallazgos de `CN-20261001-034` sobre M0 y M1
+
+- Fecha: 2026-10-05 15:50 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261001-032` (M0), `CN-20261001-033` (M1) y `CN-20261001-034` (auditoría `REQUIERE_CAMBIOS`). Rama `moneda-virtual`; sin commit.
+- Alcance: corrige ALTO-1, ALTO-2, MEDIO-1, BAJO-1, BAJO-2 y BAJO-3 de `034`.
+  - ALTO-1: `_ResultsColumn` declara `temporaryShiftsEnabled` (requerido) y lo pasa al detalle de la hoja modal de teléfono/tableta; la rama de escritorio también lo recibe. `flutter analyze` sin errores.
+  - ALTO-2: `DELETE /api/admin/workers/:id` y `/companies/:id` ahora borran en una transacción: si el titular tiene algún movimiento de moneda responden `409 CURRENCY_LEDGER_RETAINED` sin borrar filas ni archivos; una cuenta sin movimientos se elimina con el titular. En el trabajador, los archivos privados se eliminan **después** de confirmar el borrado en base y un fallo de almacenamiento solo se registra (archivos huérfanos, nunca filas colgantes). El `guard` traduce `P2003` a `409 CURRENCY_LEDGER_RETAINED` (restricción de moneda, incluida la carrera con un movimiento nuevo) o `409 RELATED_RECORDS_EXIST`, nunca `500`.
+  - MEDIO-1: `schema.prisma` pasa `CurrencyMovement.account` a `onDelete: Restrict` (coherente con la migración y con ALTO-2); `prisma migrate diff` queda vacío.
+  - BAJO-1: `docker-compose.yml` y `docker-compose.production.yml` reenvían `TEMPORARY_SHIFTS_ENABLED`, `VIRTUAL_CURRENCY_NAME` y `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED` (en producción como `args` de compilación, con `ARG`/`ENV` en `apps/web/Dockerfile.production`); las tres figuran vacías en `.env.example` y `.env.production.example`.
+  - BAJO-2: corregidos el comentario de `currency.service.ts` y `docs/reference/api.md`: la corrección bajo concurrencia la sostienen `Serializable` (SSI, `40001` y reintento), el único `(accountId, sequence)` y el `CHECK balanceAfter >= 0`; el `FOR UPDATE` solo reduce conflictos y con mucha contención los 6 intentos pueden agotarse (`500`, sin efecto aplicado). No se cambió el aislamiento.
+  - BAJO-3: índice duplicado eliminado (esquema y nueva migración); el ajuste ya no repite `relatedEntityType/Id` (`relatedEntity: null`); pruebas del valor por defecto apagado de la bandera y del nombre por defecto de la moneda; la integración usa `virtualCurrencyName()` en vez del literal `Chambitas`.
+- Archivos: `apps/mobile_flutter/lib/features/discovery/worker_discovery_page.dart`, `apps/mobile_flutter/test/worker_discovery_page_test.dart` (hoja de teléfono con la bandera encendida y apagada), `apps/mobile_flutter/test/theme_toggle_state_persistence_test.dart` (con la bandera apagada aplica por repositorio, porque la UI ya no ofrece "Postular ahora"); `apps/api/src/modules/admin/admin.routes.ts`, `apps/api/src/modules/currency/currency.service.ts`, `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261005100000_currency_ledger_cleanup/migration.sql` (nueva), `apps/api/tests/admin.routes.test.ts`, `apps/api/tests/temporary-shifts.config.test.ts` (nueva), `apps/api/tests/integration/currency-ledger.integration.test.ts`; `docker-compose.yml`, `docker-compose.production.yml`, `apps/web/Dockerfile.production`, `.env.example`, `.env.production.example`; `docs/reference/api.md`, `docs/guides/local-development.md`, `docs/guides/deployment.md`.
+- Decisiones: política financiera del borrado: bloquear (409) cuando existe cualquier movimiento, aunque el saldo sea 0, porque el libro es inmutable por trigger y su auditoría no puede perderse; no se anonimiza ni desactiva en este alcance (queda como alcance futuro). Se mantiene `Restrict` y no `Cascade`, porque `Cascade` fallaría igualmente contra el trigger y ocultaría la intención. Se creó una migración nueva en lugar de reescribir `20261001100000` (ya aplicada por la auditoría `034`). Un administrador que registró ajustes sigue sin poder borrarse (`createdById` es `RESTRICT`); no existe ruta para borrar administradores. `temporaryShiftsEnabled` de `WorkerDiscoveryPage` conserva el valor por defecto `true` para sus pruebas aisladas; `WorkerShell` entrega la bandera real.
+- Validaciones (PostgreSQL 18 desechable en `127.0.0.1:55471`, base `chambeaya_test`, eliminada al terminar; no se usó el de 5432):
+  - `prisma migrate deploy` en base nueva: correcto, incluida `20261005100000_currency_ledger_cleanup`.
+  - `prisma migrate diff --from-migrations ... --to-schema-datamodel ... --shadow-database-url ... --exit-code`: `No difference detected` (código 0).
+  - `npm run build --workspace=@chambeaya/api` (`tsc --noEmit`): sin errores.
+  - `npm run test --workspace=@chambeaya/api`: 29 archivos, 519 pruebas, correctas.
+  - `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api`: 16 archivos, 148 pruebas, correctas (incluye 3 pruebas nuevas de borrado de superadmin con cuenta de moneda: trabajador con movimientos y CV da `409` y conserva archivo y filas; trabajador sin historial con cuenta vacía da `204` y borra archivo; empresa con y sin movimientos). Repetida con `VIRTUAL_CURRENCY_NAME=Chispas`: también correcta.
+  - `npm run build --workspace=@chambeaya/web`: correcto.
+  - `flutter analyze` en `apps/mobile_flutter` (Flutter en `C:\flutter`): `No issues found!`.
+  - `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true`: 163 pruebas correctas. `flutter test` (bandera apagada): 163 pruebas correctas.
+- Riesgos: `NO_EJECUTADA` la suite de Playwright web (`npm run test --workspace=@chambeaya/web`) tras este cambio; solo se ejecutó `next build` (el panel no cambió). `NO_EJECUTADA` `e2e-real/` y las imágenes Docker (compose y `Dockerfile.production` modificados solo se revisaron por lectura; no hay Docker iniciado). `NO_EJECUTADA` una prueba determinista de la carrera "movimiento nuevo entre el conteo y el borrado": el mapeo de `P2003` a `409` es lógica del `guard`, sin prueba automatizada. Un fallo del almacenamiento tras el borrado deja archivos huérfanos solo registrados en el log. Persiste la observación de proceso de `034`: el ID `CN-20261001-032` también existe en `pagos-liquidacion-pausada`.
+- Siguiente paso: `auditor-opus` reaudita `CN-20261001-035` junto con `032`/`033`; no marcar nada como aprobado hasta esa auditoría.
+
+### CN-20261001-034 — Auditoría de M0 (`CN-20261001-032`) y M1 (`CN-20261001-033`)
+
+- Fecha: 2026-10-01 23:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20261001-032`, `CN-20261001-033` (commit `bcc8a7b` sobre `3cc5829`, rama `moneda-virtual`).
+- Alcance: diff completo de `bcc8a7b` contrastado con `docs/product/moneda-virtual.md`: bandera de turnos en API, web y Flutter; libro mayor (append-only, saldo, idempotencia, concurrencia, ajustes con motivo y autor, roles y aislamiento, crédito cerrado, nombre configurable, paginación, límites Int32, migración y `WalletMovement`); documentación.
+- Hallazgos:
+  - ALTO-1 (M0, Flutter no compila): `apps/mobile_flutter/lib/features/discovery/worker_discovery_page.dart:321` pasa `temporaryShiftsEnabled` a `_ResultsColumn`, que no declara ese parámetro (`undefined_named_parameter`), y `:660` construye `_Detail(controller: controller)` sin el parámetro ahora `required` (`missing_required_argument`). `flutter analyze` (Flutter instalado en `C:\flutter`) reporta los 2 errores: la app móvil no compila con la bandera encendida ni apagada. Además, el detalle en teléfono y tableta (hoja modal de `:660`) es el camino que debe ocultar "Postular" y hoy no recibe la bandera. La entrada `-032` presentaba la bandera móvil como cubierta por tipado; no lo estaba.
+  - ALTO-2 (M1, regresión en el borrado de superadmin con pérdida de archivos): las claves `RESTRICT` de `CurrencyAccount.workerId/companyId` y `CurrencyMovement.createdById/accountId` bloquean `prisma.user.delete` en `DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` (`apps/api/src/modules/admin/admin.routes.ts:277` y `:322`) en cuanto el titular tiene cuenta de moneda. El `guard` solo traduce `P2002`, así que el `P2003` termina en `500 INTERNAL_ERROR`; en el borrado de trabajador, `documents.remove()` ya eliminó del almacenamiento sus CV y documentos **antes** de que falle el borrado, y el usuario queda con filas `WorkerDocument` que apuntan a archivos inexistentes. Comprobado en PostgreSQL real: `DELETE FROM "User"` de un trabajador con cuenta falla por la FK. Hay que decidir la política (bloquear con un `409` explícito antes de tocar archivos, o anonimizar o desactivar en vez de borrar) sin romper la inmutabilidad del libro mayor.
+  - MEDIO-1 (M1, deriva entre esquema y migración): `schema.prisma` declara `CurrencyMovement.account` con `onDelete: Cascade` y la migración crea la FK `ON DELETE RESTRICT`. `prisma migrate diff --from-migrations --to-schema-datamodel` no está vacío: propone `DROP CONSTRAINT "CurrencyMovement_accountId_fkey"` y volver a crearla con `ON DELETE CASCADE`. El siguiente `prisma migrate dev` generaría esa migración y contradiría la decisión documentada. Alinear el esquema a `Restrict`.
+  - BAJO-1: `docker-compose.yml` y `docker-compose.production.yml` no reenvían `TEMPORARY_SHIFTS_ENABLED`, `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED` ni `VIRTUAL_CURRENCY_NAME`; en Docker no se puede reactivar el flujo legado ni cambiar el nombre de la moneda (requisito "nombre configurable" cubierto solo fuera de Docker). Tampoco figuran en `.env.example`/`.env.production.example`.
+  - BAJO-2: el bloqueo `SELECT ... FOR UPDATE` bajo `Serializable` no ordena las lecturas como afirman el comentario de `currency.service.ts` y `api.md`: la instantánea se toma en esa primera sentencia, antes de esperar el bloqueo, y la transacción que espera relee el saldo anterior. La corrección la sostienen SSI (`40001`), el índice único `(accountId, sequence)`, el `CHECK balanceAfter >= 0` y el reintento. Funcionó sin errores en las pruebas, pero con mucha contención los 6 intentos pueden agotarse (`500`). Conviene corregir el comentario o usar `READ COMMITTED` con el bloqueo, que sí serializa.
+  - BAJO-3: índice duplicado `CurrencyMovement_accountId_sequence_idx` (lo cubre el único sobre las mismas columnas); `relatedEntityType/Id` de un ajuste repite `ADMIN_ADJUSTMENT`/id del administrador, que ya está en `createdById`; `temporaryShiftsEnabled(env)` no tiene prueba del valor por defecto (que esté ausente o sea distinto de `true`), porque `tests/setup.ts` fuerza `true`; la integración fija el nombre `'Chambitas'` y falla si se define `VIRTUAL_CURRENCY_NAME`.
+  - Observación de proceso: el ID `CN-20261001-032` existe también en la rama `pagos-liquidacion-pausada` (`06aa0ba`, "Base de liquidaciones de comisión previa a Culqi"). Al integrar, una de las dos entradas debe renumerarse por referencia. Esta auditoría usa `034` para no chocar con ninguna de las dos ramas.
+- Verificado sin hallazgo: la API corta `POST /api/business/shifts` y `POST /api/shifts/:id/applications` con `503` antes de validar el cuerpo, sin borrar código ni datos, y la bandera solo se activa con el literal `true`. Las invitaciones de talento no crean postulaciones, así que no la eluden. Los saldos y movimientos son de la propia sesión (`WORKER` por `userId`, `BUSINESS` por `ownerId`) y el cursor se valida contra la propia cuenta. Los ajustes son solo de `ADMIN`, con esquema `.strict()`, motivo de 3 a 500 caracteres, clave obligatoria y cantidad entre ±1 000 000, y validan que el titular sea `WORKER` o empresa existente. No hay rutas de retiro ni transferencia. El trigger rechaza `UPDATE`/`DELETE` de movimientos. El tope Int32 se controla. `WalletMovement` no se modifica.
+- Archivos: revisados todos los de `bcc8a7b`, además de `admin.routes.ts`, `serializable-retry.ts`, `talent_invitation.service.ts`, los `docker-compose*.yml` y `e2e-real/`. Modificados por esta auditoría: `docs/reference/api.md` (sección de pausa M0 en "Turnos"; códigos de error, garantías de base y efecto `RESTRICT` en "Moneda virtual"), `docs/guides/local-development.md` y `docs/guides/deployment.md` (banderas, migración, compose sin reenvío y bloqueo del borrado), y esta entrada.
+- Validaciones (base PostgreSQL 18 desechable en `127.0.0.1:55439`, eliminada al terminar):
+  - Migraciones: `prisma migrate deploy` en una base `_test` nueva, correcto. `prisma migrate diff` no vacío (MEDIO-1).
+  - Conservación de datos: base migrada hasta `20260927052735` con un `WalletMovement` sembrado; al aplicar `20261001100000` la fila se conserva intacta.
+  - API: `npm run build --workspace=@chambeaya/api` (tsc) correcto; `npm run test --workspace=@chambeaya/api`: 28 archivos y 515 pruebas, correctas.
+  - Integración: `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api`: 16 archivos y 145 pruebas, correctas (incluye `currency-ledger`).
+  - Concurrencia (script propio contra el servicio real): 10 primeros ajustes simultáneos sobre una cuenta inexistente dan 10 creados, sin error de `upsert` y con saldo 100. 10 reintentos simultáneos con la misma clave dan 1 creado y 9 idempotentes. 30 débitos de 7 sobre 100 dan 14 creados, 16 `INSUFFICIENT_CURRENCY_BALANCE` y saldo final 2. La misma clave en otra cuenta da `409`. La cadena `saldo previo + cantidad = balanceAfter` es coherente en las 27 filas y ningún saldo es negativo. `UPDATE` y `DELETE` de movimientos, y el borrado de cuenta o usuario, quedan bloqueados.
+  - Web: `npm run build --workspace=@chambeaya/web` correcto; `npm run test --workspace=@chambeaya/web` (Playwright con la bandera): 153 correctas y 1 omitida.
+  - Flutter: `flutter analyze` sobre `discovery`, `worker_shell.dart` y `core/config` da 2 errores (ALTO-1).
+- Riesgos: `NO_EJECUTADA` `flutter test` (no compila hasta corregir ALTO-1). `NO_EJECUTADA` la suite `test:web:admin-real` (`e2e-real/`, siembra por Prisma y no publica turnos). La corrida concurrente es probabilística y no demuestra la ausencia de `500` por reintentos agotados bajo mayor carga (BAJO-2). `docs/product/moneda-virtual.md` sigue vigente; no requirió cambios.
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1, ALTO-2 y MEDIO-1 (y, si se acepta, BAJO-1 a BAJO-3), con `flutter analyze` y `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true` en verde, una prueba de borrado de superadmin con cuenta de moneda y `prisma migrate diff` vacío; después, `auditor-opus` reaudita.
+
+### CN-20261001-032 — M0: pausa operativa de turnos temporales y pagos
+
+- Fecha: 2026-10-01 22:05 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260930-031`; cambio de enfoque de 2026-10-01.
+- Alcance: incorpora `TEMPORARY_SHIFTS_ENABLED`, apagada por defecto y activable solo con el valor literal `true`. La API responde `503 TEMPORARY_SHIFTS_DISABLED` antes de validar o ejecutar una publicación o postulación de turno; el panel web oculta publicar/nuevo turno y el panel móvil oculta postular. Las suites de API y Playwright habilitan explícitamente la bandera para conservar la cobertura histórica. Quedan pausados hasta M7 los alcances G (Culqi), H (liquidación de comisiones), I (suscripciones) y J (cierre de pagos); se conserva sin cambios el modo manual, los adaptadores y el proveedor simulado ya auditados.
+- Archivos: `apps/api/src/modules/temporary-shifts.ts`, `apps/api/src/app.ts`, rutas de negocio y marketplace, configuración y pruebas de API; `apps/web/app/page.tsx`, `apps/web/playwright.config.ts`; `apps/mobile_flutter/lib/core/config/temporary_shifts.dart`, `worker_shell.dart`, descubrimiento y detalle de puesto.
+- Decisiones: solo se bloquean las dos acciones de entrada al flujo legado (publicar y postular), antes de efectos o validación; las operaciones históricas y sus datos se preservan. Flutter toma la bandera por `--dart-define=TEMPORARY_SHIFTS_ENABLED=true`; el panel web usa `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true`.
+- Validaciones: `npm run build --workspace=@chambeaya/api` correcto; `npm run test --workspace=@chambeaya/api` correcto, 28 archivos y 515 pruebas; `npm run build --workspace=@chambeaya/web` correcto; `npx prisma validate --schema apps/api/prisma/schema.prisma` y `git diff --check` correctos.
+- Riesgos: `NO_EJECUTADA` la suite Flutter: el SDK/dependencias de Flutter no están disponibles en este equipo; `dart analyze` no puede resolver `package:flutter`. La bandera móvil está cubierta por tipado/formateo, pero requiere correr `flutter analyze` y `flutter test --dart-define=TEMPORARY_SHIFTS_ENABLED=true` en Flutter 3.44.0.
+- Siguiente paso: `auditor-opus` audita M0 y M1; no reactivar turnos ni pagos G–J sin una instrucción posterior del usuario.
+
+### CN-20261001-033 — M1: libro mayor de moneda virtual
+
+- Fecha: 2026-10-01 22:05 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20261001-032`.
+- Alcance: agrega cuentas para trabajadores y empresas y un libro mayor append-only de Chambitas con cantidad firmada, saldo resultante, acción, motivo, relación, actor, secuencia por cuenta y clave de idempotencia única. Incluye saldo y movimientos paginados para trabajador y empresa, y ajustes manuales de administrador con motivo y clave obligatorios. No existen retiros ni transferencias. La migración conserva sin modificación `WalletMovement`, que continúa siendo el historial legado de pagos en céntimos y no se mezcla con la moneda virtual.
+- Archivos: `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20261001100000_virtual_currency_ledger/migration.sql`, `apps/api/src/modules/currency/`, `apps/api/src/app.ts`, pruebas de rutas e integración `currency-ledger.integration.test.ts`, y `docs/reference/api.md`.
+- Decisiones: el nombre se configura con `VIRTUAL_CURRENCY_NAME` (predeterminado `Chambitas`). No hay columna de saldo editable: el saldo se deriva del último movimiento. Cada ajuste bloquea su cuenta en una transacción `Serializable`, relee el último saldo y rechaza sobregiros; los `CHECK` de PostgreSQL también prohíben saldo resultante negativo, movimiento en cero y cuentas con ambos titulares o ninguno. Un trigger impide `UPDATE` y `DELETE` de movimientos, y las relaciones que los sostienen son `RESTRICT` para conservar la auditoría. Las lecturas no crean cuentas.
+- Validaciones: `npx prisma generate --schema apps/api/prisma/schema.prisma`, `npx prisma validate --schema apps/api/prisma/schema.prisma`, `npm run build --workspace=@chambeaya/api`, `npm run test --workspace=@chambeaya/api` (28 archivos, 515 pruebas), `npm run build --workspace=@chambeaya/web` y `git diff --check`: correctos. Las pruebas unitarias cubren roles, validación de motivo y bandera; la integración nueva cubre PostgreSQL real, idempotencia, paginación, aislamiento de `WalletMovement` y ocho débitos concurrentes sin saldo negativo.
+- Riesgos: `NO_EJECUTADA` la integración real de PostgreSQL y su prueba concurrente: Docker Desktop no está iniciado, el puerto configurado `127.0.0.1:5433` no acepta conexiones y el `DATABASE_URL` local apunta al hostname interno `db`, no a una base `*_test`. No se aplicó la migración ni se usó la instancia PostgreSQL local existente para evitar tocar una base no identificada como prueba.
+- Siguiente paso: `auditor-opus` debe levantar una base PostgreSQL desechable terminada en `_test`, ejecutar `prisma migrate deploy` y `CHAMBEAYA_INTEGRATION_TESTS=true npm run test:integration --workspace=@chambeaya/api`, y auditar concurrencia, roles y migración antes de aprobar.
+
+### CN-20260930-031 — Reauditoría de `CN-20260930-030` y cierre de los Alcances E y F (pagos simulados)
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260930-030` (corrección), contra `CN-20260930-029` (reauditoría de `028`), `CN-20260930-028`, `CN-20260930-027`, `CN-20260926-025` (Alcance E, commit `b8dd587`) y `CN-20260930-026` (Alcance F, sin comitear).
+- Alcance: contraste de lo declarado en `030` con el `git diff` del árbol de trabajo (`business.service.ts#markPaymentPaid`, `payments.service.ts#processProviderEvent`, `page.tsx`, pruebas y `docs/`), ejecución de la integración real que `030` dejó `NO_EJECUTADA` y sondas propias.
+- Archivos: revisados los listados en `030`. Esta reauditoría solo modificó este registro: `docs/reference/api.md`, `docs/guides/deployment.md`, `docs/guides/local-development.md` y `docs/product/roadmap.md` ya describen el comportamiento actual. No se tocó código de producto.
+- Estado de los hallazgos de `029`:
+  - **MEDIO-A — resuelto (opción a).** `markPaymentPaid` admite `PENDING|SCHEDULED` de un proveedor distinto del activo. Tras ganar el `updateMany`, expira en la misma transacción los intentos `CREATED` con `PROVIDER_DEACTIVATED`. La prueba de integración espera `200` en el checkout y pasa. El panel muestra "Marcar como pagado" en modo `manual` para un pago `simulated` `PENDING` o `SCHEDULED`.
+  - **BAJO-6 — resuelto.** La rama `REJECTED` es un único `UPDATE ... WHERE status IN (...) AND NOT EXISTS (otro intento CREATED)`; se verificó en el log de SQL de PostgreSQL. Un rechazo de un checkout antiguo termina en `noop` y deja `SCHEDULED`/`CREATED` el checkout vigente, con prueba de integración.
+- Hallazgos: sin críticos, altos ni medios.
+  - **BAJO-7 (no bloqueante).** Falta cobertura automatizada de la invariante de seguridad de `mark-paid`: con el proveedor `simulated` activo, un pago `simulated` `PENDING` o `SCHEDULED` debe responder `409` y conservar el intento `CREATED`. Tampoco se prueba en e2e el botón del panel para un checkout inactivo. La sonda de esta auditoría confirmó el comportamiento correcto; conviene incorporarla a `payments.integration.test.ts` en el próximo cambio de pagos.
+  - **BAJO-8 (no bloqueante, documentación en código).** El JSDoc de `processProviderEvent` (`payments.service.ts`, reglas, viñeta `REJECTED`) no menciona la nueva condición de "sin otro intento `CREATED`". `docs/reference/api.md` sí la describe.
+- Validaciones (reales en este equipo):
+  - Base de datos: clúster PostgreSQL 18 desechable (`initdb` en el scratchpad, puerto 5913, `trust`), eliminado al terminar; no se tocó el servidor de 5432. `prisma migrate deploy`: correcto.
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`): 15 archivos, **142/142**. Cierra el `NO_EJECUTADA` de `030`.
+  - Concurrencia y transición (`payments.integration.test.ts`, filtro `concurrent|racing|repeating|rejection|approval after|old checkout|mark-paid`): 11/11 en cada una de 5 ejecuciones.
+  - Sondas temporales, eliminadas: (1) `mark-paid` con `simulated` activo responde `409` en `PENDING` y en `SCHEDULED`, y el intento sigue `CREATED`. (2) Cinco `mark-paid` concurrentes sobre un `SCHEDULED` inactivo dan un `200`, cuatro `409`, un solo `PAYMENT_REPORTED` e intento `EXPIRED/PROVIDER_DEACTIVATED`; el simulador responde `404` en modo `manual`. Al volver a `simulated`, una aprobación tardía deja el pago `PROCESSED` con `needsReview=true` y sin segundo evento. (3) Rechazar el intento vigente sigue devolviendo el pago a `PENDING`. Resultado: 3/3.
+  - API: `npm --workspace @chambeaya/api run build` (`tsc --noEmit`), sin errores; `npm --workspace @chambeaya/api test`, 26 archivos, **509/509**.
+  - Web: `npm --workspace @chambeaya/web run build`, correcto (`ƒ /pago-simulado/[checkoutId]`). `e2e/simulated-payment.spec.ts`: **6/6** en escritorio y móvil.
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check`: sin errores.
+- Riesgos residuales:
+  - `NO_EJECUTADA`: `e2e-real`, imagen Docker de producción (sin Docker en este equipo), `shellcheck`, recorrido de navegador contra API y PostgreSQL reales en modo `simulated` y la suite rápida completa de Playwright. En esta reauditoría solo se ejecutó `simulated-payment.spec.ts`; la suite completa pasó en `029`, y `030` solo cambió la condición del botón.
+  - Teórico, solo en modo simulado: bajo `READ COMMITTED`, un rechazo de un intento antiguo que coincida con la creación de un checkout nuevo podría evaluar el `NOT EXISTS` con la instantánea previa. No mueve dinero; revisar al integrar un proveedor real.
+  - Proceso: `028` y `030` los registró "Codex (corrección directa)", fuera del flujo de `CLAUDE.md`. Esta auditoría es la revisión independiente.
+- Cierre: con esta auditoría quedan **cerrados los Alcances E (`025`) y F (`026`)**, con sus correcciones `028` y `030`. Producción sigue en `PAYMENT_PROVIDER=manual`.
+- Siguiente paso: comitear el árbol de trabajo de la rama `alcance-e-pendiente-auditoria` e integrarlo en `main`. BAJO-7 y BAJO-8 quedan como mejoras opcionales para el próximo cambio de pagos.
+
+### CN-20260930-030 — Corrección de la salida de checkout inactivo y rechazo tardío
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: Codex (corrección directa)
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260930-028` y reauditoría `CN-20260930-029`.
+- Alcance: corrige `MEDIO-A`: al volver de `simulated` a `manual`, `mark-paid` también resuelve un pago `SCHEDULED` del proveedor inactivo, expira su `PaymentAttempt CREATED` con `PROVIDER_DEACTIVATED` y procesa el pago de forma atómica. El panel ofrece la misma acción para ese checkout inactivo. Corrige también `BAJO-6`: un `REJECTED` de un checkout antiguo no puede devolver a `PENDING` un pago cuyo checkout más reciente sigue `CREATED`.
+- Archivos: `apps/api/src/modules/business/business.service.ts`, `apps/api/src/modules/payments/payments.service.ts`, `apps/web/app/page.tsx`, `apps/api/tests/business.service.test.ts`, `apps/api/tests/integration/payments.integration.test.ts`, `docs/reference/api.md`, `docs/guides/deployment.md` y este registro.
+- Decisiones:
+  - La transición manual de proveedor inactivo admite únicamente `PENDING|SCHEDULED`; nunca admite el proveedor de pasarela activo. Tras ganar el `updateMany` del pago, expira cualquier intento `CREATED` relacionado antes de registrar el evento de empresa.
+  - La rama `REJECTED` exige que no haya otro intento `CREATED` para ese pago; así un webhook tardío se vuelve `noop` y deja intacto el checkout vigente.
+- Validaciones:
+  - `npm --workspace @chambeaya/api run build` — correcto.
+  - `npm --workspace @chambeaya/api test` — 26 archivos, **509/509**.
+  - `npm --workspace @chambeaya/web run build` — correcto; incluye `ƒ /pago-simulado/[checkoutId]`.
+  - `npm --workspace @chambeaya/web test -- e2e/simulated-payment.spec.ts` — **6/6** en escritorio y móvil.
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check` — correctos.
+- Riesgos: `NO_EJECUTADA` en esta corrección: la suite de integración real debe confirmar `MEDIO-A` y el rechazo de checkout antiguo contra PostgreSQL. La reauditoría `029` dejó el entorno temporal y la suite listos, pero detectó el fallo anterior antes de esta modificación. Permanecen pendientes `e2e-real`, imagen Docker de producción y `shellcheck`.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260930-030` y ejecuta la integración real; no fusionar a `main` antes de `APROBADO`.
+
+### CN-20260930-029 — Reauditoría de `CN-20260930-028` (corrección de pagos simulados, Alcances E y F)
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260930-028` (corrección), contra los hallazgos de `CN-20260930-027` sobre `CN-20260926-025` (commit `b8dd587`) y `CN-20260930-026` (sin comitear).
+- Alcance: comparación de lo declarado en `028` con el `git diff` del árbol de trabajo (`payments.service.ts`, `payments.routes.ts`, `simulated.provider.ts`, `business.service.ts`, pruebas, `deploy-hosting.sh`, `page.tsx`) y ejecución de la suite de integración que `028` dejó `NO_EJECUTADA`.
+- Archivos: revisados los listados en `028`. Esta reauditoría modificó solo documentación: `docs/reference/api.md` (`409` de `mark-paid`: ahora depende del proveedor activo y del caso `SCHEDULED`), `docs/guides/deployment.md` (un checkout `SCHEDULED` no se puede rechazar en modo `manual`; solo vence por TTL) y este registro. No se tocó código de producto; `git update-index --refresh` sobre `apps/web/next-env.d.ts` (solo metadatos del índice).
+- Estado de los hallazgos de `027`:
+  - **ALTO-1 — resuelto.** `processProviderEvent` decide con `updateMany` condicionado a `PENDING|SCHEDULED` y ramifica por `count`; solo la ganadora actualiza el intento y crea el `ShiftEvent`. La prueba con 5 aprobaciones concurrentes de `eventId` distintos pasó en 6 de 6 ejecuciones reales (1 `PAYMENT_REPORTED`, `needsReview=true`, 5 `PaymentProviderEvent`).
+  - **MEDIO-1 — resuelto.** Un rechazo tardío termina en `noop` sin tocar el intento `APPROVED`; aprobar tras rechazar limpia `failureReason`; `expireStaleScheduledPayments` libera primero el pago con guard y solo expira un intento `CREATED`. Hay pruebas de integración para los tres casos, incluida la carrera expiración/aprobación.
+  - **MEDIO-2 — parcialmente resuelto (sigue abierto; ver MEDIO-A).** `mark-paid` acepta un pago `PENDING` de un proveedor inactivo y el panel muestra el botón. Un pago `SCHEDULED` (checkout abierto antes del cambio) sigue sin salida hasta que vence el TTL.
+  - **BAJO-1 — resuelto.** `eventId` determinista `simulated:<checkoutId>:<outcome>`; el segundo clic responde `duplicate` sin `needsReview`, con prueba.
+  - **BAJO-2 — resuelto.** El `GET` distingue `500 INTERNAL_ERROR` de `404` y usa `attempt.currency`.
+  - **BAJO-3 — resuelto.** `deploy-hosting.sh` hace `exit 1`; `bash -n` correcto.
+  - **BAJO-4 — resuelto.** La prueba approve+reject exige `PROCESSED`, intento `APPROVED` y un solo `ShiftEvent`; hay prueba de aprobaciones concurrentes con `eventId` distintos.
+  - **BAJO-5 — resuelto.** `apps/web/next-env.d.ts` no tiene diferencias de contenido con `HEAD`; figura `M` solo por fin de línea o metadatos.
+- Hallazgos nuevos:
+  - **MEDIO-A** — `apps/api/tests/integration/payments.integration.test.ts:582-595` (`a pending simulated payment can be resolved through mark-paid after switching to manual mode`) **falla**. Con este fallo la suite de integración queda en rojo (140/141).
+    - Primera causa: exige `checkout.status === 201`, pero el checkout responde `200`.
+    - Segunda causa, con esa aserción corregida en una copia temporal: `mark-paid` responde `409`, porque el checkout dejó el pago `SCHEDULED` y `markPaymentPaid` solo acepta `PENDING`. La prueba afirma cubrir MEDIO-2 justo en el caso que la corrección no resuelve.
+    - Con la misma copia, tras vencer el intento y listar pagos, `mark-paid` sí responde `200`. La salida existe, pero solo tras el TTL (30 min por defecto).
+    - Corrección sugerida, a elegir: (a) permitir en `markPaymentPaid` `SCHEDULED` de un proveedor inactivo, expirando el intento `CREATED` en la misma transacción; o (b) mantener el comportamiento y rehacer la prueba para que verifique `409` y luego la salida tras vencer y listar. En los dos casos el panel y la documentación deben reflejar la opción elegida. `docs/` ya describe el comportamiento actual (b).
+  - **BAJO-6 (no bloqueante, preexistente a `028`)** — `processProviderEvent`, rama `REJECTED`: el `updateMany` no comprueba que el intento rechazado sea el vigente del pago.
+    - Efecto: un rechazo tardío de un intento antiguo devuelve a `PENDING` un pago con otro checkout `SCHEDULED` en curso. Ese intento queda `CREATED` y huérfano, aunque aún puede aprobarse.
+    - En modo simulado se puede provocar al abrir la página de un checkout antiguo. No mueve dinero.
+    - Conviene condicionarlo al intento más reciente antes de integrar un proveedor real.
+  - Observación: la prueba unitaria `allows a pending payment from an inactive simulated provider…` solo comprueba la forma del `where` sobre un mock; la cobertura real depende de la de integración (MEDIO-A).
+- Validaciones (reales en este equipo):
+  - Base de datos: clúster PostgreSQL 18 desechable (`initdb` en el scratchpad, puerto 5912, `trust`), eliminado al terminar; no se tocó el servidor de 5432. `prisma migrate deploy` correcto.
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`, `chambeaya_test`): 15 archivos, **140/141**; falla solo MEDIO-A. Cierra el `NO_EJECUTADA` de `028` para el resto.
+  - Las 9 pruebas de concurrencia y transición de `payments.integration.test.ts` (filtro `concurrent|racing|repeating|rejection|approval after`) se repitieron 5 veces: 9/9 en cada ejecución.
+  - Sondas temporales (copias de la prueba de MEDIO-A, eliminadas): `409` inmediato y `200` tras vencer y listar.
+  - API: `npm --workspace @chambeaya/api run build` (`tsc --noEmit`), sin errores; `npm --workspace @chambeaya/api test`, 26 archivos, **508/508**.
+  - Web: `npm --workspace @chambeaya/web run build`, correcto (`ƒ /pago-simulado/[checkoutId]`). `e2e/simulated-payment.spec.ts`: 6/6. Suite rápida completa de Playwright: 153 aprobadas y 1 omitida (preexistente), sin regresiones por el cambio de visibilidad de "Marcar como pagado".
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check`: sin errores.
+- Riesgos:
+  - `NO_EJECUTADA`: `e2e-real`, la imagen Docker de producción (sin Docker en este equipo) y `shellcheck`.
+  - `NO_EJECUTADA`: recorrido de navegador contra API y PostgreSQL reales en modo `simulated`. La UI solo se probó con el fixture de Playwright.
+  - Proceso: `028` lo registró "Codex (corrección directa)", fuera del flujo de `CLAUDE.md`.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-A (opción a o b) y deja la suite de integración en verde en una entrada `CORRECCION` que referencie `028` y esta auditoría. BAJO-6 es opcional. Después, reauditoría de `auditor-opus`. Los Alcances E y F **no** quedan cerrados; no fusionar a `main`.
+
+### CN-20260930-028 — Corrección de los hallazgos de concurrencia y transición de pagos simulados
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: Codex (corrección directa)
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-025` (Alcance E), `CN-20260930-026` (Alcance F) y auditoría `CN-20260930-027`.
+- Alcance: corrige `ALTO-1`, `MEDIO-1`, `MEDIO-2` y `BAJO-1` a `BAJO-5` de la auditoría. Las aprobaciones de webhook usan una transición atómica de `Payment` y solo la ganadora escribe `ShiftEvent PAYMENT_REPORTED`; las decisiones tardías ya no cambian un intento `APPROVED` a `REJECTED`, y una aprobación posterior a un rechazo elimina el `failureReason`. La expiración perezosa tampoco sobrescribe un intento aprobado. El simulador identifica la misma decisión por checkout y resultado, por lo que un segundo clic es idempotente. Al volver de `simulated` a `manual`, un pago simulado `PENDING` puede resolverse por `mark-paid`; el panel muestra esa acción. El resumen de checkout conserva su moneda, diferencia `500` de `404`, y el script de despliegue termina con error si falta la habilitación explícita del simulador.
+- Archivos: `apps/api/src/modules/payments/payments.service.ts`, `apps/api/src/modules/payments/simulated.provider.ts`, `apps/api/src/modules/payments/payments.routes.ts`, `apps/api/src/modules/business/business.service.ts`, `scripts/deploy-hosting.sh`, `apps/api/tests/business.service.test.ts`, `apps/api/tests/integration/payments.integration.test.ts`, `apps/web/app/page.tsx`, `apps/web/next-env.d.ts`, `docs/reference/api.md`, `docs/guides/deployment.md` y este registro.
+- Decisiones:
+  - `processProviderEvent` usa `updateMany` condicionado a `PENDING|SCHEDULED`; bajo `READ COMMITTED`, la segunda escritura concurrente espera el lock de fila y luego afecta cero filas, marca `needsReview` y no puede crear otro evento del turno.
+  - El intento se actualiza solo después de ganar la transición de pago. Un rechazo solo modifica un intento que no es `APPROVED`; una aprobación limpia el motivo de un rechazo previo.
+  - `mark-paid` mantiene la prohibición para la pasarela activa y admite solo proveedores inactivos como vía de salida después de un cambio de configuración.
+- Validaciones:
+  - `npm --workspace @chambeaya/api run build` — correcto.
+  - `npm --workspace @chambeaya/api test` — 26 archivos, **508/508**.
+  - `npm --workspace @chambeaya/web run build` — correcto; incluye `ƒ /pago-simulado/[checkoutId]`.
+  - `npm --workspace @chambeaya/web test -- e2e/simulated-payment.spec.ts` — **6/6** en escritorio y móvil.
+  - `bash -n scripts/deploy-hosting.sh` y `git diff --check` — correctos.
+- Riesgos: `NO_EJECUTADA` en esta corrección: las nuevas pruebas de integración contra PostgreSQL real (incluidas las aprobaciones concurrentes con `eventId` distintos) requieren una `DATABASE_URL` de prueba. No había una configurada y la política local bloqueó crear y limpiar el clúster temporal; la auditoría `027` sí validó la suite de integración previa contra un clúster desechable. Quedan también sin ejecutar en esta corrección `e2e-real` y la imagen Docker de producción.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260930-028` junto con `025`, `026` y `027`; no fusionar a `main` antes de `APROBADO`.
+
+### CN-20260930-027 — Auditoría de `CN-20260926-025` (Alcance E) y `CN-20260930-026` (Alcance F): pagos simulados
+
+- Fecha: 2026-09-30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-025` (commit `b8dd587` en `alcance-e-pendiente-auditoria`) y `CN-20260930-026` (sin comitear sobre ese commit). Nota de proceso: `026` lo registró "Codex (implementación directa)", fuera del flujo de `CLAUDE.md`; se audita igual.
+- Alcance: comparación de ambos registros contra `git show b8dd587` y el árbol de trabajo. Se revisaron adaptadores, firma HMAC, checkout idempotente, `processProviderEvent`, rutas simuladas y webhook, guardas de arranque, scripts, migración, panel, página `/pago-simulado/[checkoutId]`, pruebas y documentación.
+- Archivos: revisados los de `025` y `026`. Esta auditoría modificó solo documentación: `docs/reference/api.md` (limitaciones conocidas del webhook y corrección de "deduplicación" en el simulado), `docs/guides/deployment.md` (aviso al volver de `simulated` a `manual`) y este registro. No se tocó código de producto.
+- Hallazgos:
+  - **ALTO-1** — `apps/api/src/modules/payments/payments.service.ts#processProviderEvent` (líneas ~311-369).
+    - Causa: lee `attempt.payment.status` sin bloqueo (Read Committed) y aplica `update` incondicionales.
+    - Efecto: dos aprobaciones concurrentes del mismo checkout con `eventId` distintos se aplican ambas. Quedan dos `ShiftEvent` `PAYMENT_REPORTED` `SYSTEM`, `processedAt` sobrescrito y `needsReview=false`. La garantía "doble cobro → `needsReview`" solo se cumple en secuencia.
+    - Evidencia: sonda temporal contra Postgres real, dos `POST /api/payments/simulated/:id/approve` en paralelo. En 3 de 4 rondas ambas respondieron `approved`, con `systemReported: 2` y `needsReview: false`; en la ronda restante, `approved` + `already_processed` con `needsReview: true`.
+    - Corrección sugerida: bloquear la fila del pago (`SELECT … FOR UPDATE`), usar `updateMany` condicionado a `status in (PENDING, SCHEDULED)` y ramificar por `count`, o `withSerializableRetry`. Añadir una prueba de integración concurrente con `eventId` distintos.
+  - **MEDIO-1** — mismo archivo: el estado del intento se sobrescribe sin condición.
+    - Un `REJECTED` tras la aprobación deja el intento en `REJECTED`/`PROVIDER_REJECTED_AFTER_APPROVAL` con el pago `PROCESSED`, y `GET /simulated/:id` devuelve `status: REJECTED`. Sonda C.
+    - Rechazar y luego aprobar deja `APPROVED` con el `failureReason: PROVIDER_REJECTED` anterior. Sonda E.
+    - `expireStaleScheduledPayments` hace `update` incondicional a `EXPIRED` y podría pisar un `APPROVED` concurrente.
+    - Corrección sugerida: tratar `APPROVED` como terminal del intento, con transiciones condicionadas al estado previo.
+  - **MEDIO-2** — cambio de `PAYMENT_PROVIDER` de `simulated` a `manual`: los pagos `simulated` `PENDING`/`SCHEDULED` quedan sin salida.
+    - `checkoutPayment` responde `409 PROVIDER_MANUAL`, `markPaymentPaid` solo acepta `manual|legacy` y `TransactionRow` no ofrece acción.
+    - Es relevante porque la guía de despliegue presenta `simulated` como modo de "demo controlada" en producción.
+    - Se documentó el aviso en `deployment.md`. Falta una solución funcional: reasignación, `mark-paid` para proveedores inactivos o bloquear el cambio.
+  - **BAJO-1** — `simulated.provider.ts#buildSimulatedEvent` genera un `eventId` nuevo por clic, así que una segunda aprobación secuencial (otra pestaña o un reintento) marca `needsReview=true` (sonda B). La empresa puede provocar falsos "doble cobro" en modo simulado. `api.md` afirmaba que la página ejercita la "deduplicación"; se corrigió.
+  - **BAJO-2** — `payments.routes.ts`, `GET /simulated/:checkoutId`:
+    - el `catch` genérico convierte cualquier error (por ejemplo, la base caída) en `404 PROVIDER_NOT_FOUND`, y la página muestra "no disponible" en vez de error;
+    - `currency` sale fija en `'PEN'` en vez de `attempt.currency`.
+  - **BAJO-3** — `scripts/deploy-hosting.sh`: con `simulated` sin `PAYMENT_SIMULATION_ALLOWED=true` solo avisa y continúa. La API luego sale con código 1 y el contenedor se reinicia en bucle, lo contrario de lo que dice el comentario del bloque. Debería terminar con `exit 1`, como las otras dos guardas.
+  - **BAJO-4** — pruebas:
+    - `concurrent approve+reject … settle consistently on APPROVED` acepta `PENDING` y no verifica el intento ni los `ShiftEvent`;
+    - no hay prueba de aprobaciones concurrentes con `eventId` distintos (ver ALTO-1).
+  - **BAJO-5** — `apps/web/next-env.d.ts` figura modificado en el árbol (archivo generado); revertirlo antes de comitear `026`.
+- Sin hallazgos en:
+  - Firma HMAC: `timingSafeEqual`, tolerancia, `rawBody` intacto (`express.raw` antes de `express.json`).
+  - Propiedad del checkout (`ownerId`, `404` sin distinguir si es ajeno o no existe).
+  - Guardas de arranque y valores por defecto de producción (`manual`, flag vacío).
+  - Generación del secreto en el instalador y migración aditiva.
+  - Idempotencia del checkout (10 concurrentes).
+  - Montos: el intento congela `totalCents` y el webhook compara monto y moneda.
+  - Visibilidad de botones en el panel (`mark-paid` solo `manual|legacy`) y página sin datos para sesiones ajenas.
+- Validaciones (reales en este equipo):
+  - Base de datos: sin Docker; se creó un clúster PostgreSQL 18 desechable (`initdb` en el scratchpad, puerto 5911, autenticación `trust`), eliminado al terminar. No se tocó el servidor local en 5432.
+  - `prisma migrate deploy` sobre una base vacía: correcto; `prisma migrate diff --exit-code` contra el esquema: sin divergencia.
+  - API: `npm --workspace @chambeaya/api run build` (`tsc --noEmit`), sin errores; `npm --workspace @chambeaya/api test`, 26 archivos, 507/507.
+  - Integración (`CHAMBEAYA_INTEGRATION_TESTS=true`, `chambeaya_test`): 15 archivos, **135/135**, incluido el `GET` nuevo. Cierra el `NO_EJECUTADA` de `026`.
+  - Sonda temporal de concurrencia y estados (5 casos) para ALTO-1, MEDIO-1 y BAJO-1; archivo eliminado. El caso D (webhook crudo con `eventId` distintos) devolvió 401 por un error de armado de la propia sonda y no se usa como evidencia.
+  - Web: `npm --workspace @chambeaya/web run build`, correcto (ruta `ƒ /pago-simulado/[checkoutId]`). `e2e/simulated-payment.spec.ts`: 6/6. Suite rápida completa de Playwright: 153 aprobadas y 1 omitida (preexistente), sin regresiones.
+  - `git diff --check`: sin errores. `apps/web/next-env.d.ts` se restauró al estado previo a la auditoría.
+- Riesgos (validaciones no ejecutadas):
+  - `NO_EJECUTADA`: recorrido de navegador contra API y PostgreSQL reales en modo `simulated`. La UI solo se probó con el fixture de Playwright.
+  - `NO_EJECUTADA`: `e2e-real` y las pruebas de la imagen Docker de producción (sin Docker en este equipo). Se confía en la evidencia de `025` para las cinco variantes de arranque.
+  - `NO_EJECUTADA`: `shellcheck`. Solo se revisaron a mano los bloques nuevos de los scripts.
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1, MEDIO-1 y MEDIO-2 (idealmente también BAJO-1 a BAJO-5) en una entrada `CORRECCION` que referencie `025`, `026` y esta auditoría, con pruebas de integración concurrentes. Después, reauditoría de `auditor-opus`. No fusionar a `main` hasta tener un `APROBADO`.
+
+### CN-20260930-026 — Alcance F: checkout simulado desde el panel de empresa
+
+- Fecha: 2026-09-30 12:57 (America/Lima)
+- Agente: Codex (implementación directa)
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-025` (Alcance E: adaptadores, checkout y webhook simulados).
+- Alcance: el panel muestra **"Pagar en simulador"** para un pago pendiente con proveedor activo `simulated`; crea o recupera de forma idempotente el checkout y navega a `/pago-simulado/:checkoutId`. La nueva página exige y restaura la sesión BUSINESS, consulta un resumen mínimo del intento que pertenece a esa empresa y permite aprobarlo o rechazarlo. Ambas decisiones pasan por los endpoints existentes, que verifican la firma y comparten `processProviderEvent` con el webhook; no mueven dinero real.
+- Archivos: `apps/web/app/page.tsx`, `apps/web/app/pago-simulado/[checkoutId]/page.tsx`, `apps/web/app/globals.css`, `apps/web/lib/business-api.ts`, `apps/web/e2e/fixtures/business-api.ts`, `apps/web/e2e/simulated-payment.spec.ts`, `apps/api/src/modules/payments/payments.routes.ts`, `apps/api/tests/integration/payments.integration.test.ts`, `docs/guides/local-development.md`, `docs/reference/api.md`, `docs/product/roadmap.md` y este registro.
+- Decisiones:
+  - Se añadió `GET /api/payments/simulated/:checkoutId`, protegido por sesión BUSINESS y propiedad de la empresa, para que la pantalla lea datos persistidos y no confíe en `sessionStorage`, parámetros de URL ni el estado que tenía el panel antes de redirigir.
+  - El resumen expone solo referencia, descripción, total, moneda y estado del pago; un checkout inexistente, ajeno o con modo inactivo devuelve `404`.
+  - El botón manual sigue limitado a `provider: manual|legacy`; un pago `simulated` solo ofrece el checkout cuando `payment-settings.mode` es `simulated`. Un intento `SCHEDULED` muestra "Continuar pago" y reutiliza el checkout idempotente.
+- Validaciones:
+  - `npm --workspace @chambeaya/api run build` → `tsc --noEmit` correcto.
+  - `npm --workspace @chambeaya/api test` → 26 archivos, 507/507 pruebas aprobadas.
+  - `npm --workspace @chambeaya/web run build` → build de producción correcto; la ruta dinámica aparece como `/pago-simulado/[checkoutId]`.
+  - `npm --workspace @chambeaya/web test -- e2e/simulated-payment.spec.ts` → 6/6 aprobadas (escritorio y móvil): aprobar, rechazar y acceso sin sesión.
+  - `git diff --check` → sin errores.
+- Riesgos:
+  - `NO_EJECUTADA`: integración PostgreSQL de `payments.integration.test.ts` tras añadir el `GET`; Docker Desktop no está disponible en este equipo, por lo que no hay base `_test` ni daemon para levantarla.
+  - La interfaz usa un fixture Playwright para aislar el navegador; el recorrido completo contra API/PostgreSQL reales y la auditoría independiente de `CN-20260926-025`/este alcance siguen pendientes.
+- Siguiente paso: con Docker activo, ejecutar `npm --workspace @chambeaya/api run test:integration -- payments.integration.test.ts` y el recorrido de navegador contra API real en modo `PAYMENT_PROVIDER=simulated`; después, `auditor-opus` debe auditar `CN-20260926-025` y `CN-20260930-026` antes de fusionar.
+
+### CN-20260926-025 — Alcance E: capa de adaptadores, proveedor simulado y webhook de pagos (solo API y configuración)
+
+- Fecha: 2026-09-27 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-024` (auditoría, cierre del Alcance D). Sobre HEAD `53b14cc`, árbol limpio antes de empezar. Sigue `dynamic-prancing-bear.md`; implementa solo el Alcance E (la UI de pago es el Alcance F).
+- Alcance:
+  - **Migración `20260927052735_payment_attempts`**: `PaymentAttempt` (`paymentId`, `provider`, `checkoutId` único, `status CREATED/APPROVED/REJECTED/EXPIRED`, `totalCents`, `currency`, `redirectUrl`, `expiresAt`, `failureReason`) y `PaymentProviderEvent` (`provider`, `eventId`, `attemptId?`, `payload Json`, `@@unique([provider, eventId])`). Aditiva, sin `NOT NULL` nuevo sobre `Payment`; `Payment.attempts PaymentAttempt[]`.
+  - **`apps/api/src/modules/payments/`**: `provider.ts` (interfaz `PaymentProvider`, documenta el supuesto de pago dividido/split para un proveedor real), `webhook-signature.ts` (HMAC-SHA256 sobre `timestamp.rawBody`, `timingSafeEqual`, tolerancia 5 min), `manual.provider.ts` (sin checkout, lanza si se invoca), `simulated.provider.ts` (`createCheckout` sin red real; `verifyWebhook`; `buildSimulatedEvent` para los endpoints de aprobar/rechazar), `payments.service.ts` (`resolvePaymentProvider`/`activePaymentProviderName` por `PAYMENT_PROVIDER`, `assertPaymentConfig` con las tres guardas de arranque, `checkoutPayment`, `processProviderEvent` compartida por webhook y simulado, `expireStaleScheduledPayments`), `payments.routes.ts` (webhook + simulado).
+  - **`app.ts`**: el router del webhook se monta con `express.raw` ANTES de `express.json()` global; el del checkout simulado, después (sesión BUSINESS normal). Nuevo `paymentsPrisma` inyectable en `createApp`.
+  - **`checkOut` (marketplace) y `resolveAssignment` (business)**: el `Payment` nuevo copia `provider: resolvePaymentProvider().name` en vez de `'manual'` fijo. `paymentSettings` expone `mode` del proveedor activo.
+  - **Checkout** `POST /api/business/payments/:id/checkout`: transacción `PENDING`→`SCHEDULED` + creación del intento; llamada al proveedor fuera de la transacción; idempotente (doble clic y 10 llamadas concurrentes dejan un solo intento, con sondeo acotado para las perdedoras de la carrera del `updateMany`, en vez de un `409` espurio); expiración perezosa al leer/reintentar; `409 PROVIDER_MANUAL`/`PAYMENT_NOT_PAYABLE`, `502 PROVIDER_UNAVAILABLE` con reversión.
+  - **Webhook** `POST /api/payments/webhooks/:provider`: sin sesión, con rate limit propio; `404` si `:provider` no es el activo; firma verificada antes de tocar la base; deduplicación por `P2002`; monto/moneda distintos → `422` + `needsReview`, sin `PROCESSED`; aprobación tardía de un intento expirado aceptada si el pago sigue `PENDING`; doble cobro → `needsReview` sin más efecto; rechazo nunca revierte una aprobación.
+  - **Simulado** `POST /api/payments/simulated/:checkoutId/(approve|reject)`: exige sesión BUSINESS dueña, `404` si el proveedor activo no es `simulated`; firma y procesa con la MISMA `processProviderEvent` que el webhook.
+  - **Guardas de arranque** (`server.ts`, antes de escuchar): proveedor desconocido, secreto corto con proveedor no manual, `simulated` en producción sin `PAYMENT_SIMULATION_ALLOWED=true`.
+  - **Configuración**: `docker-compose.yml` (dev: `simulated` + secreto de desarrollo), `docker-compose.production.yml` (reenvía las 4 variables + `PANEL_PUBLIC_URL`), `.env.production.example`, `scripts/instalar-produccion.sh` (genera `PAYMENT_WEBHOOK_SECRET` de 64 caracteres en instalación nueva, lo añade si falta en una existente sin tocar otras variables, `PAYMENT_PROVIDER=manual`, `PAYMENT_CHECKOUT_TTL_MINUTES=30`), `scripts/deploy-hosting.sh` (valida lo mismo que `assertPaymentConfig` y avisa del modo activo).
+  - **Docs**: `docs/reference/api.md` (endpoints, firma, estados, errores), `docs/guides/deployment.md` (variables y cómo cambiar de proveedor), `docs/guides/local-development.md` (modo simulado).
+- Archivos: los listados arriba, más `apps/web/lib/business-api.ts` (tipo `PaymentSettingsRecord.mode` de `'manual'` literal a `string`, sin cambios de UI: la UI de pago es el Alcance F).
+- Decisiones:
+  - `redirectUrl` se agregó a `PaymentAttempt` (no estaba en la lista literal del encargo) para que un doble clic devuelva la misma URL sin volver a llamar al proveedor.
+  - `PANEL_PUBLIC_URL` es una variable explícita nueva (no derivada en silencio de otra existente), con una derivación defensiva de `NEXT_PUBLIC_API_URL`/`NEXT_BASE_PATH` si falta.
+  - Las llamadas de checkout que pierden la carrera del `updateMany` (10 concurrentes) esperan con sondeo acotado (hasta 3 s) el intento de la ganadora, en vez de responder `409`: es la única forma de que TODAS devuelvan el mismo `{attemptId, redirectUrl}`, tal como exige la idempotencia del plan.
+- Validaciones (reales; contenedor propio `cn-e-pg` Postgres 16-alpine en el puerto 5901, eliminado al terminar; nunca se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 26 archivos, **507/507** (incluye 9 casos de firma y 15 de guardas/`resolvePaymentProvider`, nuevos).
+  - Integración (`chambeaya_test`, `CHAMBEAYA_INTEGRATION_TESTS=true`): **15 archivos, 134/134** (23 nuevos de `payments.integration.test.ts`: firma inválida/sin firma/reloj desfasado/body alterado, duplicados, rechazo tras aprobación, aprobación tardía de un intento expirado, doble cobro, monto/moneda distintos, 404 del simulado en modo manual, checkout idempotente con 409+reversión en el caso `PROVIDER_MANUAL`, 10 checkouts concurrentes con un solo intento, 5 webhooks idénticos concurrentes con una sola transición, aprobación/rechazo concurrentes, y el flujo completo turno→checkout→aprobar simulado→`PROCESSED`→contado como "cobrada" en `/admin/commissions`).
+  - Migración: `prisma migrate deploy` sobre una base vacía y sobre `chambeaya_test` con datos (turnos, pagos, intentos reales de las pruebas de integración); `prisma migrate diff` sin divergencia contra ambas.
+  - Scripts: `bash -n` sobre los dos modificados, sin errores; `shellcheck` (contenedor `koalaman/shellcheck:stable`) sin hallazgos.
+  - Imagen de producción de la API (`apps/api/Dockerfile.production`, build real, contra `cn-e-pg`): (1) `PAYMENT_PROVIDER=manual`, `NODE_ENV=production`, sin ninguna otra variable de pago → arranca (`Chambeaya API listening on port 4000`); (2) `simulated` + `NODE_ENV=production` + secreto válido (40 caracteres) sin `PAYMENT_SIMULATION_ALLOWED` → falla, exit 1, mensaje `PAYMENT_PROVIDER=simulated en producción exige PAYMENT_SIMULATION_ALLOWED=true explícito`; (3) `simulated` sin `PAYMENT_WEBHOOK_SECRET` → falla, exit 1, mensaje del secreto corto; (4) `PAYMENT_PROVIDER=mercadopago` (desconocido) → falla, exit 1, mensaje `PAYMENT_PROVIDER desconocido`; (5) `simulated` + `PAYMENT_SIMULATION_ALLOWED=true` + secreto válido en `NODE_ENV=production` → arranca. Los cinco casos con el exit code verificado vía `docker inspect`.
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo (ambos proyectos): **147/147** (1 omitida, preexistente) — sin cambios de comportamiento esperados (Alcance E es solo API).
+  - Limpieza: contenedor, red e imagen Docker propios de esta validación eliminados; `apps/web/next-env.d.ts` revertido dos veces (tras `tsc` y tras Playwright); no quedó ningún proceso propio corriendo.
+- Riesgos:
+  - El sondeo de checkout concurrente (hasta 3 s) es una espera activa en el proceso Node, no una notificación (`LISTEN/NOTIFY`); con un proveedor real cuya llamada de red tardara varios segundos, una ráfaga de checkouts concurrentes sobre el mismo pago podría agotar el sondeo y responder `409` a alguna llamada perdedora en vez de esperar indefinidamente. Aceptable para `manual`/`simulated` (sin red real); revisar el bound al integrar un proveedor real.
+  - `GET /api/business/payments`/`:id` ejecutan `expireStaleScheduledPayments` por cada lectura (una consulta adicional, y una transacción solo si algo venció); aceptable al volumen del piloto.
+  - No se implementó `fetchCheckoutStatus` en ningún adaptador (opcional en la interfaz; ningún proveedor de este alcance lo necesita).
+  - La UI de pago (botón "Pagar", página `/pago-simulado/:checkoutId`) es el Alcance F; no se tocó ningún archivo de `apps/web/app` ni `apps/mobile_flutter` más allá del tipo de `PaymentSettingsRecord.mode`.
+  - `e2e-real` no se re-ejecutó en esta entrega (el Alcance E no cambia ningún flujo que esa suite recorra; ver Alcance F para el recorrido de punta a punta con `PAYMENT_PROVIDER=simulated`).
+- Siguiente paso: auditoría de `auditor-opus` sobre este ID.
+
+### CN-20260926-024 — Reauditoría de `CN-20260926-023` y cierre del Alcance D (`019`, `021`, `023`)
+
+- Fecha: 2026-09-27 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-019` (implementación), `CN-20260926-021` y `CN-20260926-023` (correcciones), y las auditorías `020` y `022`. Sin comitear, sobre HEAD `0cc01dd`. **Cierra el Alcance D** (registro confiable y modo manual) del plan `dynamic-prancing-bear.md`.
+- Alcance: verificación de MEDIO-1 y BAJO-1 de `022` y de las reservas del coordinador (transacción aparte en `cancelShift`, prefiltro de 60 minutos, pruebas ajustadas, rate limit y fallos en paralelo), más la regresión completa.
+- Archivos: revisados los de `023`. No se modificó código ni documentación; `docs/reference/api.md` ya describe las fechas reales y `pendingResolution`.
+- Hallazgos: ninguno crítico, alto, medio ni bajo abierto.
+  - MEDIO-1 de `022`, cerrado. Probado contra Postgres:
+    - Una `NO_SHOW` no persistida (sigue `ASSIGNED` con la ventana vencida) ahora cuenta en `pendingResolution` (0→1).
+    - Tras `cancelShift` (200) queda `CANCELLED` con `closedWithoutPayment=true` (`closed` 0→1, `pending` 1→0).
+    - También cuentan como pendientes, sin tocarse, una `ABANDONED` no persistida y un turno corto (30 min) sin check-in.
+    - Una asignación tardía todavía dentro de su gracia no cuenta, como corresponde.
+  - Transacción aparte en `cancelShift` (reserva 1): se acepta.
+    - Un check-in entre ambas transacciones lo rechaza el guard `checkedIn > 0` dentro de la transacción serializable (409).
+    - Un `resolve` concurrente lo serializa `Serializable` con reintento; en `022` la carrera ya quedaba consistente.
+    - Lo único que difiere de una sola transacción es el instante "ahora" con que se evalúa la ventana (milisegundos). Una asignación cuya ventana vence justo en ese intervalo equivale a haberla cancelado un instante antes del vencimiento, no a un ocultamiento.
+    - Seis intentos en el borde (vencimiento de 40 a 190 ms después): ninguna mal clasificada.
+  - Prefiltro de 60 minutos (reserva 2): coherente con `checkInWindowViolation`. `closesAt` es siempre al menos `startsAt + CHECK_IN_LATE_LIMIT_MS` (el `max` con la gracia tardía nunca lo adelanta) y `ABANDONED` exige `now > endsAt + 60 min > startsAt + 60 min`. Casos límite verificados: 61 minutos desde el inicio, turno de 30 minutos, asignación tardía y `ABANDONED`.
+  - Pruebas ajustadas (reserva 3): en `business-lifecycle-revalidation.integration.test.ts` los conteos pasan de 0 a exactamente 1 evento automático, y se agregó `closedWithoutPayment=true`. El conteo sigue siendo exacto: un `NO_SHOW` registrado después de la cancelación daría 2 y fallaría. Las aserciones de "sin pago y sin reapertura" siguen intactas.
+  - `rateLimit: false` (reserva 4): es el patrón que ya usan otras 8 suites de integración. El limitador de autenticación tiene su propia cobertura; no oculta nada del alcance.
+  - Fallos en paralelo (reserva 5): Playwright rápido, dos corridas aisladas, 147 pasadas y 1 omitida en ambas; `e2e-real` aislado 3/3. Los 14 fallos solo aparecieron corriendo suites a la vez: contención de recursos (dos builds y servidores de Next más Postgres), no inestabilidad del panel.
+  - BAJO-1 de `022`, cerrado (reserva 6):
+    - Aceptadas: `2028-02-29` y `2026-12-31`.
+    - `400 INVALID_CALENDAR_DATE`: `2027-02-29`, `2026-02-30`, `2026-13-01`, `2026-00-10`, `2026-04-31` y `0000-01-01`.
+    - `400 INVALID_DATE_FORMAT`: `2026-9-1`.
+- Validaciones (reales; contenedor propio `cn-audit024-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `tsc` sin errores. `npm test`: 24 archivos, 482/482. Integración: 14 archivos, 111/111.
+  - Sondeo temporal (fechas, señal, prefiltro y borde entre transacciones): 2/2 ejecutados; archivo eliminado.
+  - Web: `tsc` sin errores. Playwright rápido: 147 pasadas y 1 omitida, en dos corridas. `e2e-real`: 3/3.
+  - Flutter: sin cambios desde `020` (161/161 y `analyze` limpio en 3.44.0).
+  - Limpieza: se eliminó el contenedor y no quedaron procesos. `apps/web/next-env.d.ts` quedó restaurado.
+- Resumen del Alcance D validado en `020`, `022` y `024`:
+  - CRUD retirado; `mark-paid` atómico y restringido a la empresa.
+  - Reporte con fechas de calendario de Lima.
+  - `closedWithoutPayment` estructurado, no falseable, y `pendingResolution` efectivo.
+  - El trabajador no recibe comisión; "Mis pagos" en Flutter.
+  - Recorridos reales en `/empresas`.
+- Riesgos residuales (no bloquean):
+  - El reporte no pagina.
+  - Los cierres anteriores a la migración `20260927005242` no cuentan (sin backfill).
+  - "Por facturar" incluye pagos `manual` todavía `PENDING` (decisión documentada).
+  - Flutter no se probó en un dispositivo.
+  - `e2e-real` no corre en CI.
+  - Correr varias suites de navegador a la vez produce fallos por contención; deben ejecutarse por separado.
+- Siguiente paso: commit local del Alcance D según el plan (sin push sin confirmación del usuario); luego, Alcance E.
+
+### CN-20260926-023 — Corrección de `CN-20260926-021` (hallazgos de `CN-20260926-022`: `cancelShift` resuelve el ciclo de vida antes de decidir, `pendingResolution` sin depender de lecturas previas, fechas de calendario reales)
+
+- Fecha: 2026-09-27 05:04 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-022` (auditoría, `REQUIERE_CAMBIOS`: 1 medio nuevo, 1 bajo, sobre `CN-20260926-021`; cerró ALTO-1 y la mayor parte de MEDIO-1). Sin comitear.
+- Alcance:
+  - **MEDIO (nuevo): `cancelShift` no resolvía el ciclo de vida antes de cancelar.** `business.service.ts#cancelShift` ahora llama a `this.resolveShiftAssignmentsLifecycle(owned)` (mismo mecanismo que ya usan `resolveAssignment` y la lectura de postulaciones) en su propia transacción, ANTES de abrir la transacción `Serializable` de la cancelación. Así, una asignación que ya venció su ventana de check-in pero seguía `ASSIGNED` en la base (nadie había abierto el panel ni llamado a `resolve`) se persiste primero como `NO_SHOW`/`ABANDONED`, y la transacción de `cancelShift` -que relee después- la trata como `NO_SHOW` y le marca `closedWithoutPayment`, en vez de arrastrarla silenciosamente por la vía de `ASSIGNED` (la "segunda vía para ocultar" que seguía abierta).
+  - **`pendingResolution` no puede depender de una lectura previa.** `admin.routes.ts`: el reporte nunca escribe (evitar abrir una transacción `Serializable` por turno candidato en una ruta de solo lectura, por rendimiento y por concurrencia con `resolveAssignment`/`cancelShift`). En vez de eso, la consulta trae también las `ASSIGNED` cuyo turno empezó hace más de `CHECK_IN_LATE_LIMIT_MS` (60 min, prefiltro de rendimiento: ninguna asignación puede calificar antes de eso) y aplica la misma función pura `resolveAssignmentLifecycle` -sin persistir nada- para decidir si cuenta, junto con las `NO_SHOW`/`ABANDONED` ya persistidas.
+  - **Revisión de otros caminos que tocan asignaciones sin resolver el ciclo de vida antes (pedida por la auditoría):** cancelación del trabajador (`marketplace.service.ts#cancelAssignment`), edición del turno (`updateShift`) y "Rescate" (`rescueActive`) no afectan dinero por esta vía y quedan documentados en el código (comentario en `cancelAssignment`) y en `docs/reference/api.md`, sin cambiar su comportamiento: la cancelación del trabajador es una decisión suya, no de la empresa, y de por sí `NO_SHOW`/`ABANDONED` nunca generan un `Payment` automáticamente; `updateShift`/`rescueActive` no tocan ninguna `ShiftAssignment`. `mark-paid` solo escribe `Payment`, tampoco aplica.
+  - **BAJO (fechas imposibles).** `admin.routes.ts`: `isRealCalendarDate` reconstruye la fecha en UTC a partir de año/mes/día y compara los tres componentes contra lo recibido, agregado como `.refine()` sobre el esquema `dayOnly` existente. `"2026-02-30"` y `"2026-13-01"` (y `"2026-00-10"`, `"2026-01-32"`) responden ahora `400 INVALID_INPUT` con `"INVALID_CALENDAR_DATE"` en `issues`; `"2024-02-29"` (bisiesto real) se sigue aceptando.
+  - **Efecto colateral esperado, no una regresión:** dos pruebas de integración preexistentes (`business-lifecycle-revalidation.integration.test.ts`) asumían que `cancelShift` nunca tocaba el ciclo de vida y afirmaban `0` eventos automáticos `SYSTEM` en dos escenarios de carrera; con la corrección, esos escenarios ahora sí producen 1 evento automático legítimo (la asignación pasa por `NO_SHOW` antes de `CANCELLED`) y quedan con `closedWithoutPayment: true`. Se actualizaron esas dos aserciones (con comentario explicando el cambio); lo que esas pruebas protegen de verdad -que `resolve` pierda la carrera sin generar pago ni reabrir el turno- sigue intacto.
+- Archivos:
+  - API: `apps/api/src/modules/admin/admin.routes.ts`, `apps/api/src/modules/business/business.service.ts`, `apps/api/src/modules/marketplace/marketplace.service.ts` (solo comentario).
+  - Pruebas API: `apps/api/tests/admin.routes.test.ts` (mock de `shiftAssignment.findMany` actualizado al nuevo `where.OR`; 3 casos nuevos: `ASSIGNED` vencida sin persistir, y las fechas imposibles/bisiesto), `apps/api/tests/business.service.test.ts` (los dobles de `cancelShift` necesitan `shiftAssignment.findMany` en el prisma de nivel superior, no solo dentro de `tx`), `apps/api/tests/integration/payment-commission.integration.test.ts` (2 casos nuevos: `ASSIGNED` vencida sin tocar antes cuenta como `pendingResolution`, y la misma cancelada con `cancelShift` sin abrir antes el panel marca `closedWithoutPayment`; además `rateLimit: false` en la construcción de `createApp`, porque las pruebas nuevas sumadas a las ya existentes de este archivo superan el límite de intentos de `/api/auth/*`, igual que el resto de `apps/api/tests/integration`), `apps/api/tests/integration/business-lifecycle-revalidation.integration.test.ts` (2 aserciones actualizadas, ver arriba).
+  - Docs: `docs/reference/api.md` (`pendingResolution` perezoso, `cancelShift` resuelve el ciclo de vida, validación de fecha real, revisión de los otros caminos).
+- Decisiones:
+  - `pendingResolution` calcula en memoria (función pura, sin persistir) en vez de forzar la resolución y escritura del ciclo de vida de cada turno candidato antes de contar: evita que una ruta de reporte (potencialmente golpeada seguido por el panel de administración) abra una transacción `Serializable` por turno, compitiendo con `resolveAssignment`/`cancelShift` reales.
+  - El prefiltro de 60 minutos (`CHECK_IN_LATE_LIMIT_MS`) es el límite más temprano en que cualquier `ASSIGNED` puede volverse `NO_SHOW`/`ABANDONED` (ver `checkInWindowViolation`): filtrar por `shift.startsAt` antes de traer las filas es seguro (no descarta ningún candidato real) y evita traer todas las `ASSIGNED` de turnos futuros o recién empezados.
+  - Las dos aserciones de `business-lifecycle-revalidation.integration.test.ts` se corrigieron a `1` en vez de relajarlas a "mayor o igual": el número exacto de eventos automáticos en esos escenarios deterministas es una propiedad real del sistema, no una casualidad del entorno de prueba.
+- Validaciones (reales; contenedores Postgres 16-alpine propios y descartables, eliminados al terminar; `chambeaya-stable-postgres-data` nunca se tocó):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **482/482**.
+  - API integración (`cn-fix2-pg`, puerto 5593): 14 archivos, **111/111**, incluidos los dos escenarios exactos que pidió la auditoría (`ASSIGNED` con ventana vencida y `cancelShift` después, que cuenta como cerrada sin pago; la misma sin cancelar, que cuenta como pendiente) y las dos pruebas de `business-lifecycle-revalidation` corregidas.
+  - Web: `npx tsc --noEmit` → 0 errores. `e2e-real` (`cn-e2ereal-fix2-pg`, puerto 5592): **3/3**. Playwright rápido: la primera corrida (ejecutada en paralelo con `e2e-real`, compitiendo por CPU/puertos) dejó 14 fallas de tiempo/render en `chromium-mobile`, todas en specs sin relación con este cambio (`membership`, `render-cost`, `shift-publish-preview`, `talent-invite`, `talent-load-more`, un caso de `change-password`); repetidas en aislado (`--project=chromium-mobile` y `--project=chromium-desktop`, sin nada más corriendo a la vez): **147/147** (1 omitida, preexistente), sin ninguna falla.
+  - `apps/web/next-env.d.ts` revertido; ningún contenedor propio ni proceso quedó corriendo al terminar.
+- Riesgos:
+  - Ninguna migración nueva en esta corrección (los dos hallazgos eran de lógica, no de esquema); la migración `20260927005242` sigue vigente sin cambios.
+  - Mismos riesgos residuales ya aceptados en `CN-20260926-021`/`022` (el reporte no pagina; sin backfill histórico de `closedWithoutPayment`; Flutter no se probó en un dispositivo real; `e2e-real` no corre en CI).
+  - La suite Playwright rápida es sensible a correr en paralelo con otras cargas pesadas (`e2e-real`, contenedores Postgres) en esta máquina: en aislado es estable; no se investigó más a fondo porque no es un defecto de este cambio.
+- Siguiente paso: reauditoría de `auditor-opus` sobre este ID.
+
+### CN-20260926-022 — Reauditoría de `CN-20260926-021` (corrección del Alcance D, `019`)
+
+- Fecha: 2026-09-26 23:50 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-019` (implementación), `CN-20260926-020` (auditoría) y `CN-20260926-021` (corrección). Sin comitear, sobre HEAD `0cc01dd`. El Alcance D **no** queda cerrado.
+- Alcance:
+  - Límites de fecha del reporte contra Postgres.
+  - La señal estructurada `closedWithoutPayment` en todos sus caminos, `pendingResolution` y la concurrencia de `cancelShift` contra `resolve`.
+  - La migración `20260927005242` sobre una base vacía y sobre una con datos.
+  - Regresión de la API y la web, `e2e-real` y el navegador.
+- Archivos: revisados los de `021`. No se modificó código ni documentación.
+- Hallazgos de `020`:
+  - ALTO-1, cerrado. Una sola conversión (`limaDayStartUtc`/`limaNextDayStartUtc`, `admin.routes.ts:63-71`), sin offsets repetidos; el panel usa `limaTodayIso()` con `America/Lima`. Contra Postgres, cada período incluyó exactamente lo esperado:
+
+    | Período | Pagos incluidos |
+    | --- | --- |
+    | Agosto | 00:00:00 del 01/08; 10:00, 19:00, 20:00 y 23:59:59 del 31/08 (5) |
+    | Solo el 31/07 | 23:59:59 del 31/07 (1) |
+    | Solo el 01/09 | 00:00:00 del 01/09 (1) |
+    | 31/12/2026 y 01/01/2027 (cambio de año) | 1 en cada día |
+
+    En el navegador (build `/empresas`), un pago creado a las 23:42 hora Lima del 26/09 (04:42 UTC del 27/09) aparece en "mes en curso" y en Comisiones: S/ 10.00 más IGV S/ 1.80.
+  - MEDIO-1, cerrado en parte:
+    - Un motivo falso en `cancelShift` ya no cuenta; tampoco la cancelación de un turno futuro.
+    - Cuentan, con conteo verificado: `NO_SHOW` resuelta como `CANCELLED`, `ABANDONED` resuelta como `CANCELLED` y `NO_SHOW` persistida y luego arrastrada por `cancelShift`.
+    - `pendingResolution` sube y baja correctamente con `NO_SHOW` y `ABANDONED` persistidas.
+    - Con `cancelShift` y `resolve(COMPLETED)` concurrentes (200/400), el estado quedó consistente: `CANCELLED` con la señal y sin pago.
+    - Queda el caso de MEDIO-1 nuevo.
+- Hallazgos nuevos:
+  - Críticos y altos: ninguno.
+  - MEDIO-1 (la señal se sigue pudiendo ocultar cuando el `NO_SHOW` aún no se persistió).
+    - `cancelShift` (`apps/api/src/modules/business/business.service.ts:271-321`) no ejecuta `resolveShiftAssignmentsLifecycle` antes de cancelar. `listShifts` tampoco lo ejecuta, y el `NO_SHOW` es perezoso.
+    - Una asignación que ya perdió su ventana de check-in pero nadie abrió sigue `ASSIGNED`. `cancelShift` la pasa a `CANCELLED` sin la señal (`:313`), y mientras tanto `pendingResolution` tampoco la cuenta (solo lee el estado persistido, `admin.routes.ts`).
+    - Reproducido: la asignación seguía `ASSIGNED` con la ventana vencida y `pending=0`; tras `cancelShift` (200) quedó `CANCELLED`, `closedWithoutPayment=false`, y el conteo siguió en 0.
+    - Es justo la "segunda vía para ocultar" de `020`, que sigue abierta si la empresa no abre las postulaciones.
+    - Corrección: resolver el ciclo de vida dentro de la transacción de `cancelShift` antes de los `updateMany`, o marcar la señal para toda `ASSIGNED` cuyo check-in ya venció. Además, que `pendingResolution` cuente también las `ASSIGNED` con ventana vencida, o que el reporte ejecute antes la resolución del ciclo de vida. Agregar una prueba de este camino.
+  - BAJO-1 (fechas imposibles aceptadas). La expresión regular admite `2026-02-30`, que responde 200 (Date lo corre al 02/03 en silencio), y `2026-13-01`, que responde 500 por `Invalid Date` en Prisma. Validar que la fecha exista y responder 400. El panel envía fechas válidas, así que el impacto es menor.
+- Migración `20260927005242`:
+  - Sobre una base con datos (turno, asignación y 4 pagos), la asignación quedó con `closedWithoutPayment=false` y `closedWithoutPaymentAt` NULL.
+  - También se aplicó con `migrate deploy` sobre una base vacía, `chambeaya_test` y la base de la interfaz.
+  - `migrate diff` sin divergencia en la base vacía y en la de datos.
+  - Es segura para producción: `ADD COLUMN` con un valor por defecto constante, un índice y una FK nullable con `SET NULL`.
+  - Sin backfill (declarado): los cierres anteriores no cuentan.
+- Documentación: no se modificó; `docs/reference/api.md` describe la conversión Lima y la señal nueva. El caso de MEDIO-1 debe documentarse con su corrección.
+- Validaciones (reales; contenedor propio `cn-audit022-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `tsc` sin errores. `npm test`: 24 archivos, 476/476. Integración: 14 archivos, 109/109.
+  - Sondeo temporal de fechas y señal: 2/2 ejecutados; archivo eliminado.
+  - Web: `tsc` sin errores. Playwright: 147 pasadas y 1 omitida. `e2e-real`: 3/3.
+  - Navegador: ver ALTO-1. La autenticación se hizo por HTTP.
+  - Limpieza: se eliminaron el contenedor y los procesos propios. `apps/web/next-env.d.ts` quedó restaurado.
+- Riesgos residuales: el reporte no pagina; los cierres anteriores a la migración no cuentan (sin backfill); Flutter no se probó en un dispositivo; `e2e-real` no corre en CI.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 y BAJO-1. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-021 — Corrección de `CN-20260926-019` (hallazgos de `CN-20260926-020`: fechas de Lima en el reporte de comisiones, señal estructurada para `closedWithoutPayment`)
+
+- Fecha: 2026-09-27 04:31 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-020` (auditoría, `REQUIERE_CAMBIOS`: 1 alto, 1 medio, sobre `CN-20260926-019`). Sin comitear.
+- Alcance: los dos hallazgos de `CN-20260926-020`.
+  - **ALTO-1 (fechas de calendario, no UTC).** `admin.routes.ts`: `from`/`to` ahora se validan estrictamente como `"AAAA-MM-DD"` (400 `INVALID_INPUT` para cualquier otro formato, incluida una fecha-hora completa: se retiró la ambigüedad en vez de documentarla) y se convierten con dos funciones puras (`limaDayStartUtc`/`limaNextDayStartUtc`, offset explícito `-05:00`, Perú no tiene horario de verano): `from` es `gte` la medianoche de Lima de ese día; `to` es `lt` (exclusivo, nunca `lte`) la medianoche de Lima del día SIGUIENTE. La respuesta agrega `period.fromUtc`/`period.toUtcExclusive` (instantes UTC efectivos, nombrados sin ambigüedad) junto a `period.from`/`to` (las fechas de Lima recibidas). El panel (`admin/page.tsx`) calculaba "hoy" y "el mes en curso" con `Date.getFullYear()/getMonth()/getDate()` del navegador (hora local del dispositivo, no necesariamente Lima); ahora usa `limaTodayIso()` (`Intl.DateTimeFormat` con `timeZone: 'America/Lima'`, una sola conversión explícita).
+    - **Búsqueda del mismo defecto en otros lugares (pedida por la auditoría):** el único `<input type="date">` de todo `apps/web` son los dos de esta misma sección (`commissions-from`/`commissions-to`); no hay otro sitio en la API o el panel que interprete una fecha de calendario sin hora como si fuera un instante. `Shift.startsAt/endsAt` y el `dueAt` que aceptaba el CRUD retirado siempre viajan como `Date`/ISO completo (`z.coerce.date()`), nunca como `"AAAA-MM-DD"` suelto, así que no tienen este problema. Reportado, no corregido en otro lado porque no hace falta.
+  - **MEDIO-1 (señal estructurada, sin texto libre).** Migración `20260927005242_assignment_closed_without_payment_signal`: `ShiftAssignment.closedWithoutPayment` (`Boolean`, default `false`), `closedWithoutPaymentAt` (`DateTime?`) y `closedWithoutPaymentById` (`String?`, FK a `User`, `onDelete: SetNull`). Definición exacta (documentada en el código y en `docs/reference/api.md`): una asignación que llegó a `NO_SHOW`/`ABANDONED` (el trabajador se presentó o no) y que una decisión de la empresa cerró sin `Payment`. Se escribe en los dos únicos caminos que la producen:
+      - `resolveAssignment` con `outcome: 'CANCELLED'` (ya existía; ahora además de dejar el `ShiftEvent`, marca los tres campos).
+      - `cancelShift`, que ahora hace DOS `updateMany` en vez de uno: las `ASSIGNED` pasan a `CANCELLED` sin la señal (nunca llegaron a "presentarse o no"; cancelar un turno futuro no es evasión), y las `NO_SHOW` pasan a `CANCELLED` CON la señal (antes, esta era exactamente la vía de "ocultar" que señaló la auditoría: quedaban `CANCELLED` sin ningún rastro).
+      - `cancelShift` nunca puede arrastrar una asignación con `checkedInAt` no nulo (lo bloquea antes con `409 SHIFT_NOT_CANCELLABLE`), así que "cancelShift con check-in" -mencionado por la auditoría como ejemplo- no es un camino que exista hoy; documentado en el código y en `docs/reference/api.md`.
+      - El texto de `ShiftEvent.detail` volvió a su forma anterior a `CN-20260926-019` (el motivo de la empresa tal cual, sin ningún prefijo forzado): ya no se lee para nada, así que no necesita ninguna forma especial. Se retiró la constante `CLOSED_WITHOUT_PAYMENT_DETAIL_PREFIX`.
+      - Sin backfill histórico (documentado en la migración y en la referencia): no hay forma de derivarlo de las filas existentes sin depender del mismo texto libre que se está reemplazando.
+    - `GET /api/admin/commissions`: `closedWithoutPayment` ahora cuenta por `ShiftAssignment.closedWithoutPayment`/`At` (nunca `ShiftEvent.detail`), filtrado por período igual que los demás buckets. Se agrega **`pendingResolution`** (`NO_SHOW`/`ABANDONED` sin resolver todavía), **sin filtro de período**, tanto por empresa como en `totals`, y esas empresas entran en `companies` aunque no tengan ningún pago ni cierre en el rango consultado: corrige la vía de "ocultar" que señaló la auditoría (dejar una asignación sin resolver, o arrastrarla con `cancelShift`, ya no la saca del reporte).
+    - Web superadmin: la sección "Comisiones" agrega una fila de totales y un badge por empresa para `pendingResolution`.
+- Archivos:
+  - Esquema/migración: `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20260927005242_assignment_closed_without_payment_signal/migration.sql` (nueva).
+  - API: `apps/api/src/modules/admin/admin.routes.ts`, `apps/api/src/modules/business/business.service.ts`.
+  - Pruebas API: `apps/api/tests/admin.routes.test.ts` (reescrito: fechas de Lima, formato estricto, señal estructurada, `pendingResolution`), `apps/api/tests/business.service.test.ts` (el `cancelShift` con `NO_SHOW` ahora espera dos `updateMany`), `apps/api/tests/integration/payment-commission.integration.test.ts` (6 casos nuevos: `resolveAssignment` CANCELLED sobre `NO_SHOW`/`ABANDONED`, `cancelShift` arrastrando una `NO_SHOW`, `cancelShift` antes de `NO_SHOW` con un motivo que imita el prefijo retirado, `pendingResolution` sin filtro de fecha, y los límites exactos de calendario de Lima —31/08 23:59:59, 01/09 00:00:00, cambio de año— contra Postgres real).
+  - Web: `apps/web/lib/admin-api.ts`, `apps/web/app/admin/page.tsx`.
+  - Fixtures/specs Playwright: `apps/web/e2e/fixtures/admin-api.ts`, `apps/web/e2e/admin-commissions.spec.ts`, `apps/web/e2e-real/assignment-resolution.spec.ts` (la aserción del `detail` vuelve al texto plano; se agrega la verificación de `closedWithoutPayment` vía el reporte real).
+  - Docs: `docs/reference/api.md` (período de Lima, `pendingResolution`, definición estructurada de "cerrada sin pago").
+- Decisiones:
+  - Formato estricto `"AAAA-MM-DD"` para `from`/`to` (en vez de aceptar una hora completa y documentar cuál huso asumir): elimina la ambigüedad de raíz, que era justamente el origen del hallazgo.
+  - `pendingResolution` nunca se filtra por período: es un estado actual ("todavía no decidido"), no un evento con fecha propia; filtrarlo habría reintroducido una forma de ocultarlo (bastaría con consultar un período viejo).
+  - `collectedCents`/`pendingCollectionCents` no se tocaron (fuera del alcance de los dos hallazgos).
+- Validaciones (reales; contenedores Postgres 16-alpine propios y descartables, eliminados al terminar; `chambeaya-stable-postgres-data` nunca se tocó):
+  - Migración: aplicada sobre una base vacía y sobre una con datos (`ShiftAssignment` preexistente vía `demo.seed.ts`, backfill verificado: `closedWithoutPayment=false`, `closedWithoutPaymentAt`/`ById` en `NULL`). `prisma migrate diff --from-url ... --to-schema-datamodel` sin divergencia contra tres bases distintas (vacía, con datos, y la de integración).
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **476/476**.
+  - API integración (`cn-corr-pg`, puerto 5595): 14 archivos, **109/109** (incluye los 21 casos de `payment-commission.integration.test.ts`, con los 6 nuevos de esta corrección).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **147/147** (1 omitida, preexistente).
+  - Web `e2e-real` (`cn-e2ereal-fix-pg`, puerto 5594): **3/3**, incluida la corrección de la aserción de `detail` y la nueva verificación de `closedWithoutPayment` vía el reporte real.
+  - `apps/web/next-env.d.ts` revertido; ningún contenedor propio ni proceso quedó corriendo al terminar.
+- Riesgos:
+  - Flutter no se tocó en esta corrección (ningún archivo Dart cambió) y no se volvió a ejecutar su suite.
+  - `pendingResolution` no pagina; mismo riesgo ya aceptado para el resto del reporte en `CN-20260926-019`.
+  - No se probaron husos horarios distintos de Lima/UTC en el navegador real (Playwright corrió con el huso por defecto del entorno); `limaTodayIso`/`limaDayStartUtc` son funciones puras y deterministas, pero no hay una prueba que emule explícitamente `timezoneId` de otro huso en el navegador.
+- Siguiente paso: reauditoría de `auditor-opus` sobre este ID.
+
+### CN-20260926-020 — Auditoría de `CN-20260926-019` (Alcance D: registro confiable y modo manual)
+
+- Fecha: 2026-09-26 19:52 (America/Lima; la hora de `019`, "2026-09-27 00:29", está en UTC)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-019`, sobre HEAD `0cc01dd` (Alcance C comiteado), con los 28 cambios sin comitear del Alcance D.
+- Alcance: diff completo de la API, la web y Flutter; `mark-paid`; retiro del CRUD; reporte de comisiones; `closedWithoutPayment`; exposición al trabajador; recorrido en navegador; suites completas y regresión de A, B y C.
+- Archivos: revisados todos los de `019`. No modifiqué código ni documentación; la corrección de `docs/reference/api.md:49` depende de ALTO-1.
+- Hallazgos:
+  - Críticos: ninguno.
+  - ALTO-1 (el filtro de fechas del reporte pierde comisiones por facturar en los límites de día y de mes).
+    - `apps/api/src/modules/admin/admin.routes.ts:49-52` interpreta `AAAA-MM-DD` como medianoche UTC y `to` como `lte` de ese instante. El panel (`apps/web/app/admin/page.tsx`, `monthRange`) envía justo esas fechas: `to` = hoy.
+    - Primer efecto: el `to` excluye el día completo que el usuario eligió como "Hasta", y los límites quedan corridos 5 horas respecto de Lima.
+    - Reproducido contra Postgres: el reporte `from=2026-08-01&to=2026-08-31` incluyó 0 de 2 pagos del 31/08 hora Lima (10:00 y 20:00); `from=to=2026-09-01` incluyó 0 del pago de las 02:00 del 01/09 hora Lima.
+    - Segundo efecto: los pagos creados entre las 19:00 del penúltimo día y las 19:00 del último día del mes (hora Lima) no aparecen en ningún reporte mensual. Es comisión que nunca se factura.
+    - Reproducido en el navegador (build de producción `/empresas`): un pago con S/10 + S/1.80 de comisión, creado hoy a las 19:44 Lima. "Comisión por facturar (mes en curso)" y la vista Comisiones por defecto mostraron S/ 0.00; la API sin filtro sí lo incluye.
+    - Corrección:
+      - Tratar `from`/`to` como fechas de calendario de Lima: `gte from 00:00 -05:00` y `lt (to + 1 día) 00:00 -05:00`.
+      - Rechazar horas ambiguas o documentar el formato exacto.
+      - Agregar pruebas de límite (23:59 Lima del último día, 00:00 Lima del primero) y de "mes en curso".
+      - Actualizar `docs/reference/api.md:49`.
+  - MEDIO-1 (`closedWithoutPayment` depende de texto libre y se puede falsear u ocultar).
+    - Falsear: `cancelShift` (`apps/api/src/modules/business/business.service.ts:303`) escribe `ShiftEvent` `CANCELLED`/`BUSINESS` con `detail` igual al motivo libre de la empresa. Un motivo que empiece con `CLOSED_WITHOUT_PAYMENT_DETAIL_PREFIX` suma al conteo sin que se haya cerrado ninguna asignación. Reproducido: el conteo pasó de 0 a 1.
+    - Ocultar, primera vía: una asignación `NO_SHOW` o `ABANDONED` que la empresa nunca resuelve no cuenta. Reproducido: `NO_SHOW` sin pago y el conteo sin cambios. Es la forma más simple de no generar ni pago ni comisión.
+    - Ocultar, segunda vía: `cancelShift` convierte asignaciones `NO_SHOW` en `CANCELLED` (`business.service.ts:300`) sin pago y tampoco cuenta.
+    - Además depende de un texto visible que cualquiera puede cambiar.
+    - Corrección: una señal estructurada. Por ejemplo, un `ShiftEventType` o un campo dedicado (migración), o contar desde `ShiftAssignment` por estado:
+      - `NO_SHOW` y `ABANDONED` sin resolver, como "pendientes de decisión";
+      - las cerradas sin pago por `resolveAssignment` (`CANCELLED`);
+      - las `NO_SHOW` canceladas junto con el turno.
+
+      En todos los casos, sin leer `detail`, y con pruebas de los tres caminos.
+  - Bajos: ninguno bloqueante; ver Riesgos.
+- Verificado sin hallazgos:
+  - `mark-paid`: 10 llamadas concurrentes dieron un 200 y nueve 409, un solo `PAYMENT_REPORTED`, estado `PROCESSED` y montos sin cambios.
+    - Otra empresa recibe `404 PAYMENT_NOT_FOUND` y el pago sigue `PENDING`.
+    - `legacy` sin turno responde 200 y no crea evento.
+    - Un pago de pasarela (`simulated`) responde `409 PAYMENT_NOT_PAYABLE`.
+  - `POST`/`PATCH`/`DELETE /business/payments` responden 404. `resource` ya no se usa para pagos. Los únicos escritores de montos que quedan son los dos `upsert` de creación y `mark-paid`, que solo cambia estado y `processedAt`.
+  - `GET /admin/commissions`: 403 con sesión BUSINESS; 400 con fecha inválida. La suma por empresa coincide con los totales. `manual` excluye `CANCELLED`; `legacy` queda fuera; el IGV va aparte.
+  - Trabajador: la lista `FORBIDDEN_KEYS` de la prueba de fuga no cambió. `canConfirmReceipt` solo revela lo que el trabajador ya puede intentar, y `confirm` aplica la misma regla (`manual` más `PROCESSED`). "Mis pagos" en Flutter no muestra comisión, deriva los estados de `status`/`receiptConfirmed` y muestra el botón solo con `canConfirmReceipt`.
+  - Navegador: el turno completado mostró 100 / 10 / 1.80 / 111.80. "Marcar como pagado" pidió confirmación con el desglose, quedó "Procesado" y un segundo intento por HTTP devolvió 409. Con la pestaña desactualizada (pagado desde otro cliente), el panel mostró el aviso y refrescó la lista. No queda ningún botón ni texto del CRUD retirado.
+- Documentación: `docs/reference/api.md:49` documenta hoy el comportamiento UTC; debe cambiar junto con ALTO-1. `roadmap.md` es coherente. `guides/` no requiere cambios.
+- Validaciones (reales; contenedor propio `cn-audit020-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 24 archivos, 473/473. Integración sobre `chambeaya_test`: 14 archivos, 103/103.
+  - Sondeo de integración temporal (concurrencia, propiedad, retiro, `legacy`/pasarela, `closedWithoutPayment`, límites de fecha), eliminado al terminar: 3/3 ejecutados, con los resultados citados.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido: 147 pasadas y 1 omitida. `e2e-real` completa: 3/3.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`: `pub get --enforce-lockfile` terminó con código 0 y `pubspec.lock` sin cambios; `analyze` sin problemas (código 0); `test` 161/161.
+  - Regresión de A, B y C: cubierta por las suites anteriores (cambio de contraseña, marca, comisión fijada, 409, fuga).
+  - Limpieza: se eliminaron el contenedor y los procesos propios (4116, 3116, 4420/3420). `apps/web/next-env.d.ts` quedó restaurado.
+- Riesgos residuales:
+  - El reporte no pagina y lee todas las empresas y todos los eventos de cierre del período. Es aceptable en el piloto.
+  - "Por facturar" incluye pagos `manual` todavía `PENDING` (decisión documentada).
+  - Flutter no se probó en un dispositivo real.
+  - `e2e-real` no corre en CI.
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1 y MEDIO-1. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-019 — Alcance D: registro confiable y modo manual (retiro del CRUD manual de pagos, `mark-paid`, reporte de comisiones y "Mis pagos")
+
+- Fecha: 2026-09-27 00:29 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-011`/`013`/`015`/`017` (implementación y correcciones del Alcance C) y `CN-20260926-018` (auditoría que cerró el Alcance C). Sobre HEAD `0cc01dd`, árbol limpio antes de empezar. Sigue `dynamic-prancing-bear.md`; implementa solo el Alcance D.
+- Alcance:
+  - **API — retiro del CRUD manual de pagos.** `POST`/`PATCH`/`DELETE /api/business/payments[/:id]` ya no existen (nunca se registran en el router; Express responde su 404 genérico). `GET` (lista y detalle) se conserva. `DatabaseBusinessService.createPayment`/`updatePayment`/`deletePayment` se eliminaron junto con `PaymentInput` y los esquemas Zod de pago.
+  - **API — `POST /business/payments/:id/mark-paid`.** Único escritor que le queda a la empresa: transiciona `PENDING` → `PROCESSED` (con `processedAt`) para `provider` `'manual'` o `'legacy'` de esa empresa; registra `ShiftEvent` `PAYMENT_REPORTED` si el pago tiene `shiftId`. Atómico (`updateMany` condicionado a `status`/`provider` dentro de una transacción, sin `Serializable`: el guardián es la propia fila). `404 PAYMENT_NOT_FOUND` (no existe o es de otra empresa) y `409 PAYMENT_NOT_PAYABLE` (estado o `provider` no válidos, o carrera perdida) vía la nueva `PaymentNotPayableError`.
+  - **API — cierres sin pago identificables sin migración.** `resolveAssignment` con `outcome: 'CANCELLED'` ahora deja siempre el `ShiftEvent.detail` con el prefijo fijo `CLOSED_WITHOUT_PAYMENT_DETAIL_PREFIX` ("Cierre manual sin pago de una asignación…"), con el motivo propio de la empresa a continuación si lo hay. Es la única transición que nunca genera `Payment` ni escribe `ShiftCancellation` (a diferencia de `cancelShift` y de la cancelación del trabajador), así que ese prefijo basta para contar `closedWithoutPayment` sin un campo de esquema nuevo.
+  - **API — `GET /api/admin/commissions?from&to`** (guard `ADMIN`, fechas ISO opcionales, filtra por `Payment.createdAt` —nunca `processedAt`, justificado en el código y en `docs/reference/api.md`—). Devuelve `{period, totals, companies[]}` con `toInvoiceCents`/`toInvoiceTaxCents` (todo pago `manual` no `CANCELLED`), `collectedCents`/`pendingCollectionCents` (pasarela `PROCESSED`/`PENDING+SCHEDULED`, siempre 0 hoy) y `closedWithoutPayment` por empresa.
+  - **API — trabajador.** `GET /workers/wallet` expone `canConfirmReceipt` (derivado: `provider==='manual' && status==='PROCESSED' && !workerConfirmedAt`), nunca `provider`. `POST /workers/payments/:id/confirm` ahora exige además `provider==='manual'`.
+  - **Web empresa.** Se retiraron "Registrar pago", editar y eliminar (`crud-modal.tsx` ya no tiene `kind: 'payment'`; `businessApi.payments` solo expone `list`/`get`/`markPaid`). "Marcar como pagado" pide confirmación con el desglose completo (trabajador/comisión/IGV/total) y la aclaración de que el pago se hizo fuera de la app; maneja el 409 refrescando la lista. Los `PROCESSED` muestran la fecha en que se marcaron pagados.
+  - **Web superadmin.** Nueva sección "Comisiones" (filtro de período, desglose por empresa incluido `closedWithoutPayment`) y una métrica en el Resumen ("Comisión por facturar", mes en curso, IGV aparte).
+  - **Flutter.** Pantalla "Mis pagos" de solo lectura (`worker_payments_page.dart`), accesible desde Perfil vía `WorkerShell.repository`. Reusa `walletMovements()`/`PaymentRecord`/`confirmPayment()`. `PaymentRecord` gana `canConfirmReceipt`/`date`; estados "Pendiente de pago"/"Pagado"/"Recepción confirmada" derivados de `status`/`receiptConfirmed`, nunca de `provider`. Modo demo coherente (`DemoWorkerMarketplaceRepository` con historial mutable de ejemplo).
+  - **Docs.** `docs/product/roadmap.md`: tabla de correspondencia del enum aspiracional (`DRAFT/APPROVED/DUE/PAID/DISPUTED/VOID`) contra el real (`PENDING/SCHEDULED/PROCESSED/CANCELLED`) y estado real de la Fase 5 y la Fase 6. `docs/reference/api.md`: endpoints retirados/nuevos, reglas de `mark-paid` y de `GET /admin/commissions`, DTO del wallet, y la sección de asignaciones cerradas sin pago.
+- Archivos:
+  - API: `apps/api/src/modules/business/business.service.ts`, `business.routes.ts`; `apps/api/src/modules/admin/admin.routes.ts`; `apps/api/src/modules/marketplace/marketplace.service.ts`.
+  - Pruebas API: `apps/api/tests/business.service.test.ts`, `business.routes.test.ts`, `admin.routes.test.ts` (los tres reescritos donde tocaba el CRUD retirado, con casos nuevos de `mark-paid`/`commissions`), `apps/api/tests/integration/payment-commission.integration.test.ts` (ampliado con 8 casos nuevos del Alcance D).
+  - Web: `apps/web/lib/business-api.ts`, `lib/admin-api.ts`, `app/page.tsx`, `app/admin/page.tsx`, `components/crud-modal.tsx`.
+  - Fixtures/specs Playwright: `apps/web/e2e/fixtures/business-api.ts`, `fixtures/admin-api.ts`, `e2e/business-payments.spec.ts` (nuevo), `e2e/admin-commissions.spec.ts` (nuevo), `e2e-real/assignment-resolution.spec.ts` (ampliado: `mark-paid` + verificación de la comisión vía `GET /admin/commissions`).
+  - Flutter: `apps/mobile_flutter/lib/features/marketplace/marketplace_data.dart`, `marketplace_repository.dart`, `http_worker_marketplace_repository.dart`, `worker_shell.dart`, `worker_payments_page.dart` (nuevo); `apps/mobile_flutter/lib/features/profile/profile_home_page.dart`; `apps/mobile_flutter/test/worker_payments_page_test.dart` (nuevo).
+  - Docs: `docs/product/roadmap.md`, `docs/reference/api.md`.
+- Decisiones:
+  - `mark-paid` acepta `legacy` además de `manual` (pedido explícito del encargo): en producción puede quedar un pago `legacy` todavía `PENDING` (backfill o del CRUD ya retirado) y marcarlo no altera ningún monto, porque su comisión e IGV ya están en 0 desde que se creó.
+  - `closedWithoutPayment` se calcula con un prefijo fijo de texto en `ShiftEvent.detail` en vez de una columna nueva: evita una migración en este alcance y es exacto, porque `resolveAssignment(CANCELLED)` es la única transición que no deja ningún `ShiftCancellation` (a diferencia de `cancelShift` y de la cancelación del trabajador). Riesgo aceptado: un motivo escrito a mano por la empresa que empiece textualmente con ese prefijo se contaría igual (colisión de texto libre, improbable).
+  - `GET /admin/commissions` filtra por `createdAt`: filtrar por `processedAt` excluiría del período justo los pagos manuales todavía sin marcar, que son los que más importa facturar en modo manual.
+  - `collectedCents`/`pendingCollectionCents` suman comisión + IGV juntos (sin desglosar), a diferencia de `toInvoiceCents`/`toInvoiceTaxCents`: la separación solo hace falta para facturar la comisión manual; un cobro de pasarela ya llega completo.
+  - No se tocó `apps/api/src/demo/demo.seed.ts`: no llama al CRUD retirado y ya trae los campos de comisión desde el Alcance C; no había nada que actualizar.
+  - No se tocó `DemoMarketplaceService` (servicio en memoria alterno de `marketplace.service.ts`) ni se le agregó `canConfirmReceipt`: decisión ya documentada en `CN-20260926-011`, reconfirmada aquí (su `wallet()`/`confirmPayment()` son valores fijos de demostración sin campos de comisión).
+  - `docs/product/memberships.md` no se tocó: revisado, sigue coherente con el modo manual (ya decía "la empresa sigue pagando directo a su equipo").
+- Validaciones (todas ejecutadas de verdad; contenedores Postgres 16-alpine propios y descartables, eliminados al terminar; `chambeaya-stable-postgres-data` nunca se tocó):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **473/473**.
+  - API integración (`cn-scoped-pg`, puerto 5599, `migrate deploy` + `CHAMBEAYA_INTEGRATION_TESTS=true npx vitest run --config vitest.integration.config.mts tests/integration`): 14 archivos, **103/103** (incluye los 8 casos nuevos de `mark-paid`/carrera concurrente/`closedWithoutPayment`/reporte de comisiones en `payment-commission.integration.test.ts`, ahora 15 tests en ese archivo).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo (`npx playwright test`, ambos proyectos): **147/147** (1 omitida, preexistente), incluidos `business-payments.spec.ts` y `admin-commissions.spec.ts` (nuevos).
+  - Web `e2e-real` (`cn-e2ereal-pg`, puerto 5598, `CHAMBEAYA_E2E_REAL_TESTS=true npm run test:web:admin-real`): **3/3**, incluida la extensión de `assignment-resolution.spec.ts` (marcar como pagado contra la API real y verificar la comisión resultante vía `GET /admin/commissions`, más el 409 de un segundo intento).
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0` (nunca el Flutter local 3.47.1): `flutter pub get --enforce-lockfile` (verificado sin cambios en `pubspec.lock`), `flutter analyze` → **sin problemas**, `flutter test` → **161/161** (155 preexistentes + 6 nuevos de `worker_payments_page_test.dart`).
+  - `npm run demo:smoke` (`cn-smoke-pg`, puerto 5597, seed con `CHAMBEAYA_ALLOW_DEMO_SEED=true` + API local `NODE_ENV=development`): **"Smoke local de demostración completado para empresa, trabajador y superadmin."**
+  - `apps/web/next-env.d.ts` revertido tras cada `tsc`/Playwright; ningún contenedor propio ni proceso (`tsx`/Next/Postgres) quedó corriendo al terminar.
+- Riesgos:
+  - No se probó la app Flutter en un dispositivo ni emulador real, solo `flutter test` (widgets) y `flutter analyze`.
+  - `GET /admin/commissions` no pagina `companies`: con muchas empresas activas en el período, la respuesta crece sin límite. Aceptable al volumen actual del piloto; revisar si el negocio crece.
+  - El filtro `from`/`to` interpreta una fecha `"AAAA-MM-DD"` como medianoche UTC, no medianoche de Lima (UTC-5): documentado en `docs/reference/api.md`, pero un uso descuidado del filtro por el superadmin podría excluir pagos de las primeras horas de un día en hora local.
+  - No hay exportación a archivo (CSV/Excel) del reporte de comisiones, solo el JSON vía el panel; ya estaba fuera de alcance explícito del encargo.
+  - Colisión de texto libre en `closedWithoutPayment` (ver Decisiones): riesgo bajo, no bloqueante.
+- Siguiente paso: auditoría de `auditor-opus` sobre este ID.
+
+### CN-20260926-018 — Reauditoría de `CN-20260926-017` y cierre del Alcance C (`011`, `013`, `015`, `017`)
+
+- Fecha: 2026-09-26 14:22 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-011` (implementación), `CN-20260926-013`, `CN-20260926-015` y `CN-20260926-017` (correcciones), y las auditorías `012`, `014` y `016`. Sin comitear, sobre HEAD `b543e33`. **Cierra el Alcance C** (comisión congelada y ajustes globales) del plan `dynamic-prancing-bear.md`.
+- Alcance: verificación del MEDIO-1 de `016` (suite `e2e-real` rota), búsqueda independiente en todo el repositorio de otros caminos afectados y regresión de tipos.
+- Archivos:
+  - Diff desde `016`: por fecha de modificación y `git diff`, se limita a `apps/web/e2e-real/fixtures/business-real.ts` (lee `GET /api/business/payment-settings` con el token de la empresa y envía los `expected*` vigentes, sin valores fijos), `apps/web/e2e-real/assignment-resolution.spec.ts:64` (texto vigente) y `docs/PROGRESO.md`. No cambió ningún otro archivo de código, así que las suites validadas en `016` siguen vigentes y no se repitieron.
+  - Modificado por el auditor (solo documentación):
+    - `docs/reference/api.md`: el "Ejemplo de creación" de turno no traía `expectedCommissionBps`/`expectedTaxBps`, y copiado tal cual respondía 400. Ahora los incluye, con la nota de tomarlos de `payment-settings`.
+    - `apps/web/e2e/README.md:81`: describía el texto retirado "Chambeaya no cobra, guarda ni transfiere dinero".
+    - `docs/product/project-master-plan.md:650`: el mismo texto, ahora marcado como histórico junto al vigente.
+- Hallazgos: ninguno crítico, alto, medio ni bajo abierto en código.
+  - MEDIO-1 de `016`, cerrado.
+  - Búsqueda propia en todo el repositorio (excluidos `node_modules`, `.next` y los reportes), de creación de turnos por HTTP y del texto retirado:
+    - Los únicos `POST /api/business/shifts` están en el panel (envía `expected*`), el fixture de `e2e-real` (corregido), las pruebas de integración y unitarias (ya corregidas en `015`) y los fixtures simulados de `apps/web/e2e`, que no validan el cuerpo.
+    - `demo.seed.ts` crea turnos con Prisma y `demo.smoke.ts` solo los lee.
+    - Las guías (`docs/guides/*`) no tienen ejemplos `curl` de creación de turnos.
+    - El texto retirado solo quedaba en los dos documentos corregidos arriba y en entradas históricas de este registro, que no se editan.
+- Validaciones (reales; contenedor propio `cn-audit018-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - `e2e-real` completa (`playwright.admin-real.config.ts`, API y panel reales contra `chambeaya_e2e_test`): **3/3**. El pago generado por "Confirmar que sí trabajó" quedó `12000 + 1200 + 216 = 13416`, `provider: 'manual'`, con la comisión al 10% y el IGV al 18%.
+  - `npx tsc --noEmit`: API sin errores; web sin errores.
+  - No se repitieron `npm test`, la integración ni Playwright rápido, porque el diff desde `016` no toca código de producción ni esas suites. En `016` pasaron 463/463, 95/95 y 131 más 1 omitida.
+  - Limpieza: se eliminaron el contenedor y los procesos de la suite (4415 y 3415). `apps/web/next-env.d.ts` quedó restaurado.
+- Resumen del Alcance C validado a lo largo de `012`, `014`, `016` y `018`:
+  - Redondeo entero "mitad hacia arriba", idéntico en la API y en el panel (8,8 millones de casos).
+  - % e IGV fijados en el turno al publicar (NOT NULL; turnos anteriores en 0%) y copiados al pago.
+  - El trabajador no recibe comisión, IGV ni total en ninguna respuesta, incluido el SSE.
+  - Auditoría del ajuste coherente con PATCH concurrentes.
+  - `409 COMMISSION_CHANGED` con `expected*` obligatorios.
+  - Tope de S/ 100 000.
+  - Migración segura sobre una base con datos, sin divergencia.
+  - Recorridos reales en el panel `/empresas`.
+- Riesgos residuales (no bloquean):
+  - El tope de 0-50% de `commissionBps` sigue sin confirmar por el usuario.
+  - El CRUD manual de pagos (`createPayment`/`updatePayment`) sigue vivo y permite editar `amountCents` de un pago `manual`. El Alcance D debe retirarlo antes de cualquier reporte de comisiones.
+  - La vista previa mantiene estado propio (`previewPay`/`previewRequired`). Toda escritura programática futura sobre esos campos debe llamar también a sus setters.
+  - No hay suite unitaria en el front.
+  - `DemoMarketplaceService` no modela la comisión.
+  - `e2e-real` no corre en CI, por eso la rotura de `015` pasó inadvertida hasta `016`.
+  - `apps/web/.next` quedó compilado sin `basePath` por la suite real (artefacto ignorado que se regenera).
+- Siguiente paso: commit local del Alcance C según el plan (sin push sin confirmación del usuario); luego, Alcance D con `implementador-sonnet`.
+
+### CN-20260926-017 — Corrección de `CN-20260926-015` (hallazgo nuevo de `CN-20260926-016`: la suite `e2e-real` quedó rota)
+
+- Fecha: 2026-09-26 19:19 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-016` (reauditoría: MEDIO-1, BAJO-1 y BAJO-2 de `014` quedan cerrados; queda un MEDIO nuevo). Sin comitear. No toqué `docs/reference/api.md` (ya lo actualizó el auditor en `016`).
+- Alcance: `apps/web/e2e-real` (`npm run test:web:admin-real`) dejó de pasar por dos efectos de `015`, ninguno detectado antes porque esta suite es opcional y no corre en CI.
+  - `apps/web/e2e-real/fixtures/business-real.ts`: el turno se creaba sin `expectedCommissionBps`/`expectedTaxBps` (ahora obligatorios) y la API respondía `400 INVALID_INPUT`. Corregido leyendo `GET /api/business/payment-settings` con el token de la empresa sembrada justo antes de crear el turno, y enviando esos dos valores (nunca fijos, para no quedar frágil si el ajuste global cambia).
+  - `apps/web/e2e-real/assignment-resolution.spec.ts:64`: buscaba el texto retirado en `013` ("Chambeaya no cobra, guarda ni transfiere dinero"). Actualizado al texto vigente ("El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte").
+  - Revisé el resto de `apps/web/e2e-real` (`admin-worker-delete.spec.ts`, `fixtures/admin-real.ts`) y los demás caminos señalados (`apps/api/scripts/e2e-serve.ts`, `apps/api/src/demo/demo.smoke.ts`, `scripts/demo-smoke.ps1`, y una búsqueda del repositorio completo por otro `POST /business/shifts` o el texto retirado): ninguno crea turnos con `payCents` por HTTP fuera de lo ya corregido, ni conserva el texto anterior. `demo.smoke.ts` solo lee turnos ya sembrados por Prisma (`demo.seed.ts`, que ya trae `commissionBps`/`taxBps` desde `011`); `e2e-serve.ts` no crea ningún `Shift`.
+- Archivos: `apps/web/e2e-real/fixtures/business-real.ts`, `apps/web/e2e-real/assignment-resolution.spec.ts`.
+- Decisiones: ninguna nueva; se siguió el mismo criterio de `015` (leer el ajuste vigente, nunca fijarlo) aplicado ahora al fixture real.
+- Validaciones (reales; contenedor Postgres 16-alpine descartable propio `cn-scopec4-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - `npm run test:web:admin-real` contra `chambeaya_e2e_test` (base desechable propia, con `CHAMBEAYA_E2E_DATABASE_URL`): **3/3** (`admin-worker-delete` y las dos de `assignment-resolution`), build de producción + API real + Postgres real, sin ningún `page.route`.
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **463/463** (sin cambios: esta corrección no toca código de la API). `npm run test:integration` contra otra base `_test` propia: 14 archivos, **95/95**.
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **131/131** (1 omitida, preexistente).
+  - `npm run demo:smoke`: ejecutado de verdad contra una tercera base propia (`chambeaya_smoke_test`), migrada, sembrada con `npm run demo:seed` (`NODE_ENV=development`, `CHAMBEAYA_ALLOW_DEMO_SEED=true`) y una API real en el puerto 4499 (`API_PORT=4499`, `CHAMBEAYA_DEMO_SMOKE=true`, `DEMO_SMOKE_API_BASE_URL` apuntando ahí): **completado sin errores** ("Smoke local de demostración completado para empresa, trabajador y superadmin").
+  - Flutter: no aplica; ningún cambio de este cierre toca un contrato que la app consuma.
+  - Limpieza: los tres contenedores/bases descartables propios y el proceso de la API de `demo:smoke` (puerto 4499) se detuvieron y eliminaron; `apps/web/next-env.d.ts` revertido; no se tocó `docs/reference/api.md` ni `docs/product/memberships.md`.
+- Riesgos: los ya documentados en `011`/`013`/`015` siguen vigentes sin cambios (tope 0-50% de `commissionBps` sin confirmar por el usuario, ausencia de suite unitaria en `apps/web`, `DemoMarketplaceService` sin modelar comisión). La suite `e2e-real` sigue fuera de CI, como ya señaló `016`; queda expuesta a que un cambio futuro similar la rompa sin que ninguna otra suite lo detecte.
+- Siguiente paso: reauditoría de `auditor-opus` sobre `CN-20260926-017` para cerrar el Alcance C.
+
+### CN-20260926-016 — Reauditoría de `CN-20260926-015` (Alcance C: `011`, `013`, `015`)
+
+- Fecha: 2026-09-26 14:05 (America/Lima; las horas de `013` y `015` están en UTC)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-011` (implementación), `CN-20260926-013` y `CN-20260926-015` (correcciones), y `CN-20260926-014` (reauditoría previa). Sin comitear, sobre HEAD `b543e33`. El Alcance C **no** queda cerrado.
+- Alcance: verificación de MEDIO-1, BAJO-1 y BAJO-2 de `014`. Incluye todos los caminos que pueden desincronizar la vista previa, en el build de producción, la obligatoriedad de `expected*` con su efecto sobre otros clientes y suites, el fallo aislado de `payment-settings`, la integridad de las pruebas modificadas y la regresión completa.
+- Archivos: revisados los de `015`, además de `apps/web/e2e-real/**` y `apps/api/src/demo/demo.smoke.ts`. Modificado por el auditor: `docs/reference/api.md` (`expected*` obligatorios con 400, y el comportamiento del panel cuando `payment-settings` falla).
+- Hallazgos de `014`:
+  - MEDIO-1 (vista previa con "Rellenar ejemplo"), cerrado. El diseño se acepta; justificación abajo.
+    - Recorrí en el build de producción (`/empresas`) todos los caminos que cambian los campos. En todos, la vista previa coincidió con el valor del campo y con el cálculo de la API:
+      - teclado real: escribir S/123.45 y dos flechas arriba en cupos;
+      - inserción por el editor (`execCommand('insertText')`, el mismo camino que pegar): S/87.65, con S/8.77 de comisión, S/1.58 de IGV y S/98.00;
+      - asignación nativa más `input` (el camino del autocompletado): 4 cupos;
+      - `stepDown` más `input` (el camino del spinner);
+      - "Rellenar ejemplo" al crear: S/134.16 y S/268.32 por 2 cupos;
+      - "Rellenar ejemplo" al editar, confirmado y cancelado;
+      - cerrar y reabrir el modal, que vuelve a S/100 y 1 cupo;
+      - editar dos turnos distintos seguidos: S/250.50 × 3 da S/280.06 y S/840.18; luego S/100 × 2.
+    - El pegado con el portapapeles real no se pudo probar (el arnés niega el permiso de escritura). Se cubrió con `insertText`, que genera el mismo evento `input` nativo.
+    - Un texto inválido (`12e`) deja la vista previa en S/0.00. El campo queda `badInput`, el formulario no valida y no se puede publicar, igual que con una lectura directa del formulario.
+    - Por qué se acepta: los campos no controlados reciben todo cambio del usuario por `onChange`. El modal se monta de nuevo en cada apertura (`publishOpen && <PublishModal>`), así que el estado nace de `shift` igual que los `defaultValue`. La única escritura programática del repositorio (`fillExample`) ya actualiza el estado.
+    - Riesgo residual de mantenimiento: cualquier escritura programática nueva sobre `pay` o `required` debe llamar también a los setters. Derivar la vista previa del formulario lo eliminaría; queda como recomendación, no como hallazgo.
+    - El turno publicado tras "Rellenar ejemplo" quedó en la base con `12000 × 2` al `1000/1800`, igual que la vista previa.
+  - BAJO-1, cerrado en la API y en el panel.
+    - `POST /business/shifts` sin `expected*` responde `400 INVALID_INPUT`.
+    - Con `PlatformSettings` renombrada en la base desechable, `payment-settings` respondió 500 y el resto del panel cargó (turnos visibles). El modal mostró el error sin ningún "%", "Revisar y publicar" quedó deshabilitado y Enter no publicó. Al restaurar la tabla, "Reintentar" devolvió la vista previa al 10% y habilitó publicar.
+    - El seed usa Prisma directo y no se ve afectado. Pero rompe la suite real, ver MEDIO-1 nuevo.
+  - BAJO-2, cerrado: los tipos son `number`.
+  - Pruebas modificadas: `git diff` muestra solo agregados en `tests/integration/*`. Las dos líneas eliminadas en las pruebas unitarias se reemplazaron por aserciones más estrictas (desglose completo de comisión y fixture con bps). Ninguna aserción se debilitó.
+- Hallazgos nuevos:
+  - Críticos y altos: ninguno.
+  - MEDIO-1: la suite real `apps/web/e2e-real` (`playwright.admin-real.config.ts`) quedó rota. Es la que el plan exige en el Alcance D y en la verificación final. La ejecuté contra un Postgres desechable propio:
+    1. `apps/web/e2e-real/fixtures/business-real.ts:68-78` crea el turno sin `expected*`. Resultado: `400 INVALID_INPUT` y 2 de 3 pruebas fallan ("Crear el turno falló"). Viene de `015`.
+    2. Con `expected*` agregados de forma temporal (revertido con `git checkout`), sigue fallando `apps/web/e2e-real/assignment-resolution.spec.ts:64`: busca el texto retirado en `013`, "Chambeaya no cobra, guarda ni transfiere dinero". Resultado: 1 fallida y 2 pasadas.
+    - Ninguno de los dos registros lo detectó porque la suite es opcional y no corre en CI.
+    - Corrección: agregar los bps vigentes al fixture (leídos de `GET /api/business/payment-settings`, no fijos), actualizar la aserción de texto y ejecutar la suite real.
+- Documentación: `docs/reference/api.md` quedó actualizado. `guides/` y `product/` no requieren cambios en este cierre.
+- Validaciones (reales; contenedor propio `cn-audit016-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 24 archivos, 463/463. `npm run test:integration` sobre `chambeaya_test`: 14 archivos, 95/95.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido: 131 pasadas y 1 omitida (preexistente).
+  - Suite real `e2e-real` sobre `chambeaya_e2e_test`: 1 pasada y 2 fallidas; con el arreglo temporal del fixture, 2 pasadas y 1 fallida (ver MEDIO-1).
+  - Navegador: build de producción `/empresas` contra la API real con Postgres desechable. La autenticación se hizo por HTTP con el token en `localStorage`; no se escribieron contraseñas en formularios. Los recorridos son los listados arriba.
+  - Flutter: no aplica, porque `015` no toca contratos que consuma la app.
+  - Limpieza: se eliminaron el contenedor y los procesos propios (4114, 3114 y 4413/3413 de la suite real). `apps/web/next-env.d.ts` quedó restaurado. `e2e-real/fixtures/business-real.ts` quedó revertido y sin cambios en `git status`.
+- Riesgos residuales: el tope de 0-50% sigue sin confirmar por el usuario; no hay suite unitaria en el front; `DemoMarketplaceService` no modela la comisión; la suite `e2e-real` no está en CI (este hallazgo lo muestra).
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (fixture y aserción de `e2e-real`) y ejecuta esa suite. Después, reauditoría de `auditor-opus` para cerrar el Alcance C.
+
+### CN-20260926-015 — Corrección de `CN-20260926-013` (hallazgos nuevos de `CN-20260926-014`: vista previa desincronizada con "Rellenar ejemplo", `expected*` obligatorios y tipos alineados a NOT NULL)
+
+- Fecha: 2026-09-26 18:50 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-014` (reauditoría, `REQUIERE_CAMBIOS`: los 8 hallazgos de `012` quedaron cerrados; 1 medio y 2 bajos nuevos, del código de `011`, no detectados antes). Sin comitear. No toqué `docs/reference/api.md` (ya lo actualizó el auditor en `014`).
+- Alcance:
+  - **MEDIO-1 (la vista previa no reflejaba "Rellenar ejemplo").** `fillExample` (`apps/web/app/page.tsx`) asignaba `control.value` y disparaba `input`/`change` con `dispatchEvent`, pero ese patrón no siempre llega al `onChange` de React (reproducido por el auditor: el formulario quedaba en S/120 y 2 cupos, la vista previa seguía en S/100 y 1 cupo, y el turno real salía a S/282.48). Corregido llamando `setPreviewPay`/`setPreviewRequired` directamente dentro de `fillExample`, con los mismos valores que se acaban de escribir en el formulario — ya no depende de que el evento disparado llegue a React. Nueva prueba de Playwright que recorre "Rellenar ejemplo" y dos cambios manuales más, comprobando en cada paso que la vista previa coincide con lo que la API cobraría.
+  - **BAJO-1 (`expected*` opcionales; valores fijos si `payment-settings` no carga).**
+    - API: `expectedCommissionBps`/`expectedTaxBps` pasaron de `.optional()` a obligatorios en el esquema de creación (`business.routes.ts`); faltar cualquiera de los dos responde `400 INVALID_INPUT` (Zod) antes de llegar al servicio.
+    - Web: quitados los valores fijos (`?? 1000`/`?? 1800`). `paymentSettings` se carga aparte de `loadData` (nueva función `loadPaymentSettings`, para que un fallo no bloquee el resto del panel) y expone un estado de error propio. Si se está creando un turno nuevo y ese ajuste no cargó, `PublishModal` no calcula ninguna vista previa: muestra el error y un botón "Reintentar" que vuelve a pedirlo, y el botón "Revisar y publicar" queda deshabilitado (con una defensa adicional en `publishShift`, por si algo lo dejara habilitado). Editar un turno existente no depende de esto: usa los valores ya congelados del propio turno.
+    - Actualicé los 10 archivos de `tests/integration` que crean un turno por HTTP (ninguno pasaba estos campos) y las dos entradas `valid` de `business.routes.test.ts` que les faltaban, para que sigan creando turnos igual que antes. El helper `createShift` de `payment-commission.integration.test.ts` ahora lee el ajuste global vigente de la base antes de crear (no un valor fijo), para no quedar frágil si otro test de ese archivo deja el ajuste en un valor distinto.
+  - **BAJO-2 (tipos y comentarios desactualizados).** `ShiftRecord.commissionBps`/`taxBps` (`apps/web/lib/business-api.ts`) y el tipo `Shift` de `apps/web/app/page.tsx` pasaron de `number | null` a `number`, con el comentario alineado a que `Shift.commissionBps`/`taxBps` son `NOT NULL` desde la migración (los turnos anteriores a ella quedaron en 0, no en `null`).
+- Archivos:
+  - `apps/api/src/modules/business/business.routes.ts` (esquema de creación con `expected*` obligatorios).
+  - `apps/api/tests/business.routes.test.ts` (dos payloads `valid` completados) y los 10 archivos de `apps/api/tests/integration/*.integration.test.ts` que crean turnos por HTTP.
+  - `apps/web/app/page.tsx` (`fillExample`, `loadPaymentSettings` separado de `loadData`, `paymentSettingsError`, `PublishModal` sin valores fijos y con el estado de error/reintento, tipo `Shift`), `apps/web/lib/business-api.ts` (tipo `ShiftRecord`), `apps/web/app/globals.css` (`.commission-preview-error`).
+  - `apps/web/e2e/shift-publish-preview.spec.ts` (dos pruebas nuevas: "Rellenar ejemplo" con cambios manuales, y el fallo de carga de `payment-settings` con su reintento).
+- Decisiones:
+  - No reescribí `fillExample` con un mecanismo genérico de sincronización (p. ej. `onInput` delegado en el `<form>`): habría cargado con la misma incertidumbre sobre si React captura el evento disparado a mano. Llamar a los `setState` directamente en el mismo punto donde se escribe el valor es determinista y no depende de ningún comportamiento de eventos del DOM.
+  - `loadPaymentSettings` quedó separado de `loadData` (antes formaba parte de un único `Promise.all`): así un fallo de esa lectura no le impide cargar company/turnos/trabajadores/pagos al resto del panel, y el mismo `loadPaymentSettings` sirve como función de reintento desde el modal sin recargar todo lo demás.
+  - Elegí no tocar el tipo `ShiftInput` de `business.service.ts` (los mantuve `expectedCommissionBps?`/`expectedTaxBps?` opcionales a nivel de TypeScript): la exigencia real vive en el esquema Zod de la ruta (el guardián real de la API), igual que otros campos "opcionales en el tipo, obligatorios en el esquema" ya existentes en este archivo; cambiarlo habría exigido tocar además las firmas de las pruebas unitarias que llaman al servicio directamente con `as never`.
+- Validaciones (reales; contenedor Postgres 16-alpine descartable propio `cn-scopec3-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **463/463** (sin cambios de conteo: los hallazgos de esta corrección no agregaron pruebas unitarias nuevas en la API, solo ajustaron payloads existentes).
+  - `npm run test:integration` contra la base `_test`: 14 archivos, **95/95**, confirmando que los 10 archivos ajustados con `expectedCommissionBps`/`expectedTaxBps` siguen creando turnos con éxito tras volverse obligatorios. `prisma migrate diff --from-url ... --to-schema-datamodel` → sin divergencia (el esquema no cambió en esta corrección).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **131/131** (1 omitida, preexistente), incluidas las dos pruebas nuevas de `shift-publish-preview.spec.ts` (la de "Rellenar ejemplo" verifica S/134.16 por persona / S/268.32 por 2 cupos tras rellenar, y S/335.40 / S/1.341,60 tras el cambio manual siguiente; la del fallo de carga verifica que no aparece ningún "Comisión Chambeaya" inventado, que "Revisar y publicar" queda deshabilitado, y que "Reintentar" recupera el formulario).
+  - Flutter: no se ejecutó; ningún cambio de este cierre toca un contrato que la app consuma (todo el alcance es del panel web y de la validación de creación de turnos, que Flutter no usa).
+  - Limpieza: contenedor y base descartables propios eliminados; `apps/web/next-env.d.ts` revertido; no se tocó `docs/reference/api.md` ni `docs/product/memberships.md`.
+- Riesgos:
+  - No agregué una prueba unitaria de Vitest para `fillExample` (sigue sin existir una suite unitaria del front): la cobertura de este hallazgo es exclusivamente Playwright, igual que el resto de la vista previa.
+  - Los riesgos ya documentados en `011`/`013` (tope 0-50% de `commissionBps`, ausencia de vitest en `apps/web`, `DemoMarketplaceService` sin modelar comisión) siguen vigentes sin cambios.
+- Siguiente paso: reauditoría de `auditor-opus` sobre `CN-20260926-015`.
+
+### CN-20260926-014 — Reauditoría de `CN-20260926-013` (corrección de `CN-20260926-011`, Alcance C)
+
+- Fecha: 2026-09-26 10:15 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-011` (implementación), `CN-20260926-012` (auditoría) y `CN-20260926-013` (corrección). Sin comitear, sobre HEAD `b543e33`.
+- Alcance: verificación independiente de los 8 hallazgos de `012`, la decisión del usuario de fijar en 0% los turnos anteriores a la comisión, el nuevo `409 COMMISSION_CHANGED`, la regresión completa y un nuevo recorrido en navegador.
+- Archivos: revisados todos los de `011` y `013`. Modificado por el auditor: `docs/reference/api.md`, que aún describía el respaldo NULL→global eliminado. Ahora documenta el backfill 0/0 con NOT NULL, `expectedCommissionBps`/`expectedTaxBps` y el `409`, el tope de S/ 100 000, el bloqueo `FOR UPDATE` con `SetNull` en la auditoría y la respuesta sin comisión de `POST /api/workers/payments/:id/confirm`.
+- Hallazgos de `012`:
+  - ALTO-1, cerrado. Repetí la reproducción con un escaneo propio de todas las respuestas del trabajador contra Postgres: postulación, postulaciones, confirmar, activo, check-in, check-out, lista y detalle de conversación, envío de mensaje, confirmación de pago (dos veces), wallet, disponibilidad, invitaciones, perfil, sesión, cancelación, feed y la primera instantánea del SSE `/api/shifts/events`. Resultado: 0 fugas. `confirmPayment` ahora responde solo `id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId`. Revisé los demás caminos del trabajador: `talent_invitation` usa `select` explícito y `createAssignmentReview` devuelve solo la reseña. El escaneo de `013` es recursivo, aunque no incluye SSE ni los POST de escritura; los cubrí aquí.
+  - MEDIO-1, cerrado. Tres rondas de 10 `PATCH` concurrentes: todas respondieron 200 y la cadena `oldValue→newValue` quedó completa en las tres, sin duplicados.
+  - MEDIO-2, cerrado según la decisión del usuario (0%).
+    - Migración sobre base vacía y sobre base con datos (2 turnos NULL, 4 pagos, 1 ADMIN): los turnos quedaron 0/0, las columnas son `NOT NULL`, `changedById` es nullable y el backfill de pagos no cambió respecto a `012`. `migrate diff` no muestra diferencias en ninguna de las dos.
+    - Solo hay tres caminos que crean turnos, y todos fijan bps explícitos: `createShift` y los dos `upsert` de `demo.seed.ts`. `DemoMarketplaceService` no usa Prisma. Rescate y la reapertura no crean turnos. Las pruebas y los fixtures crean turnos por HTTP.
+    - El texto "quedaron fijados" ahora es cierto.
+    - En producción, `Dockerfile.production` ejecuta `migrate deploy` antes de arrancar el contenedor nuevo, así que ninguna API anterior inserta turnos durante la migración. El `SET NOT NULL` recorre `Shift` una sola vez; es aceptable al volumen actual.
+  - BAJO-1, cerrado. `MAX_MONEY_AMOUNT_CENTS` coincide en la API (`payCents` y `amountCents`) y en la web (`max="100000"` en los dos formularios). Un `payCents` de 10.000.001 responde 400; un pago de 2e9 responde 400 (antes 500); el máximo da `totalCents` 11.180.000. En el peor caso (50% más 18% de IGV) el total es 1,59×10^7, muy por debajo de `Int`.
+  - BAJO-2 y BAJO-3, cerrados; comprobados en el navegador y en la base.
+  - BAJO-4, aceptable. Envié 48 publicaciones con `expected*` en paralelo a un `PATCH` de 10% a 15%: se crearon 45 turnos, todos con 1000/1800; 3 recibieron `409 COMMISSION_CHANGED`; 0 turnos quedaron con bps distintos de los validados.
+    - El supuesto TOCTOU no puede fijar un % distinto del validado: el valor comparado y el que se escribe son la misma lectura (`business.service.ts:199-213`). Lo único que queda es que un turno se crea con el % anterior milisegundos después de un `PATCH`, lo que equivale a publicarlo justo antes. No hace falta `FOR SHARE`.
+    - Que los `expected*` sean opcionales se considera en BAJO-1 nuevo.
+- Hallazgos nuevos (son del código de `011`; no los detecté en `012`):
+  - Críticos y altos: ninguno.
+  - MEDIO-1 (la vista previa no refleja "Rellenar ejemplo", un error de dinero visible), `apps/web/app/page.tsx:4257-4302`.
+    - `fillExample` asigna `control.value` directamente y dispara `input`/`change`, pero React no ejecuta `onChange` con ese patrón. `previewPay` y `previewRequired` no se actualizan.
+    - Reproducido en el build de producción: el formulario quedó con S/120 y 2 cupos, pero la vista previa mostraba "S/ 100.00 … = S/ 117.70 por persona. Total por 1 cupo: S/ 117.70". Se publicó un turno de S/120 × 2 al 15%, que cuesta S/ 282.48.
+    - Corrección: llamar a `setPreviewPay`/`setPreviewRequired` en `fillExample`, o calcular la vista previa desde el formulario con `onInput`. Agregar un caso en `shift-publish-preview.spec.ts` que pulse "Rellenar ejemplo".
+  - BAJO-1: `expected*` son opcionales y el panel solo los envía si `paymentSettings` cargó. Si no cargó, la vista previa usa 1000/1800 fijos (`page.tsx:4252-4253`) y la publicación no se valida. El panel es el único cliente BUSINESS, así que conviene exigirlos al crear y quitar esos valores fijos. No bloquea.
+  - BAJO-2: tipos y comentarios desactualizados. `ShiftRecord.commissionBps: number | null`, con un comentario que dice "la API usa el ajuste global" (`apps/web/lib/business-api.ts:64-71`), y `page.tsx:116`. Deberían ser `number`.
+- Documentación: `docs/reference/api.md` quedó actualizado por el auditor. `docs/product/memberships.md` sigue vigente desde `012`. `guides/` no requiere cambios.
+- Validaciones (reales; contenedor propio `cn-audit014-pg` con Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 24 archivos, 463/463. `npm run test:integration` sobre `chambeaya_test`: 14 archivos, 95/95.
+  - Sondeo de integración temporal (fuga, concurrencia, TOCTOU y límites) en `tests/integration`, eliminado al terminar: 3/3.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido: 127 pasadas y 1 omitida (preexistente).
+  - Navegador: build de producción con `NEXT_BASE_PATH=/empresas` y `next start`, contra la API real con Postgres desechable. La autenticación se hizo por HTTP con el token en `localStorage`; no se escribieron contraseñas en formularios.
+    - La empresa abrió "Publicar turno" al 10%.
+    - El superadmin cambió a 15% por HTTP.
+    - "Revisar y publicar" devolvió 409: el modal siguió abierto, la vista previa pasó al 15% y no se creó el turno.
+    - Al publicar de nuevo, el turno quedó con 1500/1800.
+    - El turno previo conservó 1000.
+    - Pagos mostró S/100.00, S/10.00, S/1.80 y S/111.80 con el texto nuevo.
+    - Configuración cambió de 15 a 12 y la auditoría registró `1000->1500 | 1500->1200`.
+  - Flutter: no se ejecutó, y no hacía falta. En `http_worker_marketplace_repository.dart`, `confirmPayment` es `Future<void>` y descarta el cuerpo, y `_conversationFromJson` solo lee `shift['id']`/`shift['title']`, que siguen presentes. Los turnos del trabajador salen de `toMarketplaceShift`, que no cambió.
+  - Limpieza: se eliminaron el contenedor y los procesos propios (4112 y 3112). `apps/web/next-env.d.ts` quedó restaurado. `apps/web/.next` quedó compilado con `basePath=/empresas` (artefacto ignorado que se regenera).
+- Riesgos residuales: el tope de 0-50% sigue sin confirmar por el usuario; no hay prueba unitaria del redondeo del front (validado exhaustivamente en `012`); `DemoMarketplaceService` no modela la comisión.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (vista previa con "Rellenar ejemplo") y, de preferencia, BAJO-1 y BAJO-2. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-013 — Corrección de `CN-20260926-011` (hallazgos de `CN-20260926-012`: fuga de comisión al trabajador, concurrencia del ajuste, turnos preexistentes en 0%, límites de monto y carrera de la vista previa)
+
+- Fecha: 2026-09-26 14:57 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-012` (auditoría, `REQUIERE_CAMBIOS`: 1 alto, 2 medios, 5 bajos sobre `CN-20260926-011`). Sin comitear. No toqué `docs/product/memberships.md` (ya lo actualizó el auditor en `012`).
+- Alcance: los 8 hallazgos, uno por uno.
+  - **ALTO-1 (el trabajador recibía comisión/IGV).** `marketplace.service.ts#confirmPayment` ya no devuelve la fila `Payment` cruda: nuevo DTO `toWorkerPayment` (lista blanca: `id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId`), igual criterio que `wallet()`. `getWorkerConversation` cambió `shift: true` por el mismo `select` explícito que ya usaba `listWorkerConversations` (`id, title, startsAt, endsAt`). Revisé sistemáticamente cada ruta de `marketplace.routes.ts` (`/shifts`, `/shifts/events`, `/shifts/active`, `/workers/applications`, `/workers/conversations[/:id]`, `applyToShift`, `confirmAssignment`, `checkIn`, `checkOut`, `cancelAssignment`, `availability`, `wallet`): todas las demás ya construían su respuesta con `toMarketplaceShift`/`toWorkerApplication` (listas blancas explícitas) o campos sueltos, sin `include`/spread de `Shift`/`Payment` crudos. Flutter no depende de nada retirado: `confirmPayment` es `Future<void>` (descarta el cuerpo) y `_conversationFromJson` solo lee `shift['id']`/`shift['title']`, ambos siguen presentes.
+  - **MEDIO-1 (auditoría de `PATCH /admin/settings` no fiable en concurrencia).** Reemplacé el `upsert` con `update: {}` por, dentro de la misma transacción: `INSERT ... ON CONFLICT DO NOTHING` (idempotente, nunca aborta) seguido de `SELECT "commissionBps" FROM "PlatformSettings" WHERE id='global' FOR UPDATE`, que bloquea la fila hasta el commit. El `oldValue` de la auditoría se lee de ese `SELECT`, no de un `upsert` sin bloqueo.
+  - **MEDIO-2 (turnos preexistentes con `commissionBps` NULL usaban el ajuste global vigente al pagar).** Decisión del usuario: 0% para esos turnos, no el ajuste global. Como la migración `20260926180000_payment_commission` no está comiteada ni aplicada en ningún servidor, la corregí en el mismo archivo (no creé una nueva): `Shift.commissionBps`/`taxBps` quedan nullable únicamente mientras el backfill los llena, después `UPDATE "Shift" SET commissionBps=0, taxBps=0 WHERE commissionBps IS NULL` y `ALTER COLUMN ... SET NOT NULL` en ambas. `schema.prisma` ya no las declara `Int?`. Eliminé por completo el respaldo a `getPlatformSettings` en `resolveAssignment` y `checkOut` (ya no existe ningún caso NULL); ambos usan directamente `assignment.shift.commissionBps/taxBps`. El texto del panel "la comisión y el IGV quedaron fijados al publicarlo" (`page.tsx`) ya era cierto para todo turno con esta corrección; no requería cambio de texto, solo de comportamiento.
+  - **BAJO-1 (límite de `amountCents`/`payCents`).** Nueva constante `MAX_MONEY_AMOUNT_CENTS = 100_000_00` (S/100.000) en `business.routes.ts`, aplicada a `payCents` (ya la tenía) y `amountCents` (antes admitía hasta 10¹⁰, por encima del `Int` de Postgres). Con el `bps` máximo (5000/5000, aunque `taxBps` no sea editable hoy) el total nunca supera `amount * 1.75`, muy por debajo de `Int32Max`. Excede con `400 INVALID_INPUT` (Zod), nunca `500`. Mismo tope en el input "Pago por persona y turno" (`page.tsx`) y "Monto" del CRUD manual (`crud-modal.tsx`), `max="100000"` (soles).
+  - **BAJO-2 (texto "Chambeaya no cobra...").** Reemplazado por "El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte" en las dos ubicaciones señaladas (`page.tsx`, resumen de Pagos y diálogo de confirmación de una asignación NO_SHOW/ABANDONED). Revisé el resto de `page.tsx` y Flutter: "Chambeaya no custodia fondos" (línea de Pagos) y "no cobramos por publicar/postular/rechazar/cancelar" (Membresía) son afirmaciones distintas (custodia y tarifas por acción, no la comisión) y siguen siendo ciertas; no las toqué.
+  - **BAJO-3 (`PlatformSettingChange.changedById` con `onDelete: Cascade`).** Cambiado a nullable con `onDelete: SetNull`, en el schema y en la misma migración (FK y columna).
+  - **BAJO-4 (carrera entre la vista previa y la publicación).** `ShiftInput` acepta `expectedCommissionBps`/`expectedTaxBps` opcionales (solo en el schema de creación, `business.routes.ts`; `shiftUpdateSchema` no los admite). `createShift` compara contra el ajuste vigente y lanza `CommissionChangedError` (nueva clase) si no coinciden; la ruta responde `409 {error:'COMMISSION_CHANGED', commissionBps, taxBps}` sin crear el turno. El panel (`page.tsx`) envía esos dos campos solo al crear (no al editar), y ante el 409 refresca `paymentSettings` (que `PublishModal` ya recalcula en cada render) y avisa a la empresa que confirme de nuevo, sin cerrar el modal ni publicar.
+  - **BAJO-5 (editar `amountCents` de un pago manual).** Sin cambio de alcance: ya queda cubierto por el tope de BAJO-1 (no puede desbordar ni ser negativo); `updatePayment` sigue recalculando `totalCents` con la comisión ya fijada del pago, como en `011`.
+- Archivos:
+  - `apps/api/src/modules/marketplace/marketplace.service.ts` (DTO `toWorkerPayment`, `select` de `getWorkerConversation`, quitado el respaldo de `checkOut`).
+  - `apps/api/src/modules/business/business.service.ts` (`CommissionChangedError`, `expectedCommissionBps/expectedTaxBps`, quitado el respaldo de `resolveAssignment`).
+  - `apps/api/src/modules/business/business.routes.ts` (`MAX_MONEY_AMOUNT_CENTS`, esquema de creación con los `expected*`, manejo de `CommissionChangedError`).
+  - `apps/api/src/modules/admin/admin.routes.ts` (`SELECT ... FOR UPDATE` en el `PATCH`).
+  - `apps/api/prisma/schema.prisma` y `apps/api/prisma/migrations/20260926180000_payment_commission/migration.sql` (editada in situ, no es una migración nueva).
+  - Pruebas nuevas: `apps/api/tests/marketplace.no-commission-leak.test.ts`; casos nuevos en `apps/api/tests/business.service.test.ts`, `business.routes.test.ts`, `admin.routes.test.ts`, `marketplace.service.test.ts`; `apps/api/tests/integration/payment-commission.integration.test.ts` (concurrencia de 8 `PATCH` y escaneo de fuga de punta a punta contra Postgres real).
+  - `apps/web/app/page.tsx`, `apps/web/components/crud-modal.tsx`, `apps/web/e2e/assignment-resolution.spec.ts` (texto actualizado), `apps/web/e2e/shift-publish-preview.spec.ts` (prueba nueva del 409).
+- Decisiones:
+  - El respaldo a `getPlatformSettings` fuera de la transacción (documentado en `011`) queda sin uso en `resolveAssignment`/`checkOut` tras MEDIO-2, pero la función sigue viva: la usan `createShift` y `GET /business/payment-settings`.
+  - `expectedCommissionBps`/`expectedTaxBps` son opcionales a propósito: una llamada a la API que no los envíe (otro cliente, o una prueba) sigue publicando sin exigir nada nuevo; solo se valida si el panel los manda.
+  - No amplié BAJO-5 más allá de lo pedido (el Alcance D retira ese CRUD).
+- Validaciones (reales; contenedor Postgres 16-alpine descartable propio `cn-scopec2-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 24 archivos, **463/463**.
+  - Migración corregida: aplicada sobre base vacía y sobre base con datos preexistentes (turno con `commissionBps` NULL antes del backfill, dos pagos, un usuario ADMIN). Verificado con `psql`: el turno quedó en `commissionBps=0, taxBps=0`; los pagos con comisión 0 y `totalCents=amountCents`; y al borrar el usuario ADMIN que había hecho un cambio registrado en `PlatformSettingChange`, la fila de auditoría sobrevivió con `changedById` en `NULL` (antes se habría borrado en cascada). `prisma migrate diff --from-url ... --to-schema-datamodel` → sin divergencia en ambas bases.
+  - `npm run test:integration` contra la base `_test`: 14 archivos, **95/95**, incluidas las dos pruebas nuevas: 8 `PATCH /admin/settings` concurrentes con cadena `oldValue→newValue` coherente y sin duplicados, y el escaneo de fuga de punta a punta (turno → postulación → conversación → check-in/out → pago `PROCESSED` → `confirmPayment` del trabajador → wallet → disponibilidad), sin ninguna clave prohibida en ninguna respuesta.
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo: **127/127** (1 omitida, preexistente), incluida la prueba nueva del 409 `COMMISSION_CHANGED` (el modal refresca la vista previa de 10% a 15% y publica solo al confirmar de nuevo) y el ajuste de una aserción de texto obsoleta en `assignment-resolution.spec.ts`.
+  - Flutter: no se ejecutó. Los únicos cambios que tocan contratos consumidos por la app (`confirmPayment`, la conversación del trabajador) solo QUITAN campos que Flutter nunca leía (`Future<void>` y `shift['id']`/`shift['title']`, verificado en el código de `http_worker_marketplace_repository.dart`); no hay renombres ni campos nuevos que Flutter necesite.
+  - Limpieza: contenedor y bases descartables propios eliminados; `apps/web/next-env.d.ts` revertido (Next lo regenera con cada `tsc`/`playwright test`); no se tocó `docs/product/memberships.md`.
+- Riesgos:
+  - `expectedCommissionBps`/`expectedTaxBps` no eliminan la ventana por completo (TOCTOU entre la comparación y el `create`): es una mejora de UX ("no publiques a ciegas"), no una garantía transaccional; el caso real (dos admins cambiando el % en el mismo segundo en que una empresa publica) es raro y de bajo impacto.
+  - No hay prueba de integración que fuerce una condición de carrera real de 409 contra Postgres (solo unit test + Playwright con mocks); el riesgo es bajo porque la lectura y la comparación son secuenciales y deterministas en el código.
+  - El resto de las decisiones y riesgos de `011` (tope 0-50% de `commissionBps`, ausencia de vitest en `apps/web`, `DemoMarketplaceService` sin modelar comisión) siguen vigentes sin cambios.
+- Siguiente paso: reauditoría de `auditor-opus` sobre `CN-20260926-013`.
+
+### CN-20260926-012 — Auditoría de `CN-20260926-011` (Alcance C: comisión congelada y ajustes globales)
+
+- Fecha: 2026-09-26 08:54 (America/Lima; la hora de `CN-20260926-011`, "13:32", corresponde a UTC)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-011`, sobre HEAD `b543e33` con los 26 cambios sin comitear del Alcance C del plan `dynamic-prancing-bear.md`.
+- Alcance: revisión del diff completo (API, migración, web, pruebas y docs), cálculo y redondeo, puntos de fijado, backfill, ajustes del superadmin, exposición al trabajador, recorrido real en navegador y regresión de los Alcances A y B.
+- Archivos: revisados todos los de `CN-20260926-011`. Modificado por el auditor: `docs/product/memberships.md` (punto 4: la comisión existe, es aparte de la cuota y la paga la empresa).
+- Hallazgos:
+  - Críticos: ninguno.
+  - ALTO-1 (el trabajador recibe comisión e IGV). Hay dos rutas del trabajador que devuelven filas Prisma crudas:
+    - `apps/api/src/modules/marketplace/marketplace.service.ts:837` y `:851` (`confirmPayment`, `POST /api/workers/payments/:id/confirm`) responden el `Payment` completo. Reproducido contra Postgres: la respuesta al trabajador trae `"commissionBps":1000,"commissionCents":1000,"taxBps":1800,"taxCents":180,"totalCents":11180,"provider":"manual"`.
+    - `marketplace.service.ts:372` (`getWorkerConversation`, `GET /api/workers/conversations/:id`) incluye `shift: true`, y la respuesta trae `"commissionBps":1000,"taxBps":1800`.
+    - Esto contradice la regla del usuario ("el trabajador nunca ve la comisión") y la afirmación del registro de `011`, que solo comprobó la wallet. La app Flutter no muestra esos campos, pero llegan al dispositivo.
+    - Corrección: proyectar con `select` o mapear las dos respuestas, y agregar una prueba de integración que falle si aparece `commission`, `tax` o `totalCents` en cualquier respuesta `/api/workers/*` o `/api/shifts*`.
+    - Verificado sin fuga: wallet, `workers/applications`, `workers/conversations` (lista), feed `/api/shifts` y SSE (usan `toMarketplaceShift`), `shifts/active` y la respuesta del check-out.
+  - MEDIO-1 (auditoría de `PATCH /api/admin/settings` no fiable en concurrencia), `apps/api/src/modules/admin/admin.routes.ts:333-356`.
+    - El `upsert` con `update: {}` no bloquea la fila en READ COMMITTED, así que dos PATCH simultáneos leen el mismo `oldValue`.
+    - Reproducido con 8 PATCH concurrentes (1100..1800): todos respondieron 200 y el valor final fue 1400, pero la cadena de auditoría quedó `1000->1100 | 1000->1200 | 1000->1600 | 1000->1800 | 1000->1500 | 1000->1700 | 1000->1300 | 1200->1400`, con 6 `oldValue` duplicados. La bitácora de un ajuste de dinero no permite reconstruir la historia.
+    - Corrección: leer con `SELECT ... FOR UPDATE` (`$queryRaw`) dentro de la transacción, o usar una transacción serializable con reintento, más una prueba de integración de concurrencia.
+  - MEDIO-2 (los turnos anteriores a la migración no quedan fijados). `Shift.commissionBps/taxBps` quedan en NULL y los dos puntos de pago (`business.service.ts:424`, `marketplace.service.ts:664`) usan el ajuste global vigente al momento del pago.
+    - En la base de producción existente, cualquier turno abierto publicado antes del despliegue cambia de comisión si el superadmin cambia el %. Distintas asignaciones del mismo turno pueden salir con porcentajes distintos. Es el único camino en que "cambiar el ajuste no altera turnos publicados" no se cumple.
+    - En el panel, al editar un turno así (`apps/web/app/page.tsx:4223-4224` y el texto `:4503`), la vista previa usa el global y dice "quedaron fijados al publicarlo", lo que es falso para ese turno.
+    - Corrección: fijar los turnos existentes en la propia migración (`UPDATE "Shift" SET "commissionBps"=…,"taxBps"=… WHERE "commissionBps" IS NULL`). Decisión del usuario: con 1000/1800 (el global inicial) o con 0/0 (esos turnos se publicaron sin comisión). Así se eliminan el respaldo y los `!` de `fallbackSettings!`.
+  - BAJO-1: `updatePayment` (`business.service.ts:722-746`) deja que la empresa cambie `amountCents` de un pago `manual` nacido de una asignación y recalcula la comisión. Reproducido: `amountCents: 1` dejó comisión 0 y total 1. `commission*`, `totalCents` y `provider` sí se ignoran si se envían directamente (Zod los descarta; verificado). Se acepta solo porque el Alcance D retira este CRUD; D debe eliminarlo antes de cualquier reporte de comisiones.
+  - BAJO-2: `paymentFields.amountCents` admite hasta `100_000_000_00` (`business.routes.ts:98`), por encima del máximo de `Int` (2.147.483.647). Ya existía, pero ahora también `totalCents` puede desbordarse: un `PATCH` con `amountCents: 2000000000` responde `500 INTERNAL_ERROR` en vez de 400. Bajar el tope a un valor cuyo total quepa en `Int`.
+  - BAJO-3: el panel sigue diciendo "Chambeaya no cobra, guarda ni transfiere dinero" (`apps/web/app/page.tsx:2665` y `:3744`), junto a las columnas nuevas de Comisión, IGV y Total. El plan lo corrige en D; si D se retrasa, cambiarlo antes.
+  - BAJO-4: `PlatformSettingChange.changedById` tiene `onDelete: Cascade` (`schema.prisma`), así que borrar un usuario ADMIN desde la base borra su historial "inmutable". Hoy ninguna ruta borra administradores; preferir `Restrict` o `SetNull`.
+  - BAJO-5: `createShift` fija el ajuste leído en el instante de publicar, pero la empresa vio la vista previa con un valor anterior. Si el superadmin cambia el % entre ambos momentos, el turno queda con un % que la empresa no vio, y no se le avisa. Opcional: enviar los bps esperados y responder 409 si no coinciden.
+- Documentación: `docs/reference/api.md` describe correctamente los endpoints, el redondeo y el fijado, salvo que el caso NULL depende de MEDIO-2. `docs/product/memberships.md` se actualizó (antes decía "la cuota reemplaza la comisión"). Quedan para el Alcance D, según el plan, `roadmap.md` y los textos de `client-demo.md`. `guides/` no requiere cambios en este alcance.
+- Validaciones (ejecutadas; contenedor propio `cn-audit011-pg`, Postgres 16-alpine, eliminado al terminar; no se tocó `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` sin errores. `npm test`: 23 archivos, 454/454.
+  - `npm run test:integration` sobre `chambeaya_test`: 14 archivos, 93/93. El primer intento falló por conectividad (`P1001` en `localhost`); con `127.0.0.1` pasó completo.
+  - Redondeo: script que compara `buildPaymentAmounts` con una copia literal de `previewCommission` de `page.tsx` y con una referencia en BigInt. Hubo 8.801.012 combinaciones (montos 0, 1, 4, 5, 9999, 12345, 10^7, 2^31-1 y 200.000 aleatorios; bps 0, 1, 1800, 5000 y otros; IGV 0, 1, 1800 y 5000), con 0 diferencias. La conversión soles→céntimos del formulario (`Math.round(Number(pay)*100)`) es exacta para todos los montos de 2 decimales hasta 10^7. Con `amountCents` 2^31-1, `totalCents` es 2.400.886.718 y desborda `Int` (ver BAJO-2).
+  - Migración: se aplicó sobre una base vacía (`prisma migrate deploy`). También sobre una base migrada hasta `20260918120000` con datos: 2 turnos, 1 asignación y 4 pagos (`PROCESSED` con `assignmentId`, `SCHEDULED` sin asignación, `PROCESSED` sin asignación y `PENDING` con `amountCents` 2^31-1).
+  - Backfill verificado con `psql`: `totalCents=amountCents` y comisión e IGV en 0. `provider` quedó `manual` para el pago con asignación y `legacy` para los 3 sin ella, `SCHEDULED` pasó a `PENDING`, los turnos quedaron con NULL y la fila `global` con 1000/1800.
+  - `prisma migrate diff --exit-code` sin diferencias en ambas bases.
+  - Las columnas nuevas con `DEFAULT` constante no reescriben la tabla en PG ≥ 11. El único costo es un `UPDATE "Payment"` completo, aceptable al volumen actual.
+  - Sondeos HTTP e integración (archivo temporal, eliminado):
+    - Se reprodujeron ALTO-1, MEDIO-1, BAJO-1 y BAJO-2.
+    - `POST /business/shifts` con `commissionBps` responde 400 (esquema estricto).
+    - `PATCH` de un turno con `commissionBps/taxBps` los ignora y conserva 1500/1800 aunque cambie `payCents`.
+    - `PATCH /admin/settings`: 403 con sesión BUSINESS; 400 con `"1000"` y con `10.5`; `taxBps` enviado se ignora.
+    - `payment-settings` responde 401 sin sesión.
+  - Navegador: build de producción con `NEXT_BASE_PATH=/empresas` y `next start`, contra la API real (`tsx`) con Postgres desechable. La autenticación se hizo por HTTP con un token inyectado en `localStorage`; no se escribieron contraseñas en formularios.
+    - El superadmin cambió el % de 10 a 15 desde la sección Configuración; se muestran "Último cambio por…" y el aviso de que solo aplica a turnos nuevos.
+    - "Publicar turno" mostró S/100 + 15% S/15.00 + IGV S/2.70 = S/117.70. Con S/123.45 y 3 cupos mostró S/18.52 + S/3.33 = S/145.30 por persona y S/435.90 en total, coincidente con la API.
+    - Editar el turno publicado antes al 10% mostró S/111.80 por persona y S/223.60 por 2 cupos.
+    - Pagos, tras un check-out real: S/100.00, S/10.00, S/1.80 y S/111.80.
+    - Un turno nuevo por API quedó con 1500/1800.
+  - Web: `npx tsc --noEmit` sin errores. Playwright rápido (`npx playwright test`): 125 pasadas y 1 omitida (preexistente), incluidos los dos specs nuevos y las suites de los Alcances A y B (cambio de contraseña, "Salir").
+  - Flutter: no se ejecutó, y no hacía falta. El contrato que consume la app solo agrega campos: nada se renombra ni se elimina, `confirmPayment` es `Future<void>` y el mapeo de conversación ignora claves extra. El backfill `SCHEDULED`→`PENDING` ya se mostraba como pendiente en la wallet.
+  - Limpieza: se eliminaron el contenedor y los procesos propios (API en 4111, web en 3111). `apps/web/next-env.d.ts` quedó restaurado, sin cambios en `git status`. `apps/web/.next` quedó compilado con `basePath=/empresas` (artefacto ignorado; Playwright y `npm run dev` lo regeneran).
+- Riesgos residuales: el valor del tope de 0-50% sigue sin confirmar por el usuario. No hay prueba unitaria del redondeo del front, aunque el script de esta auditoría lo cubre de forma exhaustiva y conviene convertirlo en prueba. `DemoMarketplaceService` no modela la comisión (aceptable: es un servicio en memoria de demostración).
+- Siguiente paso: `implementador-sonnet` corrige ALTO-1, MEDIO-1 y MEDIO-2 (esta última con la decisión 1000/1800 o 0/0 del usuario) y, de preferencia, BAJO-2 y BAJO-4. Después, reauditoría de `auditor-opus`.
+
+### CN-20260926-011 — Alcance C: comisión de Chambeaya congelada al publicar y ajustes globales
+
+- Fecha: 2026-09-26 13:32 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: N/A. Sobre HEAD `b543e33`, árbol limpio antes de empezar. Sigue el plan `dynamic-prancing-bear.md` (Alcances A y B ya cerrados); implementa solo el Alcance C. El flujo de pago no cambia (sin proveedor, checkout ni botones nuevos de pagar).
+- Alcance:
+  - Migración `20260926180000_payment_commission`: `Payment.commissionBps/commissionCents/taxBps/taxCents/totalCents/provider/needsReview`; `Shift.commissionBps/taxBps` (nullable); tabla `PlatformSettings` (fila única `id:'global'`, `commissionBps:1000`, `taxBps:1800`) y `PlatformSettingChange` (auditoría). Backfill: `totalCents = amountCents`, `provider='legacy'` en pagos sin `assignmentId`, `SCHEDULED`→`PENDING`; turnos existentes con `commissionBps/taxBps` NULL.
+  - Helper `apps/api/src/modules/payments/payment-amounts.ts`: `buildPaymentAmounts` (redondeo entero "mitad hacia arriba": `floor((n*bps+5000)/10000)`) y `getPlatformSettings` (defensivo si falta la fila global).
+  - `business.service.ts#createShift` fija `commissionBps/taxBps` del ajuste global vigente en el turno nuevo (no hay ciclo de borrador: todo turno nace `PUBLISHED`). `resolveAssignment` (outcome `COMPLETED`) y `marketplace.service.ts#checkOut` usan `Shift.commissionBps/taxBps`, con fallback a `getPlatformSettings` leído **fuera** de la transacción reintentable solo si el turno es anterior a la migración. `createPayment`/`updatePayment` (CRUD manual, hasta el Alcance D) quedan `provider:'legacy'`, comisión 0, `totalCents` coherente si cambia `amountCents`.
+  - `GET/PATCH /api/admin/settings` (guard ADMIN, Zod `commissionBps` 0-5000, auditoría en `PlatformSettingChange` en cada cambio) y `GET /api/business/payment-settings` (`{commissionBps,taxBps,currency:'PEN',mode:'manual'}`). `GET /api/workers/wallet` sigue sin exponer comisión/IGV (ya no los mapeaba).
+  - `demo.seed.ts`: turnos y pago histórico con `commissionBps:1000, taxBps:1800` y `provider:'manual'`.
+  - Web: `PublishModal` (`apps/web/app/page.tsx`) con vista previa en vivo por persona y total por cupos (función de redondeo replicada localmente con comentario explícito, ver Decisiones); usa `payment-settings` al crear y los bps congelados del turno al editar. Tabla de Pagos con columnas trabajador/comisión/IGV/total. Panel de superadmin: sección "Configuración" (ver/editar `commissionBps`, IGV solo lectura, quién y cuándo cambió, aviso de que solo aplica a turnos nuevos).
+  - `docs/reference/api.md`: nueva sección de ajuste global bajo Superadmin, `payment-settings` bajo Empresa, nota de campos congelados bajo Turnos, y reescritura de "Pagos y movimientos" con la regla de redondeo y el ejemplo S/100+S/10+S/1.80=S/111.80.
+- Archivos:
+  - `apps/api/prisma/schema.prisma`, `apps/api/prisma/migrations/20260926180000_payment_commission/migration.sql`.
+  - `apps/api/src/modules/payments/payment-amounts.ts` (nuevo).
+  - `apps/api/src/modules/business/business.service.ts`, `business.routes.ts`; `apps/api/src/modules/marketplace/marketplace.service.ts`; `apps/api/src/modules/admin/admin.routes.ts`; `apps/api/src/demo/demo.seed.ts`.
+  - Pruebas: `apps/api/tests/payment-amounts.test.ts` (nuevo), `apps/api/tests/business.service.test.ts`, `business.routes.test.ts`, `admin.routes.test.ts`, `marketplace.service.test.ts` (todos con casos nuevos), `apps/api/tests/integration/payment-commission.integration.test.ts` (nuevo).
+  - `apps/web/app/page.tsx`, `apps/web/app/admin/page.tsx`, `apps/web/app/globals.css`, `apps/web/lib/business-api.ts`, `apps/web/lib/admin-api.ts`.
+  - `apps/web/e2e/fixtures/business-api.ts`, `admin-api.ts`, `shift-assignments.ts`; `apps/web/e2e/admin-settings.spec.ts` y `shift-publish-preview.spec.ts` (nuevos).
+  - `docs/reference/api.md`.
+- Decisiones:
+  - **`packages/shared` no está cableado** a ningún `package.json` (ni `apps/api` ni `apps/web` lo referencian ni tiene build propio): compartir `buildPaymentAmounts` real habría exigido resolver ese cableado en este mismo cierre, fuera del alcance pedido. Se replicó la fórmula en `page.tsx` (`previewCommission`, con comentario explícito citando la fuente de verdad) y se cubrió solo con Playwright (vista previa renderizada), no con una suite unitaria nueva del front (no existe ninguna hoy; añadirla habría sido ampliar el alcance).
+  - **Dónde se lee `PlatformSettings` de respaldo:** siempre fuera de la transacción reintentable de `resolveAssignment`/`checkOut` (usando la lectura previa del turno, ya hecha antes de abrir la transacción), nunca dentro. `Shift.commissionBps` nunca cambia tras crearse, así que esa lectura previa sigue siendo válida en cualquier reintento; leer el ajuste global dentro de la transacción sí sumaría superficie de conflicto de serialización con un `PATCH /api/admin/settings` concurrente.
+  - Turnos sin ciclo de "borrador" (`createShift` siempre publica): no hay un punto anterior a la publicación donde fijar la comisión valga más que al crear.
+  - `updatePayment` recalcula `totalCents` con la comisión/IGV **ya fijados** del pago (no reinterpreta un cambio de `amountCents` como si fuera un turno nuevo).
+  - Límite defensivo `commissionBps` 0-5000 (0%-50%) en el PATCH de admin, arbitrario pero conservador; no estaba especificado un tope exacto.
+- Validaciones (todas ejecutadas de verdad, sobre Postgres 16-alpine descartable en Docker, contenedor propio `cn-scopec-pg`, eliminado al cerrar; nunca sobre `chambeaya-stable-postgres-data`):
+  - API: `npx tsc --noEmit` → 0 errores. `npm test` → 23 archivos, **454/454**.
+  - Migración: aplicada sobre base vacía (dos veces, en bases distintas) y sobre base con datos preexistentes (turno y dos pagos, uno con `assignmentId` y otro sin él) con backfill verificado a mano vía `psql`. `prisma migrate diff --from-url ... --to-schema-datamodel` → sin divergencia.
+  - `npm run test:integration` contra la base `_test`: 14 archivos, **93/93**, incluido `payment-commission.integration.test.ts` (comisión congelada tras un `PATCH` de admin, mismo resultado vía `resolveAssignment`, turno legacy con `commissionBps` NULL usando el ajuste global, wallet del trabajador sin comisión, y auditoría del `PATCH /admin/settings`).
+  - Web: `npx tsc --noEmit` → 0 errores. Playwright rápido completo (`npx playwright test`): **125/125** (1 omitida, preexistente), incluidos los dos specs nuevos.
+- Riesgos:
+  - Ningún test de integración verifica que `commissionBps` quede realmente `NOT NULL`/`NULL` en la fila real tras el backfill sobre una base con volumen grande (solo se probó con un par de filas); riesgo bajo, la migración es un `UPDATE` simple sin condición compleja.
+  - El límite 0-50% del `commissionBps` del admin es una elección conservadora propia, no una cifra pedida por el usuario; revisar si el negocio necesita otro tope.
+  - `apps/web` no tiene suite unitaria (vitest) wireada pese a la dependencia en `package.json`; la réplica de `buildPaymentAmounts` en el panel solo la cubre Playwright, no una prueba unitaria aislada del redondeo.
+  - No se tocó `DemoMarketplaceService` (servicio en memoria de `marketplace.service.ts`): no modela `Payment` con estos campos (su `wallet()`/`confirmPayment()` son valores fijos de demostración), así que no necesitaba los campos nuevos; queda documentada la decisión de no tocarlo.
+- Siguiente paso: auditoría de `auditor-opus` sobre este ID; después, Alcance D (registro confiable y modo manual) según el plan.
+
+### CN-20260926-010 — Reauditoría de `CN-20260926-009` y cierre del Alcance B (`CN-20260926-007`, `009`)
+
+- Fecha: 2026-09-26 10:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-007` (implementación) y `CN-20260926-009` (corrección de los hallazgos de `CN-20260926-008`). Sin comitear, sobre HEAD `1065156`. Con esta entrada se **cierra el Alcance B**.
+- Alcance: reauditoría de MEDIO-1, MEDIO-2 y BAJO-1 a BAJO-5 de `008`, con regresión completa. Decisión sobre la ventana del login concurrente con la contraseña anterior.
+- Archivos:
+  - Revisados: los de `009`.
+  - Modificado por la auditoría (solo documentación): `docs/reference/api.md`. Añadí `409 PASSWORD_CHANGED_CONCURRENTLY`, `500 INTERNAL_ERROR` y el riesgo residual con su solución acotada.
+- Decisiones (hallazgos):
+  - **Críticos, altos y medios: ninguno. MEDIO-1 y MEDIO-2 de `008` están cerrados.**
+    - MEDIO-1: `updateMany` condicionado al `passwordHash` leído, dentro de una transacción interactiva junto con el `deleteMany`. En `READ COMMITTED`, el segundo `UPDATE` espera el bloqueo de fila y, al reevaluar el `WHERE`, afecta 0 filas: es determinista.
+    - MEDIO-2: `setPassword("")` al iniciar sesión y al salir.
+  - BAJO-1 a BAJO-5 de `008`: corregidos y verificados. La trampa de foco completa sigue fuera de alcance; está aceptada.
+  - **BAJO-1 (nuevo, abierto, no bloquea) — Ventana del login concurrente con la contraseña anterior** (`auth.service.ts`, `login()` y `sessionFor()`).
+    - Lo reproduje de forma determinista, intercalando los pasos a mano: la sesión creada con la contraseña anterior sobrevive.
+    - La justificación de `009` exagera el costo. No hace falta serializar `login()` de forma global: basta crear la sesión en una transacción con `SELECT 1 FROM "User" WHERE id=$1 AND "passwordHash"=$2 FOR UPDATE`. Solo compite con los logins y cambios de la misma cuenta, son unas 10 líneas y cubre los dos órdenes posibles.
+    - Lo probé en el mismo escenario y la sesión ya no se crea.
+    - El otro camino, guardar una versión de la contraseña en la sesión y rechazarla en `restore()`, necesita una migración.
+    - Decisión: se acepta como riesgo residual en este alcance, por el impacto real.
+      - Solo puede aprovecharlo quien ya conoce la contraseña anterior; por ejemplo, el superadmin conoce la contraseña inicial de cada empresa.
+      - Su login tendría que caer justo en la ventana entre la lectura y el commit del cambio, que dura milisegundos con una sola réplica. El atacante no puede observar esa ventana, y el limitador permite 20 intentos cada 15 minutos por IP.
+      - Mi sonda natural dio 0 de 40.
+    - Recomendación: aplicar la solución `FOR UPDATE` antes de escalar a varias réplicas o de abrir el piloto. El modo `--reset` de `cli/superadmin.ts:296-301` tiene la misma ventana.
+  - **BAJO-2 (nuevo) — Mensaje genérico para `PASSWORD_CHANGED_CONCURRENTLY`.** El modal web (`change-password-modal.tsx`) y Flutter (`profile_home_page.dart`) no mapean ese código: la web muestra "Revisa tu conexión…". Es cosmético y el caso es muy raro.
+- Validaciones:
+  - API:
+    - `tsc --noEmit`: 0 errores.
+    - `npm test`: 22 archivos, 371/371.
+  - Integración: contenedor `cn-audit010-pg` (Postgres 16, `chambeaya_audit_test`, puerto 5549), `migrate deploy` y `test:integration`: 13 archivos, 88/88.
+  - Sonda de 20 cambios simultáneos: exactamente un `200` y un `PASSWORD_CHANGED_CONCURRENTLY` en 20 de 20. Ya no hay dos `200` ni contraseñas perdidas (antes: 20 de 20 con fallo).
+  - Sonda del login:
+    - Natural: 0 de 40.
+    - Forzada: sobrevive con el código actual y no se crea con `FOR UPDATE`.
+  - Códigos 4xx con la API real: sin Bearer y Bearer falso dan `401 INVALID_SESSION`; además `401 INVALID_CURRENT_PASSWORD`, `400 WEAK_PASSWORD` y `400 PASSWORD_UNCHANGED`.
+  - Con Postgres detenido: `500 {"error":"INTERNAL_ERROR"}`, sin detalles en el cuerpo. El registro del servidor tiene el error de Prisma y ninguna contraseña (lo busqué con grep).
+  - Web:
+    - `tsc --noEmit`: 0 errores.
+    - Playwright rápido: 119 pasaron y 1 omitida (preexistente).
+  - Navegador, build de producción con `NEXT_BASE_PATH=/empresas` contra la API real:
+    - Superadmin: al abrir el modal, el foco va a "Contraseña actual"; Escape lo cierra y el foco vuelve al botón.
+    - "Salir" con el `DELETE` colgado a propósito limpia al instante: el campo de contraseña queda vacío y se conserva el correo.
+    - "Salir" normal revoca el token (`401`).
+    - Panel de empresa: tras "Cerrar sesión", el correo y la contraseña quedan vacíos porque `BusinessAuth` se desmonta. La afirmación de `009` es correcta.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`, sobre una copia dentro del contenedor:
+    - `pub get --enforce-lockfile`: correcto.
+    - `analyze`: sin problemas (código 0).
+    - `flutter test`: 155 pasaron.
+    - `pubspec.lock` quedó sin cambios.
+  - Limpieza:
+    - Borré el contenedor y su volumen anónimo.
+    - Detuve los procesos en `:3400` y `:4400`.
+    - Revertí `next-env.d.ts`.
+    - No toqué `chambeaya-stable-postgres-data`.
+- Riesgos:
+  - BAJO-1 queda abierto como riesgo residual aceptado, con la solución indicada.
+  - No hay prueba `e2e-real` del superadmin.
+  - No probé la app Flutter en un dispositivo real.
+  - La prueba del cableado de Flutter cubre `WorkerShell`, no `main.dart`/`ChambeayaApp` con una sesión real.
+- Siguiente paso: el usuario decide cuándo comitear el Alcance B. Opcional: `implementador-sonnet` aplica la solución `FOR UPDATE` de BAJO-1 en `login()` y en `--reset`, con una prueba de integración.
+
+### CN-20260926-009 — Corrección de `CN-20260926-007` (hallazgos de `CN-20260926-008`: concurrencia, "Salir" del superadmin, accesibilidad y cobertura)
+
+- Fecha: 2026-09-26 10:01 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-008` (auditoría, `REQUIERE_CAMBIOS`: 2 hallazgos medios, 5 bajos, ninguno crítico ni alto), que auditó `CN-20260926-007`.
+- Alcance: se corrigieron los 7 hallazgos de `CN-20260926-008`.
+  - **MEDIO-1 (carrera en `changePassword`).** `DatabaseAuthService.changePassword` (`apps/api/src/modules/auth/auth.service.ts`) ahora hace el `update` dentro de una transacción interactiva (`$transaction(async (tx) => {...})`) con `tx.user.updateMany({ where: { id, passwordHash: <hash leído fuera de la transacción> }, ... })`. Si `count === 0` (otra petición concurrente ya cambió la contraseña con la misma "actual"), lanza `PASSWORD_CHANGED_CONCURRENTLY` sin tocar ninguna sesión. El `deleteMany` de sesiones sigue dentro de la misma transacción, después del `update`. Elegí `409 PASSWORD_CHANGED_CONCURRENTLY` (código nuevo, distinto de `401 INVALID_CURRENT_PASSWORD`) porque la contraseña actual sí era correcta cuando se leyó; el cliente debe reintentar, no corregir un dato. Ventana de login concurrente con la contraseña vieja (la segunda parte del hallazgo): el `deleteMany` ya corre sin filtro de fecha dentro de la transacción, así que alcanza a cualquier sesión confirmada antes de ese punto; el residual que **no** se cierra (un login que ya haya leído la fila antes del `commit` y recién inserte su sesión después del `deleteMany`) queda documentado en el código y en Riesgos, porque cerrarlo exigiría serializar `login()` contra `changePassword()` a nivel de fila (un cambio en la ruta más caliente de la API, fuera de esta corrección).
+  - **MEDIO-2 (formulario del superadmin tras "Salir").** `apps/web/app/admin/page.tsx`: `setPassword("")` al iniciar sesión con éxito y al salir. El correo se conserva a propósito (conveniencia para volver a entrar); solo la contraseña es sensible. Se revisó el panel de empresa: `BusinessAuth` se desmonta al autenticar (confirmado en el código), así que no tiene este defecto; no se tocó.
+  - **BAJO-1 (modal sin accesibilidad de teclado).** `apps/web/components/change-password-modal.tsx`: foco al primer campo al abrir, `Escape` cierra (listener en `document`, referenciado vía `ref` para no reinstalarse en cada tecla), y se devuelve el foco a `document.activeElement` de antes de abrir (el botón que lo abrió) al desmontar. Al llegar a la pantalla de éxito, el foco pasa al botón "Listo".
+  - **BAJO-2 ("Salir" bloqueaba hasta 8 s).** `admin/page.tsx`: `onLogout` ahora limpia `localStorage`/estado primero y llama a `adminApi.logout(...)` sin `await` (`void adminApi.logout(...).catch(() => undefined)`), igual que el panel de empresa.
+  - **BAJO-3 (comentarios falsos sobre `GOOGLE_ONLY_ACCOUNT`).** Corregidos los comentarios en `apps/api/tests/integration/change-password.integration.test.ts` y `apps/api/tests/auth.service.test.ts` que afirmaban que ningún flujo real deja `localPasswordConfigured=false`; la migración `20260914190000_google_local_password` sí lo hace para cuentas Google anteriores a ese paso (la documentación ya la corrigió `auditor-opus` en `docs/reference/api.md`). En Flutter, verificado (sin cambios de código): la rama `googleOnlyAccount` de `ProfileHomePage` sí es inalcanzable en la práctica porque `main.dart:220` no muestra `WorkerShell` mientras `requiresPasswordSetup` sea verdadero — el propio auditor lo calificó de "aceptable como defensa", y ya existía una prueba de widget que verifica el mensaje explicativo.
+  - **BAJO-4 (error inesperado respondía 400).** `apps/api/src/modules/auth/auth.routes.ts`: la ruta `/password/change` ahora usa una tabla explícita `changePasswordStatusByCode` (los 6 códigos conocidos → su estado) y cualquier otro error (`instanceof AuthError` con código desconocido, o cualquier error que no sea `AuthError`) responde `500 INTERNAL_ERROR` con `console.error` del detalle, sin filtrarlo al cliente (mismo patrón que `business.routes.ts`/`marketplace.routes.ts`).
+  - **BAJO-5 (huecos de cobertura).** Se agregaron las 3 pruebas señaladas: (a) API, `429 AUTH_RATE_LIMITED` en `POST /api/auth/password/change` (`apps/api/tests/rate_limit.test.ts`); (b) Web, `"Salir"` del superadmin limpia el estado local aunque `DELETE /api/auth/session` falle (`apps/web/e2e/admin-change-password.spec.ts`, con un fixture nuevo `deleteSessionFails` en `apps/web/e2e/fixtures/admin-api.ts`); (c) Flutter, el cableado real (`authRepository`/`sessionToken`/`googleOnlyAccount` llegando desde `WorkerShell` hasta la tarjeta "Seguridad" de Perfil, y que `onLogout` sigue funcionando desde esa pestaña) en `apps/mobile_flutter/test/worker_shell_change_password_wiring_test.dart` — no se pudo probar a través de `main.dart`/`ChambeayaApp` de punta a punta con una sesión real porque `_usesLiveApi: true` construye repositorios HTTP reales que saldrían a la red; se cubrió la capa inmediatamente debajo (`WorkerShell`), documentado inline. De más, agregadas dos pruebas de las dos correcciones (concurrencia real en integración, foco/Escape en Playwright) aunque no estaban explícitamente en la lista de BAJO-5.
+- Archivos:
+  - API: `apps/api/src/modules/auth/auth.service.ts`, `apps/api/src/modules/auth/auth.routes.ts`, `apps/api/tests/auth.service.test.ts`, `apps/api/tests/auth.routes.test.ts`, `apps/api/tests/rate_limit.test.ts`, `apps/api/tests/integration/change-password.integration.test.ts`.
+  - Web: `apps/web/app/admin/page.tsx`, `apps/web/components/change-password-modal.tsx`, `apps/web/e2e/fixtures/admin-api.ts`, `apps/web/e2e/admin-change-password.spec.ts`, `apps/web/e2e/change-password.spec.ts`.
+  - Flutter: `apps/mobile_flutter/test/worker_shell_change_password_wiring_test.dart` (nuevo).
+- Decisiones:
+  - `PASSWORD_CHANGED_CONCURRENTLY` es un código nuevo (no reutiliza `INVALID_CURRENT_PASSWORD`) para no decirle al cliente que escribió mal su contraseña actual cuando en realidad perdió una carrera legítima; el cliente puede reintentar sin pedir la contraseña de nuevo.
+  - No se implementó ningún bloqueo consultivo (`pg_advisory_xact_lock`) ni se tocó `login()` para cerrar la ventana residual de "login concurrente con la contraseña vieja": el propio auditor la calificó de teórica (0/40 en su sonda de un solo proceso) y cerrarla exige serializar la ruta de login contra cualquier cambio de contraseña a nivel de fila, un cambio de alcance mucho mayor que esta corrección. Queda como riesgo documentado, no como pendiente oculto.
+  - En el modal web no se agregó una trampa de foco completa (ciclo de `Tab` dentro del diálogo): el hallazgo BAJO-1 solo pedía foco inicial, `Escape` y devolución de foco, y es el mismo nivel que `CrudModal` ya tenía (el propio auditor lo calificó de bajo por eso).
+- Validaciones:
+  - API: `npm run --workspace @chambeaya/api build` (`tsc --noEmit`) — 0 errores. `npm run --workspace @chambeaya/api test` — 371/371 en 22 archivos (+3 sobre `CN-20260926-007`: mapeo a 409 de `PASSWORD_CHANGED_CONCURRENTLY`, mapeo a 500 de un error no reconocido, y el `429` de `/password/change`).
+  - API integración: contenedor Postgres 16 desechable (`cn-cambio-pass-pg2`, BD `chambeaya_test`, puerto 5548, proyecto propio, sin tocar `chambeaya-stable-postgres-data`), `prisma migrate deploy` y `npm run test:integration` con `CHAMBEAYA_INTEGRATION_TESTS=true` — 13/13 archivos, 88/88 pruebas (+1 sobre `CN-20260926-007`: dos cambios simultáneos con `Promise.all`, exactamente uno gana con `200` y el otro recibe `409 PASSWORD_CHANGED_CONCURRENTLY`, verificado además con login real que la contraseña final es la del que ganó). La prueba de concurrencia se corrió 5 veces sueltas además de la corrida completa, sin fallos (determinística: la condición del `updateMany` se resuelve por bloqueo de fila en Postgres, no por temporización). Contenedor eliminado al terminar.
+  - Web: `npm run --workspace @chambeaya/web build` (incluye TypeScript de Next) — build correcto. `npm run test:web` (Playwright, `chromium-desktop` + `chromium-mobile`) — 119 pasaron, 1 omitida (preexistente, no relacionada); incluye las 4 pruebas nuevas de esta corrección (foco/Escape del modal compartido, y "Salir" del superadmin con la API caída) más las 2 que ya existían reescritas para el nuevo comportamiento de "Salir" (limpia antes, sin bloquear).
+  - Flutter, en `ghcr.io/cirruslabs/flutter:3.44.0` (Docker; no se usó el Flutter local 3.47.1): `flutter pub get --enforce-lockfile` — sin cambios en `pubspec.lock` (verificado con `git status` antes y después de ambas corridas). `flutter analyze` — "No issues found!" (código 0). `flutter test` — "All tests passed!", 155 pruebas (+2 sobre `CN-20260926-007`, el archivo nuevo de cableado).
+  - `git diff --check` — sin errores (solo avisos de fin de línea LF/CRLF preexistentes en `docs/PROGRESO.md` y `docs/reference/api.md`, no relacionados con el contenido).
+  - Efecto secundario revertido: `apps/web/next-env.d.ts` (regenerado por `next build`) — `git checkout -- apps/web/next-env.d.ts`, confirmado limpio con `git status`.
+- Riesgos:
+  - **Residual, documentado (no cerrado a propósito):** un login concurrente que lea la contraseña vieja antes de que el `update` de `changePassword` se comprometa, y que inserte su `AuthSession` después de que el `deleteMany` de esa misma transacción ya corrió, sobrevive al cambio. Requiere multi-réplica o latencia real entre ambas operaciones (el propio auditor no lo reprodujo en un solo proceso, 0/40); cerrarlo exigiría serializar `login()` contra `changePassword()` a nivel de fila, fuera del alcance de esta corrección.
+  - El modal web no tiene una trampa de foco completa (`Tab` puede salir del diálogo); aceptado explícitamente por el auditor como el mismo nivel que `CrudModal`.
+  - Sigue sin existir una prueba `e2e-real` del superadmin (API y Postgres reales); la cobertura de "Salir" y del modal de superadmin sigue en Playwright mockeado, como en `CN-20260926-007`.
+  - No se ejecutó la app Flutter en un dispositivo ni emulador real; la tarjeta "Seguridad" y el cableado de `WorkerShell` solo se verificaron con pruebas de widget.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260926-009` contra `CN-20260926-008`, en particular la prueba de concurrencia real (determinismo del `updateMany`), el código `PASSWORD_CHANGED_CONCURRENTLY` y su estado HTTP, y que "Salir" del superadmin ya no bloquee ni retenga la contraseña.
+
+### CN-20260926-008 — Auditoría de `CN-20260926-007` (cambio de contraseña, Alcance B)
+
+- Fecha: 2026-09-26 09:40 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-007` (implementación, sin comitear sobre HEAD `1065156`). El Alcance A (`CN-20260926-006`) no se tocó: el diff no incluye scripts, compose ni Nginx.
+- Alcance: revisión completa del diff (API, web, Flutter, docs) y de los 5 archivos nuevos. Recorrido real en navegador del build de producción del panel (`NEXT_BASE_PATH=/empresas`) contra la API real y un Postgres desechable. Sondas de concurrencia contra ese mismo Postgres.
+- Archivos:
+  - Revisados: todos los de `CN-20260926-007`.
+  - Modificado por la auditoría (solo documentación): `docs/reference/api.md`. Corregí la nota de `GOOGLE_ONLY_ACCOUNT` (ver BAJO-3).
+- Decisiones (hallazgos):
+  - **Críticos y altos: ninguno.**
+  - **MEDIO-1 — Falta control de concurrencia en `DatabaseAuthService.changePassword`** (`apps/api/src/modules/auth/auth.service.ts:455-497`).
+    - La contraseña actual se verifica fuera de la transacción, y el `user.update` no exige que `passwordHash` siga siendo el que se leyó.
+    - Evidencia (sonda con `DatabaseAuthService` real sobre Postgres 16): dos cambios simultáneos desde dos sesiones con la misma contraseña actual devolvieron ambos `200` en 20 de 20 intentos. En 20 de 20, una de las dos contraseñas "cambiadas con éxito" no quedó vigente, y cada transacción borró la sesión de la otra. El cliente muestra "esta sigue activa" sobre una sesión borrada y una contraseña que no rige.
+    - El mismo TOCTOU permite, en teoría, que un login con la contraseña vieja lea el hash antes del commit y cree su sesión después del `deleteMany`, con lo que esa sesión sobreviviría al cambio. En la sonda con un solo proceso ocurrió 0 de 40 veces, porque `scryptSync` serializa; con varias réplicas o más latencia la ventana existe.
+    - Corrección sugerida: `$transaction` interactiva con `tx.user.updateMany({ where: { id, passwordHash: <hash leído> }, ... })`. Con `count === 0`, responder `INVALID_CURRENT_PASSWORD` (o un código de conflicto) sin tocar sesiones. Falta una prueba de integración con dos cambios simultáneos.
+  - **MEDIO-2 — Después de "Salir", el superadmin puede volver a entrar con un clic** (`apps/web/app/admin/page.tsx:33-34` y `114-124`). El fallo ya existía, pero está en el `onLogout` que modificó este cambio.
+    - `email` y `password` son estado de `AdminPage`, que no se desmonta, y ni el login ni el logout los limpian.
+    - Comprobado en el navegador: tras "Salir", el formulario conserva el correo y la contraseña vigente. Un clic en "Ingresar" vuelve a abrir el panel de superadmin sin escribir nada, lo que es grave en un equipo compartido.
+    - El panel de empresa no lo sufre, porque `BusinessAuth` se desmonta.
+    - Corrección: `setPassword("")` al iniciar sesión con éxito y al salir, más una prueba.
+  - **BAJO-1 — El modal no es accesible con teclado** (`apps/web/components/change-password-modal.tsx:118-131`).
+    - Verificado en el navegador: al abrirlo, el foco se queda en el botón que lo abrió, y Escape no lo cierra.
+    - No hay trampa de foco ni se devuelve el foco al cerrar. Las etiquetas sí son correctas: `<label>` envuelve cada campo.
+    - Es el mismo patrón de `CrudModal`, por eso es bajo.
+  - **BAJO-2 — "Salir" del superadmin espera a la API antes de limpiar el estado** (`admin/page.tsx:117-123`).
+    - Puede tardar hasta 8 s (`AbortSignal.timeout`) sin ninguna señal ni botón deshabilitado.
+    - El panel de empresa limpia primero y llama a la API después. Con un `DELETE` fallido sí limpia el estado local (verificado).
+  - **BAJO-3 — `GOOGLE_ONLY_ACCOUNT` sí es alcanzable; no es ruido.** La migración `20260914190000_google_local_password` marcó con `false` las cuentas Google anteriores, y `startGoogleLogin` les entrega una sesión Bearer.
+    - Es falsa la afirmación "ningún flujo real deja `false`" que aparece en `CN-20260926-007` y en los comentarios de `tests/integration/change-password.integration.test.ts:103-107`, `tests/auth.routes.test.ts` y `tests/auth.service.test.ts`. Hay que corregir esos comentarios. El código de la API es correcto.
+    - La rama `googleOnlyAccount` de Flutter es inalcanzable, porque `main.dart:220` no muestra `WorkerShell` mientras `requiresPasswordSetup` sea verdadero. Es aceptable como defensa.
+  - **BAJO-4 — Un error inesperado responde `400 INVALID_REGISTRATION`** (`auth.routes.ts:125`). Si falla la base de datos, `/password/change` responde eso en vez de `500`. Hereda el patrón de `/password`.
+  - **BAJO-5 — Huecos de cobertura:**
+    - Ninguna prueba cubre que "Salir" del superadmin limpie el estado cuando falla el `DELETE`.
+    - Ninguna prueba cubre la condición `_usesLiveApi` de `main.dart`: la prueba "modo demo" pasa `null` a mano.
+    - Ninguna prueba cubre el `429` de `/password/change` ni que las sesiones de otros usuarios sobrevivan. Ambos los verifiqué a mano.
+  - Correctos, verificados:
+    - `timingSafeEqual` + scrypt como en el login.
+    - `INVALID_CURRENT_PASSWORD` solo lo recibe la propia sesión, así que no enumera cuentas.
+    - La sal es nueva (`randomBytes(16)`).
+    - Se conserva la sesión actual por `tokenHash`.
+    - `where.userId` impide tocar otra cuenta; el endpoint no acepta ningún id.
+    - No hay logs de cuerpos ni contraseñas.
+    - `/password` sigue igual.
+    - El mojibake está corregido.
+    - `localStorage` solo guarda la sesión, nunca la contraseña.
+- Validaciones:
+  - API:
+    - `npm run --workspace @chambeaya/api build` (`tsc --noEmit`): 0 errores.
+    - `npm run --workspace @chambeaya/api test`: 22 archivos, 368/368.
+  - Integración: contenedor `cn-audit007-pg` (Postgres 16, BD `chambeaya_audit_test`, puerto 5547), `prisma migrate deploy` y `npm run test:integration`: 13 archivos, 87/87.
+  - Sondas de concurrencia (script temporal fuera del repo):
+    - Doble cambio: 20/20 ambos con `200` y uno sin efecto (MEDIO-1).
+    - Login frente a cambio: 0/40 sesiones viejas sobrevivientes.
+  - Web:
+    - `tsc --noEmit`: 0 errores.
+    - `npm run test:web`: 115 pasaron y 1 omitida (preexistente).
+  - Navegador:
+    - Build de producción con `NEXT_BASE_PATH=/empresas` en `:3400`, contra la API real (`scripts/e2e-serve.ts`, cuentas sembradas del fixture del proyecto) en `:4400`.
+    - Empresa:
+      - La contraseña actual errónea muestra el error sin cerrar la sesión.
+      - Con la correcta, la respuesta es `200` y aparece el aviso.
+      - Una segunda sesión abierta por HTTP pasa a `401`.
+      - La sesión del admin (otro usuario) sigue en `200`.
+      - Al recargar se conserva la sesión actual.
+      - Salir y volver a entrar con la nueva contraseña funciona; la vieja da `401`.
+    - Superadmin:
+      - El cambio responde `200` y su otra sesión pasa a `401`.
+      - "Salir" revoca el token en el servidor (`401`).
+      - Con el `DELETE` forzado a fallar, el estado local se limpia igual.
+      - Se reprodujo MEDIO-2.
+    - `/password/change` responde `429 AUTH_RATE_LIMITED` al superar el límite.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`, sobre una copia dentro del contenedor:
+    - `flutter pub get --enforce-lockfile`: correcto.
+    - `flutter analyze`: "No issues found!" (código 0).
+    - `flutter test`: 153 pasaron.
+    - `pubspec.lock` quedó sin cambios.
+  - Limpieza:
+    - Borré el contenedor y su volumen anónimo.
+    - Detuve los procesos en `:3400` y `:4400`.
+    - Revertí `apps/web/next-env.d.ts`.
+    - No toqué `chambeaya-stable-postgres-data`.
+    - `apps/web/.next` quedó con el build de `/empresas` (ignorado por git).
+- Riesgos:
+  - No ejecuté la app Flutter en un dispositivo ni en un emulador: el layout de la tarjeta "Seguridad" en el ancho de un móvil solo lo cubren las pruebas de widget, con la superficie por defecto.
+  - No hay prueba `e2e-real` del superadmin.
+  - El limitador es en memoria por instancia (ya documentado).
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 y MEDIO-2 con pruebas, y de paso BAJO-1 a BAJO-5 si caben. Después, `auditor-opus` reaudita.
+
+### CN-20260926-007 — Cambio de contraseña (API, panel de empresa, superadmin y app del trabajador) — Alcance B del plan de pagos
+
+- Fecha: 2026-09-26 09:19 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: N/A (Alcance B de `C:\Users\JUAN CARLOS\.claude\plans\dynamic-prancing-bear.md`; el Alcance A cerró en `CN-20260926-006`)
+- Alcance: nuevo `POST /api/auth/password/change` (Bearer, cualquier rol) que exige la contraseña actual, valida la nueva con `isValidPassword`, la rechaza si es igual a la actual, regenera `salt`/`passwordHash` y borra todas las demás `AuthSession` del usuario conservando la sesión que hizo la petición (misma transacción, patrón de `resetSuperadminPassword`); rechaza con `409 GOOGLE_ONLY_ACCOUNT` una cuenta sin contraseña local configurada. Modal "Cambiar contraseña" compartido entre el panel de empresa (junto a "Cerrar sesión") y el superadmin (barra superior), con validación en cliente idéntica a la API y aviso de que se cerraron las demás sesiones. Arreglo relacionado: "Salir" del superadmin ahora llama a `DELETE /api/auth/session` antes de limpiar el estado local (antes solo borraba `localStorage`), y se corrigió el mojibake de "Validando sesión…". Opción "Cambiar contraseña" en Perfil de la app Flutter del trabajador (tarjeta "Seguridad", oculta en modo demo), con mensaje explicativo en vez del formulario para una cuenta sin contraseña local (`requiresPasswordSetup`); en la práctica ninguna cuenta real llega hoy a ese estado (documentado como nota, no como pendiente).
+- Archivos:
+  - API: `apps/api/src/modules/auth/auth.service.ts`, `apps/api/src/modules/auth/auth.routes.ts`, `apps/api/tests/auth.service.test.ts`, `apps/api/tests/auth.routes.test.ts`, `apps/api/tests/admin.routes.test.ts` (mock de `AuthService` actualizado), `apps/api/tests/integration/change-password.integration.test.ts` (nuevo).
+  - Web: `apps/web/components/change-password-modal.tsx` (nuevo, compartido), `apps/web/lib/business-api.ts`, `apps/web/lib/admin-api.ts` (nuevo `AdminApiError` con código, antes el `request()` de este archivo descartaba el cuerpo del error), `apps/web/app/page.tsx`, `apps/web/app/admin/page.tsx`, `apps/web/e2e/fixtures/business-api.ts`, `apps/web/e2e/fixtures/admin-api.ts` (nuevo), `apps/web/e2e/change-password.spec.ts` (nuevo), `apps/web/e2e/admin-change-password.spec.ts` (nuevo).
+  - Flutter: `apps/mobile_flutter/lib/features/auth/auth_repository.dart`, `apps/mobile_flutter/lib/features/profile/profile_home_page.dart`, `apps/mobile_flutter/lib/features/marketplace/worker_shell.dart`, `apps/mobile_flutter/lib/main.dart`, `apps/mobile_flutter/test/profile_home_page_test.dart`.
+  - Docs: `docs/reference/api.md` (sección nueva "Cambiar contraseña", errores y efecto sobre sesiones), `docs/guides/deployment.md` ("Primer acceso": recomienda cambiar la contraseña generada del superadmin y de cada empresa tras el primer ingreso).
+- Decisiones:
+  - Nuevos códigos de error estables en `AuthService`/`AuthError`: `INVALID_CURRENT_PASSWORD` (401), `WEAK_PASSWORD` (400), `PASSWORD_UNCHANGED` (400), `GOOGLE_ONLY_ACCOUNT` (409); `INVALID_SESSION` (401) reutiliza el código existente.
+  - `LocalAuthService.changePassword` es una implementación real (no un stub que lanza `GOOGLE_SIGN_IN_UNAVAILABLE` como los métodos específicos de Google), porque este servicio en memoria se usa como doble en pruebas de rutas no relacionadas con Google.
+  - El modal web es un solo componente (`ChangePasswordModal`, prop `variant: 'business' | 'admin'`) que solo cambia las clases del contenedor para calzar con `modal-*` (empresa) o `admin-modal*` (superadmin); el formulario y la validación son idénticos.
+  - En Flutter, "Cambiar contraseña" solo se muestra con `authRepository`/`sessionToken` reales (se ocultan en modo demo, donde `session.token` no corresponde a ninguna cuenta del backend); se hilaron como parámetros opcionales nuevos por `main.dart` → `WorkerShell` → `ProfileHomePage` sin romper la firma usada por las pruebas de widget existentes (parámetros opcionales, comportamiento previo intacto cuando se omiten).
+  - No se creó ninguna vía pública para producir una cuenta `localPasswordConfigured=false` real (el valor por defecto es `true` y todo flujo de Google actual completa la contraseña antes de crear el `User`); la rama `GOOGLE_ONLY_ACCOUNT` se cubrió forzando el campo directamente en pruebas unitarias/integración (documentado inline en cada prueba) y de forma defensiva en el cliente.
+- Validaciones:
+  - API unit: `npm run --workspace @chambeaya/api build` (`tsc --noEmit`) — sin errores. `npm run --workspace @chambeaya/api test` — 368/368 pruebas en 22 archivos, incluidas las nuevas (actual errónea, débil, igual a la actual, solo Google, sin sesión, éxito que conserva la sesión actual y borra las demás).
+  - API integración: contenedor Postgres 16 desechable (`docker run --name cn-cambio-pass-pg ... -p 5544:5432`, proyecto/volumen propio, sin tocar `chambeaya-stable-postgres-data`), `prisma migrate deploy` y `npm run test:integration --workspace=@chambeaya/api` con `CHAMBEAYA_INTEGRATION_TESTS=true` — 13/13 archivos, 87/87 pruebas (incluye `change-password.integration.test.ts`: login real antes y después del cambio, sesión vieja rechazada, sesión actual aceptada, y el caso `GOOGLE_ONLY_ACCOUNT` contra una fila real). Contenedor eliminado al terminar (`docker rm -f cn-cambio-pass-pg`).
+  - Web: `npm run --workspace @chambeaya/web build` (incluye TypeScript de Next) — build de producción correcto. `npm run test:web` (Playwright, ambos proyectos `chromium-desktop`/`chromium-mobile`) — 115 pasaron, 1 omitida (preexistente, no relacionada); incluye las 6 pruebas nuevas (`change-password.spec.ts` y `admin-change-password.spec.ts`: éxito, error de la API, validación en cliente, y el logout del superadmin llamando a `DELETE /api/auth/session`).
+  - Flutter, en `ghcr.io/cirruslabs/flutter:3.44.0` (Docker; no se usó el Flutter local 3.47.1 para `pub get`): `flutter pub get --enforce-lockfile` — sin cambios en `pubspec.lock` (verificado con `git status`/`git diff --stat` antes y después); `flutter analyze` — "No issues found!"; `flutter test` — "All tests passed!", 153 pruebas, incluidas 5 nuevas en `profile_home_page_test.dart` (sin sesión real no muestra la tarjeta, cuenta solo de Google muestra la explicación, éxito con aviso de sesiones cerradas, error de la API sin cerrar la hoja, validación en cliente de contraseña débil y de confirmación no coincidente).
+  - `git diff --check` — sin errores en ningún archivo modificado.
+  - Efecto secundario revertido: `apps/web/next-env.d.ts` (regenerado por `next build`) — `git checkout -- apps/web/next-env.d.ts`, confirmado limpio con `git status`.
+- Riesgos:
+  - El caso `GOOGLE_ONLY_ACCOUNT` no tiene hoy ningún camino real de producción que lo alcance (documentado en `docs/reference/api.md`); si se agrega un flujo de Google que deje `localPasswordConfigured=false`, revisar que el mensaje del cliente (web y Flutter) siga siendo el correcto.
+  - La cobertura del superadmin (modal y logout) quedó en la suite Playwright **mockeada** (`apps/web/e2e/admin-change-password.spec.ts`, fixture nueva `apps/web/e2e/fixtures/admin-api.ts`), no en `e2e-real`: el enunciado permitía cualquiera de las dos y `e2e-real` exige levantar el stack completo (API + Postgres reales con la cuenta admin sembrada por `apps/api/scripts/e2e-serve.ts`), que no se preparó en esta entrega.
+  - No se ejecutó ninguna simulación del instalador de producción ni se tocó `docker-compose.production.yml`/`.env.production.example`: el cambio no requería nuevas variables de entorno.
+- Siguiente paso: `auditor-opus` audita `CN-20260926-007` (correctitud de la transacción de cambio de contraseña y borrado de sesiones, códigos de error estables, cobertura de pruebas real vs. declarada, y la documentación actualizada en `docs/reference/api.md` y `docs/guides/deployment.md`).
+
+### CN-20260926-006 — Reauditoría de `CN-20260926-005` y cierre del Alcance A (`CN-20260926-001`, `003`, `005`)
+
+- Fecha: 2026-09-26 07:55 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: APROBADO
+- Referencia: `CN-20260926-001` (implementación), `CN-20260926-003` y `CN-20260926-005` (correcciones). Con esta entrada se **cierra el Alcance A**. HEAD `d4a65d0`.
+  - Índice: solo los 2 scripts, en `100755` y LF, iguales al árbol.
+- Alcance: reauditoría del MEDIO-1 de `CN-20260926-004` y búsqueda de otros caminos donde `.env` y Nginx puedan quedar desalineados.
+  - Por las fechas de modificación, desde `004` solo cambiaron `scripts/instalar-produccion.sh`, `docs/guides/deployment.md` y `docs/PROGRESO.md`. El código de Flutter, web y API es el que ya validé en `002`/`004`, así que no volví a correr esas pruebas.
+- Archivos:
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`. Añadí los límites conocidos de las dos defensas (BAJO-1 y BAJO-2).
+- Decisiones (hallazgos):
+  - **Críticos, altos y medios: ninguno. El MEDIO-1 de `004` está cerrado.**
+    - `--change-domain --force-nginx` con `nginx -t` roto, y por separado con el `reload` fallido: el md5 de `.env.production` y de `/etc/nginx` queda igual al del inicio, sin despliegue.
+    - Un reintento con solo `--domain <nuevo>` sale con código 1 ("no coincide") y no despliega.
+    - La divergencia fabricada (`.env` en B, sitio con certbot en A) aborta antes de `deploy-hosting.sh`, y el caso sano sí despliega.
+  - **BAJO-1.** El `.env` modificado queda sin restaurar en dos caminos, porque ocurren fuera de los 3 puntos de restauración de Nginx:
+    - `--change-domain` ejecutado **sin root** con Nginx presente;
+    - un fallo de la copia de seguridad del sitio (`cp -p`, por disco lleno), que ocurre antes de armar el trap.
+    - En los dos, el invariante 5.5 (`scripts/instalar-produccion.sh`, sección 5.5) aborta el instalador y cualquier reintento. Pero **`deploy-hosting.sh` no tiene esa comprobación y despliega igual** (probado: código 0 con el `.env` divergente).
+    - Mitigado por el mensaje de error y la guía.
+    - Recomendación: llamar a `restore_env_backup` antes de salir en el invariante y en cualquier error posterior a escribir el `.env`, o repetir el invariante en `deploy-hosting.sh`.
+  - **BAJO-2.** Falsos positivos del invariante, que fallan hacia el lado seguro (abortan sin daño):
+    - `server_name www.D D;` aborta porque solo se compara el primer nombre (`D www.D` sí pasa);
+    - un `--domain` en mayúsculas aborta en la comprobación de dominio distinto, que ya existía y compara sin normalizar.
+    - Quedó documentado.
+  - **Verificado sin hallazgo:**
+    - El modo `conf.d` funciona: instalación, reejecución, `--change-domain` sin `--force-nginx` (md5 igual) y con él (coherente). Nginx no incluye los `.bak`.
+    - Sin binario `nginx`, el invariante no aplica y sí despliega.
+    - El `trap EXIT` convive con `INT/TERM/ERR`: la copia del `.env` sigue disponible cuando se restaura, y al terminar quedan 0 temporales en `/tmp`, tanto en el éxito como en el fallo.
+    - Tras un éxito, un `deploy-hosting.sh` que falla (código 7) no restaura nada.
+- Validaciones:
+  - Simulación con el `nginx` real en `ubuntu:24.04`, `sudo` real y `docker`/`systemctl`/`certbot`/`cp` simulados, 8 bloques:
+    - los escenarios de arriba;
+    - con puerto cambiado más `--force-nginx --google-client-id`: un Ctrl+C durante el `reload` restaura el sitio y el `.env` (el Client ID vuelve atrás); el disco lleno al escribir el sitio restaura los dos; el éxito aplica los dos.
+    - La batería de `002`/`004` (Client ID, `-y`, conflicto de `server_name`, idempotencia, mensajes específicos) sigue OK.
+  - `shellcheck` sobre los 3 scripts → 0; `bash -n` → OK.
+  - Limpieza: eliminé la imagen `chambeaya-audit-ubnginx:tmp` y no quedan contenedores. No toqué los volúmenes del usuario.
+- Riesgos:
+  - `NO_EJECUTADAS`: Ubuntu real (systemd, certbot real, DNS de `chambeaya.grupoamayo.com`) y la captura visual de la marca.
+  - BAJO-1 y BAJO-2 quedan documentados en la guía.
+- Siguiente paso: el Alcance A queda cerrado. BAJO-1 es opcional para `implementador-sonnet` en una tarea aparte.
+
+### CN-20260926-005 — Corrección de `CN-20260926-003` (MEDIO-1 de `CN-20260926-004`: doble defensa .env/Nginx)
+
+- Fecha: 2026-09-26 06:44 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-004` (reauditoría, REQUIERE_CAMBIOS), corrige `CN-20260926-003`.
+- Alcance: dos defensas independientes en `scripts/instalar-produccion.sh`, tal como pidió la reauditoría, para que ningún camino termine con `.env.production` y Nginx en dominios distintos:
+  1. **Transaccional:** al entrar a la sección de `.env.production` (solo si el archivo ya existía), se toma `ENV_BACKUP=$(mktemp)` con una copia exacta. Si más abajo falla la sección de Nginx —`nginx -t`, `systemctl reload`, la propia escritura del sitio (disco lleno) o una interrupción, los 3 puntos ya cubiertos por `on_nginx_failure`/las ramas específicas— se llama `restore_env_backup()` junto con `restore_previous_nginx_state()`: la corrida completa (incluye `--change-domain`, `--google-client-id` y los `set_env_var_if_missing` de compatibilidad) queda revertida, no solo Nginx. `TEMP_FILES[]` + un único `trap cleanup_temp_files EXIT` reemplazan el `trap ... EXIT` puntual de antes para no perder la limpieza del backup.
+  2. **Invariante final (nueva sección "5.5"), justo antes de "Construir y levantar":** si `nginx_present=1` y existe `target_file` (el sitio realmente instalado, gestionado por esta corrida o por una anterior), compara su `server_name` con el dominio horneado en `.env.production` (`domain_from_next_public_api_url`, extraída como función a partir de la lógica que ya existía para el chequeo de `--domain`). Corre también cuando la sección de Nginx decidió NO tocar el sitio por los bloques de Certbot. Si no coinciden, aborta con código 1 antes de llamar a `deploy-hosting.sh`, con un mensaje que nombra ambos dominios y las dos formas de resolverlo (`--change-domain --force-nginx` o revertir las 3 variables del `.env` a mano).
+- Archivos: `scripts/instalar-produccion.sh` (LF, `100755`; re-sincronizado al índice con `git add`), `docs/guides/deployment.md`.
+- Decisiones: el snapshot de `.env.production` es de la corrida completa (no solo de las 3 variables de dominio), porque un fallo posterior en Nginx no tiene por qué distinguir qué cambió el `.env` en este `run` — más simple de razonar como "todo o nada" que rastrear cambios variable por variable. La función `domain_from_next_public_api_url` quedó compartida entre el chequeo temprano de `--domain` distinto y el invariante final, para no duplicar la lógica de extraer el dominio de una URL.
+- Validaciones (todas ejecutadas de verdad; Docker Desktop respondía):
+  - `bash -n` → sin errores. `shellcheck` (`koalaman/shellcheck:stable`, Docker) sobre los 3 scripts → **código 0**.
+  - Simulación con `nginx` real en `ubuntu:24.04` (paquete real, `systemctl`/`certbot`/`docker`/`deploy-hosting.sh` como stubs), **14 escenarios nuevos + 9 de regresión, todos OK**:
+    - el escenario exacto de la reauditoría: `--change-domain --force-nginx` con `nginx -t` roto y, por separado, con el `reload` fallido — en ambos, `.env.production` **y** `/etc/nginx/sites-available/chambeaya.conf` quedan con el mismo MD5 que antes de ejecutar (nada cambió, no solo Nginx);
+    - reintento inmediato tras ese fallo con solo `--domain <nuevo>` (sin `--change-domain`) → sigue viendo el dominio anterior y pide `--change-domain --force-nginx` de nuevo, sin llamar a `deploy-hosting.sh`;
+    - divergencia fabricada a mano (`.env` en el dominio B, sitio con Certbot en el dominio A) con `--domain B` (sin `--change-domain`) → aborta con el mensaje citando A y B, **sin llamar a `deploy-hosting.sh`** y sin tocar el sitio;
+    - caso sano (`.env` y Nginx ya coinciden) → el invariante no bloquea y sí llama a `deploy-hosting.sh`;
+    - regresión completa de la batería de `002`/`003`: Certbot con/sin `--force-nginx`, sin Certbot, dominio distinto sin flag, `nginx -t`/`reload` rotos con sus mensajes específicos, Client ID inválido/válido, `update_env_var` con `\`, `/`, `&`, `=`. Limpié el contenedor y la imagen (`chambeaya-audit-a4:tmp`); no toqué volúmenes del usuario.
+  - No se re-ejecutaron Flutter, `apps/web` (typecheck/Playwright) ni `apps/api`: esta corrección solo tocó `scripts/instalar-produccion.sh` y documentación; `CN-20260926-003`/`004` ya los validaron sobre este mismo código Dart/TS sin cambios desde entonces.
+- Riesgos: ninguno conocido.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260926-005`.
+
+### CN-20260926-004 — Reauditoría de `CN-20260926-003` (corrección de `CN-20260926-001` tras `CN-20260926-002`)
+
+- Fecha: 2026-09-26 08:40 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-001` (implementación) y `CN-20260926-003` (corrección). HEAD `d4a65d0`.
+  - Índice: solo `scripts/instalar-produccion.sh` y `scripts/deploy-hosting.sh`, iguales al árbol.
+- Alcance: reauditoría de MEDIO-1 y BAJO-1 a BAJO-4 de `002`, con búsqueda de otros caminos donde `.env` y Nginx puedan quedar desalineados, y regresión.
+- Archivos:
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`. Decía que "ningún camino" de `--change-domain` termina desalineado; lo sustituí por la excepción real (MEDIO-1 de abajo).
+- Decisiones (hallazgos):
+  - **MEDIO-1 (nuevo, mismo tipo de falla que el MEDIO-1 de `002`, por otro camino).**
+    - Qué pasa: en `--change-domain --force-nginx`, si falla `nginx -t` o el `reload`, el trap restaura el sitio al dominio anterior. Pero `.env.production` ya se había actualizado antes (`scripts/instalar-produccion.sh:476`) y no se revierte: el script sale con código 1, con `.env` en el dominio nuevo y Nginx en el anterior.
+    - Un reintento con solo `--domain <nuevo>` ya no ve un "dominio distinto" y, como el sitio tiene certbot, **omite Nginx** (`:669`).
+    - Termina con **código 0**, reconstruye los servicios con el dominio nuevo y Nginx sigue sirviendo el anterior: la instalación queda caída en silencio.
+    - Evidencia: escenario 3 de la simulación. Da `DESALINEADO: env=chambeaya… nginx=nuevo…` después del fallo, lo mismo tras el reintento (con `compose-up=1`), y queda coherente solo si se repite con `--force-nginx`.
+    - Corrección sugerida, cualquiera de las dos:
+      - (a) en `:669`, antes de omitir por certbot, comparar el `server_name` instalado con `$DOMAIN` y abortar si difieren;
+      - (b) guardar una copia de `.env.production` antes de `update_env_var` y restaurarla en el trap y en los caminos de fallo de Nginx.
+    - Mientras tanto, la guía advierte que se repita el comando completo.
+  - **Cerrados, con evidencia:**
+    - **MEDIO-1 de `002`:** `--change-domain` sobre un sitio con certbot, sin `--force-nginx`, sale con código 1, con el md5 del `.env` y de `/etc/nginx` idénticos y 0 llamadas a `systemctl` o `compose up`. Con `--force-nginx`, `.env` y Nginx quedan en `nuevo.grupoamayo.com`, con `chambeaya.conf.bak.<timestamp>` igual al sitio con certbot anterior.
+    - **BAJO-1:** `update_env_var` conserva byte a byte `a\nb\tc\\d`, `https://…?x=1&y=2`, `k=v==w`, `$HOME $(id) \`id\``, `&amp;\1` y `c\d/e&f=g$h`, y el archivo sigue con 4 líneas.
+    - **BAJO-2:**
+      - un `nginx -t` roto muestra "nginx -t falló…" y un `reload` fallido muestra "systemctl reload nginx falló…", los dos con restauración exacta (`cmp`);
+      - el trap vuelve a quedar armado después de `nginx -t`: un Ctrl+C durante el `reload` restaura;
+      - el trap queda desarmado tras el éxito: un `deploy-hosting.sh` que sale con 7 no restaura y no imprime mensajes;
+      - una escritura parcial por disco lleno restaura exacto.
+    - **BAJO-3:** `page.tsx:1519` muestra "CH".
+    - **BAJO-4:**
+      - `.gitattributes` solo afecta a 10 archivos: los 3 scripts, los 5 `Dockerfile*` y las 2 plantillas de Nginx, todos `i/lf w/lf`. Ningún archivo `eol=lf` queda con `w/crlf`. `git status` no muestra archivos espurios.
+      - `git add --renormalize .` sobre una **copia** del índice da el mismo resultado que `git add -A` (solo difiere `.gitattributes`, sin rastrear), es decir, sin conversiones de fin de línea. El índice real no se tocó.
+      - Los 3 scripts siguen en `100755`.
+      - `docker build --check` de los 3 `Dockerfile.production` no da avisos, y `nginx -t` pasa sobre las 2 plantillas del árbol.
+- Validaciones:
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`:
+    - `pub get --enforce-lockfile` → 0, con el lockfile sin cambios;
+    - `flutter analyze` → `No issues found!`, código 0;
+    - `flutter test` → `+148`, incluida `field errors stay under their own field when switching to register`.
+    - El diff de `apps/mobile_flutter` sigue siendo de 3 archivos, igual que en `002`.
+  - `shellcheck` sobre los 3 scripts → 0; `bash -n` → OK. `apps/web`: `tsc` → 0.
+  - Simulación con el `nginx` real en `ubuntu:24.04`, con `sudo`, y `docker`/`systemctl`/`certbot`/`cp` simulados:
+    - batería nueva de 9 escenarios, descrita arriba;
+    - la batería de `002` repetida con este script: Client ID válido e inválido, aviso sin reescribir, flag sobre un `.env` existente, `-y` en TTY (0 preguntas), dominio distinto sin flag, disco lleno, conflicto de `server_name` e idempotencia. Todo OK, y ahora con mensajes específicos.
+  - No volví a correr la API ni la concurrencia del CLI: `apps/api` no cambió desde `002`, donde pasaron 356 unitarias, 85 de integración y la carrera multiproceso.
+  - Limpieza: eliminé la imagen `chambeaya-audit-ubnginx:tmp` y no quedan contenedores. No toqué los volúmenes de desarrollo.
+- Riesgos:
+  - `NO_EJECUTADAS`: Ubuntu real (systemd, certbot real, DNS de `chambeaya.grupoamayo.com`) y la captura visual de la marca.
+  - Hasta cerrar MEDIO-1, tras un fallo de Nginx en `--change-domain` hay que repetir el comando completo.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (opción a o b) y registra la corrección; después `auditor-opus` vuelve a auditar.
+
+### CN-20260926-003 — Corrección de `CN-20260926-001` (MEDIO-1 y 4 hallazgos bajos de `CN-20260926-002`)
+
+- Fecha: 2026-09-26 06:25 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: CORRECCION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: `CN-20260926-002` (auditoría, REQUIERE_CAMBIOS), corrige `CN-20260926-001`.
+- Alcance:
+  - **MEDIO-1** (`scripts/instalar-produccion.sh`, sección de dominio, antes de escribir nada): `--change-domain` sobre un sitio de Nginx con bloques de Certbot y sin `--force-nginx` ahora **aborta con código 1 y cero cambios** (ni `.env.production` ni Nginx), con un mensaje que indica repetir con `--change-domain --force-nginx` y pedir el certificado nuevo. Antes seguía, actualizaba el `.env` y terminaba con código 0 dejando Nginx en el dominio viejo.
+  - **BAJO-1**: `update_env_var` pasa el valor por `ENVIRON` en vez de `awk -v val=...`, que interpretaba escapes de estilo C (`\n` se convertía en salto de línea real, `\\` se comía una barra). Cubierto con una prueba directa de la función con `a\nb\tc\\d` y con `/`, `&`, `=` juntos.
+  - **BAJO-2**: alrededor de `nginx -t` y `systemctl reload nginx` se hace `trap - ERR` antes de cada uno y se rearma `trap on_nginx_failure ERR` justo después: el trap ERR no se desactiva con `set +e` (son independientes en bash), así que sin este cambio esos dos fallos esperados disparaban el trap genérico antes de llegar a sus mensajes específicos.
+  - **BAJO-3**: la pantalla de carga del panel (`apps/web/app/page.tsx:1519`, "Preparando tu panel…") usaba `brand-mark` con "CN"; ahora dice "CH", igual que el resto de la marca.
+  - **BAJO-4**: nuevo `.gitattributes` en la raíz con `*.sh`, `deploy/**`, `apps/mobile_flutter/deploy/**` y `Dockerfile*` en `eol=lf`. Se normalizó el árbol de trabajo de `scripts/crear-superadmin.sh`, los 4 `Dockerfile*` con CR y las 2 plantillas de Nginx (`deploy/nginx/chambeaya.conf.template`, `apps/mobile_flutter/deploy/nginx.conf`) con `sed -i 's/\r$//'`; el contenido quedó bit a bit igual al índice/HEAD (`git diff` vacío, MD5 idéntico), así que `git add --renormalize` no generó ningún cambio de índice, solo limpió el estado "modificado" que quedaba por el CRLF del árbol.
+- Archivos:
+  - `scripts/instalar-produccion.sh` (LF, `100755`; re-sincronizado al índice con `git add`).
+  - `apps/web/app/page.tsx`.
+  - `.gitattributes` (nuevo).
+  - `docs/guides/deployment.md` (reemplacé la advertencia provisional del auditor por el comportamiento final: `--change-domain` con Certbot exige `--force-nginx` o aborta).
+  - Sin cambio de contenido (solo normalización de EOL en el árbol de trabajo): `scripts/crear-superadmin.sh`, `apps/api/Dockerfile.dev`, `apps/api/Dockerfile.production`, `apps/mobile_flutter/Dockerfile.production`, `apps/web/Dockerfile.production`, `deploy/nginx/chambeaya.conf.template`, `apps/mobile_flutter/deploy/nginx.conf`.
+- Decisiones: el guard de MEDIO-1 se ubicó en la sección de dominio (antes de cualquier `update_env_var`), reutilizando `nginx_present`/`target_file` ya calculados por la sección de detección de Nginx que corre justo antes; así queda antes de escribir nada, junto con las demás validaciones previas, tal como pidió la auditoría. No se tocó `initials()` (`apps/web/app/page.tsx:213`, fallback `"CN"` de un generador de iniciales genérico): no es la marca visible, no fue parte de los hallazgos, y cambiarlo habría sido ampliar el alcance sin pedido.
+- Validaciones (todas ejecutadas de verdad; Docker Desktop ya respondía):
+  - `bash -n` sobre `instalar-produccion.sh` y `deploy-hosting.sh` → sin errores.
+  - `shellcheck` (`koalaman/shellcheck:stable`, Docker) sobre `instalar-produccion.sh`, `deploy-hosting.sh` y `crear-superadmin.sh` → **código 0, sin avisos** en los tres (antes `crear-superadmin.sh` fallaba solo por el CRLF del árbol; normalizado, pasa limpio).
+  - Simulación con `nginx` real en un contenedor `ubuntu:24.04` (paquete `nginx` real, `systemctl`/`certbot`/`docker` como stubs, la sección de Nginx del script real sin modificar hasta antes de "Construir y levantar"): **9 escenarios, todos OK** — `--change-domain`+Certbot sin `--force-nginx` (aborta, `.env` y sitio con el mismo MD5 antes/después); con `--force-nginx` (sitio reemplazado, `nginx -t` y `reload` reales OK); `--change-domain` sin Certbot (regresión, sigue sin exigir el flag); dominio distinto sin `--change-domain` (aborta, sin cambios); `nginx -t` roto a propósito → aparece el mensaje específico "nginx -t falló…" (no el genérico) y el sitio se restaura exacto; `systemctl reload` fallando → mensaje específico "systemctl reload nginx falló…" y restauración exacta; Client ID inválido (aborta) y válido (actualiza solo esa variable); `update_env_var` con `\`, `/`, `&`, `=` → valor preservado byte a byte, sin líneas inyectadas. Limpié el contenedor y la imagen (`chambeaya-audit-a2:tmp`) al terminar; no se tocó ningún volumen del usuario.
+  - `apps/web`: `npx tsc --noEmit` → código 0. `npm run test:web` (Playwright) → **103 pasaron, 1 skipped**, igual que antes.
+  - Flutter en `ghcr.io/cirruslabs/flutter:3.44.0` (Docker): `flutter pub get --enforce-lockfile` → código 0, lockfile sin cambios; `flutter analyze` → `No issues found!`; `flutter test` → **148/148 passed** (incluye la prueba de `auth_page_test.dart` de la entrega anterior). Nota: la primera corrida de `flutter test` falló por un caché local (`.dart_tool/`) que quedó contaminado por un `flutter pub get` accidental con el Flutter local 3.47.1 durante `CN-20260926-001`; borré ese caché (gitignorado, sin relación con el índice) y repetí la corrida limpia, que pasó completa. No toqué código Dart en esta entrega.
+  - No se re-ejecutó la suite de `apps/api` ni la prueba de concurrencia del CLI contra Postgres real: no se modificó ningún archivo de `apps/api` en esta corrección, y `CN-20260926-002` ya las corrió sobre Postgres real con resultado `APROBADO` en ese punto.
+- Riesgos: ninguno conocido. Los 4 `NO_EJECUTADA` de `CN-20260926-001` quedan resueltos.
+- Siguiente paso: `auditor-opus` reaudita `CN-20260926-003`.
+
+### CN-20260926-002 — Auditoría de `CN-20260926-001` (Alcance A: marca, errores del formulario, Client ID de Google y hallazgos bajos de `007`/`009`)
+
+- Fecha: 2026-09-26 07:30 (America/Lima)
+- Agente: auditor-opus
+- Tipo: AUDITORIA
+- Estado: REQUIERE_CAMBIOS
+- Referencia: `CN-20260926-001`. HEAD `d4a65d0` (`main`).
+  - Índice: solo `scripts/instalar-produccion.sh` y `scripts/deploy-hosting.sh`, ambos `100755` y en LF, iguales al árbol.
+- Alcance: revisión independiente del diff completo. Ejecuté en Docker las 4 validaciones que el implementador dejó `NO_EJECUTADA`.
+- Archivos:
+  - Modificado por la auditoría (solo documentación): `docs/guides/deployment.md`.
+    - Añadí la restauración ante un fallo de escritura del sitio (disco lleno).
+    - Añadí que `NEXT_BASE_PATH` debe ser exactamente `/empresas` en producción.
+    - Añadí una advertencia sobre `--change-domain` con un sitio que ya tiene bloques de certbot (ver MEDIO-1).
+- Decisiones (hallazgos):
+  - **Críticos y altos: ninguno.**
+  - **MEDIO-1. `--change-domain` no regenera Nginx si el sitio ya tiene bloques de certbot, que es el caso real de producción.**
+    - Dónde: `scripts/instalar-produccion.sh:438-440` junto con `:631`.
+    - Qué pasa: sin `--force-nginx`, el script actualiza las 3 URLs de `.env.production`, **omite el sitio** (que sigue con `server_name` del dominio anterior), termina con código 0 y reconstruye los servicios con el dominio nuevo.
+    - Resultado: la app y el panel quedan compilados contra un dominio que Nginx no sirve, y la instalación queda caída. Además contradice `--help` y la guía ("regenera Nginx").
+    - Evidencia: escenario F de la simulación, con `nginx:` todavía en `server_name chambeaya.grupoamayo.com` tras pasar a `nuevo.grupoamayo.com`.
+    - Corrección: con `--change-domain`, si el sitio tiene `managed by Certbot` y falta `--force-nginx`, abortar **antes** de escribir `.env.production` (o tratar `--change-domain` como `--force-nginx`) y recordar el certbot del dominio nuevo.
+    - Mientras tanto dejé la advertencia en la guía.
+  - **BAJO-1.** `update_env_var` (`:367`) usa `awk -v val=...`, que interpreta escapes con `\`.
+    - Probado: `a\nb` produce `a` y **una línea nueva `b` en el archivo**; `c\d` produce `cd`. Los valores con `/`, `&` y `=` sí quedan intactos.
+    - Hoy no es explotable: los 2 llamadores solo pasan valores ya validados por `HOSTNAME_RE` o `GOOGLE_CLIENT_ID_RE`, sin `\`.
+    - Corrección: leer el valor desde `ENVIRON` en vez de `-v`.
+  - **BAJO-2.** Con `set -E`, el trap `ERR` (`:667`) también salta en `nginx_test_output="$(nginx -t 2>&1)"` (`:698`, dentro de la subshell y en la asignación) y en el `reload`, aunque haya `set +e`.
+    - La restauración es correcta, aunque se ejecuta dos veces y es idempotente.
+    - Pero los mensajes específicos ("nginx -t falló…", "reload falló…") quedan sustituidos por el genérico "Falló la instalación… (código 1)".
+    - Es cosmético.
+  - **BAJO-3.** `apps/web/app/page.tsx:1519` (pantalla "Preparando tu panel…") conserva `brand-mark` con "CN"; el resto de la marca ya dice "CH".
+  - **BAJO-4 (observación, fuera del diff).** `scripts/crear-superadmin.sh` está en LF en el índice y en HEAD, pero en CRLF en este árbol de trabajo (`core.autocrlf=true`, sin `.gitattributes`).
+    - Un clon de Linux recibe LF, así que producción no se ve afectada.
+    - Recomendación: añadir `*.sh text eol=lf` en `.gitattributes`.
+- Verificado sin hallazgo:
+  - `--change-domain` nunca cambia `POSTGRES_*`, `DATABASE_URL`, puertos, `API_TRUST_PROXY` ni `NEXT_BASE_PATH` (comparado con `diff`).
+  - La marca queda en `CHAMBEAYA` en `_BrandMark`, en el logo de onboarding, "Índice Chambeaya", la barra lateral y el login del panel.
+  - Siguen intactos el verbo `'Cumple'` (`worker_secondary_pages.dart:574`) y los prefijos `CUMPLE-`/`DEMO-CUMPLE-` (API y Flutter).
+  - `pubspec.lock` y `next-env.d.ts` están sin cambios.
+  - `deploy-hosting.sh` exige `/empresas` y avisa si falta el Client ID.
+- Validaciones (resultados reales):
+  1. Flutter en `ghcr.io/cirruslabs/flutter:3.44.0`:
+     - `flutter pub get --enforce-lockfile` → 0, con el lockfile sin cambios;
+     - `flutter analyze` → `No issues found!`, código 0;
+     - `flutter test` → `+148: All tests passed!`, incluida `field errors stay under their own field when switching to register`.
+  2. `shellcheck` (`koalaman/shellcheck:stable`) sobre `instalar-produccion.sh` y `deploy-hosting.sh` → 0. Sobre `crear-superadmin.sh`, 0 con la versión del índice; el archivo del árbol falla solo por CRLF (BAJO-4).
+  3. Concurrencia del CLI sobre un `postgres:16-alpine` desechable (`chambeaya-audit261-itest`):
+     - la prueba nueva pasa;
+     - **mutación** quitando `pg_advisory_xact_lock`: `expected … length of 1 but got 3` (la prueba detecta la carrera); con el archivo restaurado (`cmp`), `8 passed`;
+     - 3 rondas de 6 **procesos separados** de `create --if-none` (`tsx`) → `ADMIN=1` en cada ronda;
+     - `npm run test:integration` → `12 archivos, 85 pruebas` pasaron;
+     - API: `tsc` → 0, `npm test` → `356 passed`; web: `tsc` → 0.
+  4. Simulación del instalador con el `nginx` real en `ubuntu:24.04`, `sudo` real, `script` para la TTY, y `docker`/`systemctl`/`certbot`/`cp` (para el disco lleno) simulados:
+     - Client ID inválido → código 2, disco idéntico.
+     - Client ID válido → queda escrito y el resumen dice "Login con Google: ACTIVO".
+     - `.env` sin Client ID → aviso en el instalador y en `deploy-hosting.sh`, `.env` idéntico.
+     - Flag sobre un `.env` existente → cambia solo esa línea, que queda en `600 ops`.
+     - `-y` en una TTY → 0 preguntas (el control sin `-y` → 1).
+     - Dominio distinto sin flag → código 1, disco idéntico.
+     - `--change-domain` → URLs coherentes y secretos intactos (ver MEDIO-1).
+     - `--change-domain --force-nginx` → sitio regenerado y `nginx -t` OK.
+     - Escritura parcial del sitio (disco lleno) con archivo previo → restaurado byte a byte, sin `systemctl` ni despliegue.
+     - Disco lleno sin archivo previo → archivo retirado y sin enlace.
+     - Fallo de `nginx -t` o de `reload` → restauración exacta.
+     - Ctrl+C durante el `reload` → restaurado; tras un éxito → no restaura.
+     - Un conflicto de `server_name` → disco idéntico.
+     - Idempotencia → sin `systemctl`.
+  - Limpieza: eliminé el contenedor `chambeaya-audit261-itest` y su volumen anónimo, y la imagen `chambeaya-audit-ubnginx:tmp`. No toqué `chambeaya-stable-postgres-data` ni `chambeaya-private-documents`.
+- Riesgos:
+  - `NO_EJECUTADAS`: captura visual de la marca en un dispositivo o navegador real (solo revisé el código); un Ubuntu real con systemd, certbot real y el DNS real de `chambeaya.grupoamayo.com`.
+  - Mientras MEDIO-1 siga abierto, no se debe usar `--change-domain` en producción sin `--force-nginx`.
+- Siguiente paso: `implementador-sonnet` corrige MEDIO-1 (y, si quiere, BAJO-1 a BAJO-4) y registra la corrección; después `auditor-opus` vuelve a auditar.
+
+### CN-20260926-001 — Alcance A: marca "Chambeaya", errores corridos del formulario, aviso del Client ID de Google y hallazgos bajos de CN-20260925-007/009
+
+- Fecha: 2026-09-26 05:50 (America/Lima)
+- Agente: implementador-sonnet
+- Tipo: IMPLEMENTACION
+- Estado: LISTO_PARA_AUDITORIA
+- Referencia: Alcance A del plan aprobado por el usuario (`dynamic-prancing-bear.md`, no versionado); hallazgos `CN-20260925-007` (BAJO-1/2/3) y `CN-20260925-009` (BAJO-1/2/3). HEAD `d4a65d0`; árbol limpio al empezar.
+- Alcance:
+  1. **Marca "Chambeaya"**: reemplazado el texto visible "CUMPLE"/"CUMPLE NOW" por "Chambeaya"/"CHAMBEAYA" en Flutter (`_BrandMark` del login, logo apilado y "Índice CUMPLE" del onboarding) y en Web (sidebar de empresa y login de empresa), adaptando el estilo ya usado por la barra lateral del trabajador (`adaptive_worker_scaffold.dart`) sin rediseñar. El toast de Rescate perdió el prefijo "CUMPLE ". No se tocó el verbo `'Cumple'` del recorrido ni los prefijos `CUMPLE-`/`DEMO-CUMPLE-` (decisión 3 de `CN-20260916-096`). Búsqueda adicional en `apps/web` y `apps/mobile_flutter/lib` (incluidos `layout.tsx`, `index.html`, `manifest.json`): sin otras apariciones visibles de la marca antigua.
+  2. **Errores de validación corridos**: `ValueKey` estables en los 6 `TextFormField` de `auth_page.dart` (`auth-google-dni`, `auth-google-password`, `auth-name`, `auth-email`, `auth-password`, `auth-dni`). Decisión: no limpiar los errores del formulario al alternar login↔registro — con las keys, cada campo mantiene su propio error por identidad (ya no por posición), así que un error de un campo que sigue presente (correo, contraseña) sigue siendo válido tras alternar, y un campo recién montado (nombre, DNI) nace sin error porque nunca se validó; limpiarlo a mano solo ocultaría retroalimentación real vigente. Prueba de widget nueva en `auth_page_test.dart` que provoca ambos errores en login, alterna a registro y verifica por key que cada error sigue bajo su propio campo y no se corrió.
+  3. **Client ID de Google**: nuevo flag `--google-client-id` en `instalar-produccion.sh` (validado con un patrón `NNN-xxx.apps.googleusercontent.com`); se pregunta de forma interactiva solo al crear un `.env.production` nuevo (puede quedar vacío, con aviso). Sobre un `.env` existente sin ese flag, nunca se toca: solo avisa si sigue vacío (patrón del aviso de `API_TRUST_PROXY`). Con el flag sobre un `.env` existente, sí se actualiza esa única variable mostrando antes/después — decisión: a diferencia de `POSTGRES_PASSWORD` o los puertos (secretos generados, ligados a datos ya escritos), el Client ID es una credencial externa reconfigurable en la consola de Google, así que honrar el flag explícito es seguro y lo que el operador pide. El resumen final muestra "Login con Google: ACTIVO/DESACTIVADO". `deploy-hosting.sh` avisa en cada ejecución si sigue vacío. `docs/guides/deployment.md` actualizado (pasos renumerados, sección "DNS y Google Sign-In" ampliada).
+  4. **Hallazgos bajos**:
+     - `CN-20260925-009/BAJO-1`: `createSuperadmin(..., {ifNone: true})` ahora corre dentro de `prisma.$transaction` con `pg_advisory_xact_lock(hashtext(...))`: el chequeo y la creación quedan atómicos: serializa ejecuciones concurrentes de `--if-none`. Refactor: `insertSuperadmin(db: Db, email)` acepta tanto `PrismaClient` como `Prisma.TransactionClient`.
+     - `CN-20260925-009/BAJO-2`: con `-y`, `instalar-produccion.sh` ya no pregunta el correo del superadmin en una TTY interactiva (antes ignoraba `-y` para esa pregunta puntual).
+     - `CN-20260925-009/BAJO-3`: `printResult` decide una sola vez el flujo (stdout para éxito/"ya existe", stderr para cualquier error) y `runSuperadminCli` ya no duplica el mensaje de `VALIDATION_ERROR` en stderr.
+     - `CN-20260925-007/BAJO-1`: un `--domain` distinto al ya horneado en `NEXT_PUBLIC_API_URL` ahora **aborta sin tocar nada**, salvo `--change-domain` explícito, que actualiza `NEXT_PUBLIC_API_URL`/`API_BASE_URL`/`CORS_ALLOWED_ORIGINS` de forma coherente (mostrando antes/después) y recuerda pedir un certificado TLS nuevo.
+     - `CN-20260925-007/BAJO-2`: `deploy-hosting.sh` exige `NEXT_BASE_PATH=/empresas` exacto (antes aceptaba cualquier valor con "/" al inicio).
+     - `CN-20260925-007/BAJO-3`: la sección de instalación de Nginx ahora arma `trap on_nginx_failure INT TERM ERR` (antes solo `INT TERM`); un fallo de comando (p. ej. `cp` con disco lleno) también restaura el estado anterior exacto. No queda el trap activo tras el camino de éxito ni tras ningún `exit` de esa sección.
+  5. Hallazgo propio durante la validación (no pedido, corregido igual): `update_env_var` usaba `sed 's/^VAR=.*/VAR=valor/'`, que rompía con valores reales que llevan "/" (URLs `https://dominio/api`); reescrito con `awk` para sustituir el campo como texto literal.
+- Archivos:
+  - `apps/mobile_flutter/lib/features/auth/auth_page.dart`, `apps/mobile_flutter/lib/features/onboarding/onboarding_page.dart`, `apps/mobile_flutter/test/auth_page_test.dart`.
+  - `apps/web/app/page.tsx`, `apps/web/components/business-auth.tsx`, `apps/web/app/globals.css` (dos reglas CSS huérfanas tras quitar los `<span>`/`<i>` de "NOW").
+  - `apps/api/src/cli/superadmin.ts`, `apps/api/tests/cli.superadmin.test.ts`, `apps/api/tests/integration/superadmin-cli.integration.test.ts`.
+  - `scripts/instalar-produccion.sh`, `scripts/deploy-hosting.sh` (LF, `100755`; sincronizados al índice con `git add scripts/instalar-produccion.sh scripts/deploy-hosting.sh`; sin commit).
+  - `docs/guides/deployment.md`.
+- Validaciones:
+  - `apps/api`: `npx vitest run --exclude 'tests/integration/**'` → **356/356 pruebas, 22 archivos, OK** (incluye la prueba nueva de `printResult`/stdout-stderr único). `npx tsc --noEmit` → **código 0**.
+  - `apps/web`: `npx tsc --noEmit` → **código 0**. `npm run test:web` (Playwright, suite rápida con API simulada) → **103 pasaron, 1 skipped, código 0** (desktop + móvil).
+  - Scripts: `bash -n` sobre ambos → **sin errores**. `shellcheck`: **NO_EJECUTADA** (no está instalado en este entorno). Simulación funcional dirigida (sin Docker ni root, ejecutando una copia truncada del script real hasta el final de la sección 4, con `nginx_present=0` para no tocar Nginx real): verificado con `.env.production` real y descartado después (archivo ignorado por git) —
+    - creación nueva con `--domain`+`--google-client-id` válido → ambos quedan escritos correctamente;
+    - reinstalación sin `--google-client-id` sobre un `.env` con valor ya puesto → **no** avisa en falso y conserva el valor (bug que encontré y corregí en el propio diseño del aviso antes de cerrar esta entrada);
+    - `--domain` distinto sin `--change-domain` → **aborta con código 1, cero cambios** en el archivo;
+    - mismo caso con `--change-domain` → actualiza las 3 URLs de forma coherente;
+    - `--google-client-id` sobre `.env` existente → actualiza solo esa variable mostrando antes/después;
+    - `--google-client-id` con formato inválido → aborta con código 2 sin escribir nada (verificado con `diff` contra el archivo previo);
+    - lógica de `-y` sin correo aislada y probada con una función `is_interactive` simulada: no pregunta con `-y`, sí pregunta sin él.
+    - Simulación completa del instalador contra Nginx real en un contenedor Ubuntu (con `systemctl`/`certbot` simulados) y la prueba de concurrencia del CLI contra PostgreSQL real: **NO_EJECUTADA**. Docker Desktop no llegó a levantar un motor que respondiera (`docker info` sin respuesta) durante toda la sesión; sus propios logs (`%LOCALAPPDATA%\Docker\log\host\Docker Desktop.exe.log`) muestran que el proceso backend viene cayendo de forma recurrente desde el 2026-09-17, con el mismo código de salida, en cada arranque anterior a este — es una inestabilidad preexistente del Docker Desktop de esta máquina, no introducida por este cambio. No hay una base `_test` de Postgres accesible por otra vía en este entorno.
+  - Flutter: no se pudo ejecutar `flutter pub get --enforce-lockfile`/`analyze`/`test` en `ghcr.io/cirruslabs/flutter:3.44.0` por la misma caída de Docker: **NO_EJECUTADA**. Como sustituto parcial, sin modificar archivos: `dart format --output=none --set-exit-if-changed` sobre los 3 archivos Dart tocados confirma sintaxis válida; el único archivo con diferencias de formato (`auth_page.dart`, `auth_page_test.dart`) las tiene en líneas **preexistentes que no toqué** (verificado línea por línea con `diff`); `onboarding_page.dart` ya está formateado de forma canónica. También intenté `flutter pub get` (sin `--enforce-lockfile`) con el Flutter local 3.47.1 por error: regeneró `pubspec.lock`; lo revertí de inmediato con `git checkout -- apps/mobile_flutter/pubspec.lock` antes de seguir (no se modificó ningún commit ni quedó en el árbol).
+  - Efecto secundario detectado y revertido antes de cerrar: `apps/web/next-env.d.ts` quedó modificado por `tsc`/build de Next.js; revertido con `git checkout --` (no forma parte de este cambio).
+- Riesgos:
+  - `shellcheck` no ejecutado (no instalado): riesgo bajo, `bash -n` y la simulación funcional dirigida cubrieron los caminos nuevos.
+  - Simulación con Nginx real en Ubuntu y prueba de concurrencia del CLI contra Postgres real: NO_EJECUTADAS por la caída de Docker Desktop en esta máquina (preexistente, ver logs citados arriba); quedan pendientes de ejecutar apenas Docker esté disponible. El código de `pg_advisory_xact_lock` fue revisado a mano (tipos, `tsc --noEmit` en verde) pero no probado contra Postgres real.
+  - `flutter analyze`/`test` contra la imagen pinneada 3.44.0: NO_EJECUTADOS por la misma causa; la verificación de sintaxis con `dart format` es un sustituto parcial, no equivalente a `analyze`/`test` reales.
+  - La revisión visual manual de los logos de marca (Flutter, capturas reales en dispositivo/emulador) no se hizo; solo revisión de código y las suites automatizadas existentes (Playwright cubre el sidebar y el login de empresa en escritorio y móvil, sin fallos).
+- Siguiente paso: `auditor-opus` audita `CN-20260926-001`; en particular, revisar si el diseño de "Chambeaya" en `_BrandMark`/onboarding es aceptable sin captura visual, y decidir si las validaciones `NO_EJECUTADAS` (Docker/Flutter pinneado/Postgres real) bloquean la aprobación o quedan como riesgo aceptado hasta que Docker Desktop esté operativo.
+
 ### CN-20260925-009 — Auditoría de `CN-20260925-008` (comando para crear el primer superadmin)
 
 - Fecha: 2026-09-25 23:30 (America/Lima)

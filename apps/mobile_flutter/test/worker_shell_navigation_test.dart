@@ -14,7 +14,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: WorkerShell(repository: DemoWorkerMarketplaceRepository()),
+        home: WorkerShell(temporaryShiftsEnabled: true, repository: DemoWorkerMarketplaceRepository()),
       ),
     );
     await tester.pumpAndSettle();

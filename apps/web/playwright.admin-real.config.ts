@@ -45,6 +45,8 @@ export default defineConfig({
         CHAMBEAYA_E2E_REAL_TESTS: 'true',
         DATABASE_URL: process.env.CHAMBEAYA_E2E_DATABASE_URL ?? '',
         API_PORT: String(apiPort),
+        // Los specs de turnos (`assignment-resolution`) necesitan el flujo legado encendido en API y panel.
+        TEMPORARY_SHIFTS_ENABLED: 'true',
       },
     },
     {
@@ -55,6 +57,7 @@ export default defineConfig({
       timeout: 180_000,
       env: {
         NEXT_PUBLIC_API_URL: `${apiOrigin}/api`,
+        NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED: 'true',
         NEXT_TELEMETRY_DISABLED: '1',
       },
     },

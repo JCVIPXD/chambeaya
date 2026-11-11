@@ -50,6 +50,31 @@ enum WalletMovementStatus {
   REVERSED
 }
 
+/// Tipo de titular de una cuenta del libro mayor de moneda virtual. Una
+/// cuenta pertenece exactamente a un trabajador o a una empresa.
+enum CurrencyAccountOwnerType {
+  WORKER
+  COMPANY
+}
+
+/// Acciones que originan movimientos de Chambitas. M1 solo habilita ajustes
+/// administrativos; los débitos por acciones de producto llegan en M4.
+enum CurrencyMovementAction {
+  ADMIN_ADJUSTMENT
+  /// M4: débito por una acción de producto con costo (publicar, postular...).
+  ACTION_CHARGE
+  /// M4: devolución automática de un `ACTION_CHARGE`, enlazada con `refundOfId`.
+  ACTION_REFUND
+  /// M4: premio otorgado por el catálogo (hoy solo el bono de bienvenida).
+  REWARD
+}
+
+/// M2: una acción del catálogo cuesta moneda (COST) o la otorga (REWARD).
+enum CurrencyCatalogKind {
+  COST
+  REWARD
+}
+
 enum ApplicationStatus {
   PENDING
   ACCEPTED
@@ -134,6 +159,12 @@ enum WorkerDocumentKind {
   PROFILE_PHOTO
 }
 
+/// CN-20261012-049: acción registrada en el historial de verificaciones del administrador.
+enum VerificationChangeAction {
+  VERIFIED
+  UNVERIFIED
+}
+
 enum ExternalIdentityProvider {
   GOOGLE
 }
@@ -171,6 +202,24 @@ model User {
   cancellations ShiftCancellation[]
   events        ShiftEvent[]
   walletMovements WalletMovement[]
+  currencyAccount CurrencyAccount? @relation("WorkerCurrencyAccount")
+  currencyMovementsCreated CurrencyMovement[] @relation("CurrencyMovementCreatedBy")
+  currencyCatalogUpdates CurrencyCatalogEntry[] @relation("CurrencyCatalogUpdatedBy")
+  currencyCatalogChanges CurrencyCatalogChange[] @relation("CurrencyCatalogChangedBy")
+  currencyActionUses CurrencyActionUse[] @relation("CurrencyActionUseUser")
+  currencySettingUpdates CurrencySetting[] @relation("CurrencySettingUpdatedBy")
+  currencySettingChanges CurrencySettingChange[] @relation("CurrencySettingChangedBy")
+  contactUnlocksAsWorker CandidateContactUnlock[] @relation("WorkerContactUnlocks")
+  /// M6: código de referido del trabajador (se genera al pedirlo por primera vez).
+  referralCode  String?             @unique
+  referralsMade WorkerReferral[]    @relation("WorkerReferrer")
+  referralReceived WorkerReferral?  @relation("WorkerReferred")
+  currencyRewardGrants CurrencyRewardGrant[] @relation("CurrencyRewardGrantUser")
+  workerDocumentsVerified WorkerDocument[] @relation("WorkerDocumentVerifiedBy")
+  companiesVerified Company[]       @relation("CompanyVerifiedBy")
+  documentVerificationChangesMade WorkerDocumentVerificationChange[] @relation("DocumentVerificationChangedBy")
+  documentVerificationHistory WorkerDocumentVerificationChange[] @relation("DocumentVerificationSubject")
+  companyVerificationChangesMade CompanyVerificationChange[] @relation("CompanyVerificationChangedBy")
   conversationsAsWorker Conversation[] @relation("WorkerUserConversations")
   companyWorkerContacts CompanyWorkerContact[] @relation("CompanyWorkerContactUser")
   talentProfile WorkerTalentProfile?
@@ -180,6 +229,13 @@ model User {
   documents     WorkerDocument[]
   externalIdentities ExternalIdentity[]
   talentInvitationsCreated TalentInvitation[] @relation("TalentInvitationCreatedBy")
+  jobApplications JobApplication[] @relation("JobApplicationWorker")
+  jobApplicationEvents JobApplicationEvent[] @relation("JobApplicationEventActor")
+  platformSettingsUpdates PlatformSettings[] @relation("PlatformSettingsUpdatedBy")
+  platformSettingChanges PlatformSettingChange[] @relation("PlatformSettingChangedBy")
+  /// Alcance D, corrección de MEDIO-1 de `CN-20260926-020`: quién cerró cada
+  /// `ShiftAssignment` sin pago (ver `ShiftAssignment.closedWithoutPaymentById`).
+  assignmentsClosedWithoutPayment ShiftAssignment[] @relation("AssignmentClosedWithoutPaymentBy")
   createdAt     DateTime            @default(now())
   updatedAt     DateTime            @updatedAt
 }
@@ -200,7 +256,15 @@ model Company {
   conversations Conversation[]
   payments      Payment[]
   subscription  CompanySubscription?
+  currencyAccount CurrencyAccount? @relation("CompanyCurrencyAccount")
   talentInvitations TalentInvitation[]
+  verificationChanges CompanyVerificationChange[]
+  jobPostings   JobPosting[]
+  contactUnlocks CandidateContactUnlock[] @relation("CompanyContactUnlocks")
+  /// M6: verificación de la empresa por el administrador (autor y fecha).
+  verifiedAt    DateTime?
+  verifiedById  String?
+  verifiedBy    User?                @relation("CompanyVerifiedBy", fields: [verifiedById], references: [id], onDelete: SetNull)
   createdAt     DateTime             @default(now())
   updatedAt     DateTime             @updatedAt
 }
@@ -226,6 +290,18 @@ model Shift {
   startsAt         DateTime
   endsAt           DateTime
   payCents         Int
+  /// Comisión de Chambeaya (en puntos básicos, 1000 = 10,00%) vigente en
+  /// `PlatformSettings` al momento de publicar el turno. Queda fijada aquí
+  /// para siempre: cambiar el ajuste global después no altera turnos ya
+  /// publicados. Siempre tiene un valor: la migración que introdujo esta
+  /// columna fijó los turnos preexistentes en `0` (decisión del usuario: se
+  /// publicaron sin que la empresa viera ninguna comisión), así que ningún
+  /// código lee un ajuste global de respaldo para un turno ya creado.
+  commissionBps    Int
+  /// IGV (en puntos básicos) sobre la comisión, fijado junto con
+  /// `commissionBps` al publicar el turno. Misma regla: siempre tiene un
+  /// valor, `0` para los turnos anteriores a esta migración.
+  taxBps           Int
   requiredWorkers  Int                 @default(1)
   confirmedWorkers Int                 @default(0)
   description      String?
@@ -285,12 +361,31 @@ model ShiftAssignment {
   completedAt       DateTime?
   payment           Payment?
   reviews           AssignmentReview[]
+  /// Alcance D, corrección de MEDIO-1 de `CN-20260926-020`: señal
+  /// estructurada de "la empresa cerró esta asignación sin pagar", sin
+  /// depender de ningún texto libre. `true` solo cuando la asignación
+  /// llegó a `NO_SHOW`/`ABANDONED` (el trabajador se presentó o no) y una
+  /// decisión de la empresa la cerró sin generar `Payment`: `resolveAssignment`
+  /// con `outcome: 'CANCELLED'`, o `cancelShift` arrastrando una asignación
+  /// `NO_SHOW` (nunca una `ASSIGNED` simple, que jamás llegó a "presentarse o
+  /// no": cancelar un turno futuro no es evasión). `cancelShift` nunca puede
+  /// arrastrar una asignación con `checkedInAt` no nulo (lo bloquea antes),
+  /// así que ese camino no existe hoy. Nunca se pone en `false` después de
+  /// `true`: una vez cerrada sin pago, queda así para siempre.
+  closedWithoutPayment   Boolean  @default(false)
+  /// Momento de esa decisión (no de la asignación ni del turno). Es el campo
+  /// que usa `GET /api/admin/commissions` para filtrar por período — nunca
+  /// `ShiftEvent.createdAt` ni ningún texto de `detail`.
+  closedWithoutPaymentAt DateTime?
+  closedWithoutPaymentById String?
+  closedWithoutPaymentBy   User?   @relation("AssignmentClosedWithoutPaymentBy", fields: [closedWithoutPaymentById], references: [id], onDelete: SetNull)
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
 
   @@unique([shiftId, workerId])
   @@index([workerId, status])
   @@index([shiftId, status])
+  @@index([closedWithoutPayment, closedWithoutPaymentAt])
 }
 
 model AssignmentReview {
@@ -404,6 +499,12 @@ model WorkerTalentProfile {
   isCertificationsVisible Boolean          @default(true)
   isLanguagesVisible      Boolean          @default(true)
   isWorkAreaVisible       Boolean          @default(true)
+  /// M6 (PROFILE_HIGHLIGHT): el perfil se muestra primero en la búsqueda de
+  /// talento mientras `highlightedAt <= ahora < highlightedUntil`. `highlightedAt`
+  /// permite fijar la partición destacados/resto con el instante de la primera
+  /// página y que el cursor no duplique ni salte filas.
+  highlightedAt    DateTime?
+  highlightedUntil DateTime?
   specialties      WorkerTalentSpecialty[]
   experiences      WorkerExperience[]
   certifications   WorkerCertification[]
@@ -413,6 +514,7 @@ model WorkerTalentProfile {
   updatedAt        DateTime                @updatedAt
 
   @@index([isVisible, isAvailable, district])
+  @@index([highlightedUntil])
 }
 
 /// Experiencia laboral declarada por el trabajador. Varias entradas por
@@ -538,11 +640,51 @@ model WorkerDocument {
   originalName String
   mediaType    String
   sizeBytes    Int
+  /// Instante en que se subió el archivo vigente (el reemplazo lo renueva; `updatedAt` también cambia al verificar). Nulo en filas anteriores: el API usa `createdAt`.
+  uploadedAt   DateTime?
+  /// M6: verificado por el administrador (autor y fecha). Reemplazar el archivo
+  /// borra la verificación; el premio `DOCUMENT_VERIFIED` es uno por tipo y no se repite.
+  verifiedAt   DateTime?
+  verifiedById String?
+  verifiedBy   User?              @relation("WorkerDocumentVerifiedBy", fields: [verifiedById], references: [id], onDelete: SetNull)
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
 
   @@unique([userId, kind])
   @@index([userId, createdAt])
+}
+
+/// CN-20261012-049: historial de verificaciones de documentos del trabajador. Cada
+/// verificación y cada retiro guardan autor (nulo si la cuenta del admin se borra), fecha
+/// y, en el retiro, el motivo; `documentVersion` identifica el archivo revisado. Sin trigger
+/// de solo lectura: el autor puede volverse nulo (`ON DELETE SET NULL`).
+model WorkerDocumentVerificationChange {
+  id              String                   @id @default(cuid())
+  userId          String
+  user            User                     @relation("DocumentVerificationSubject", fields: [userId], references: [id], onDelete: Cascade)
+  kind            WorkerDocumentKind
+  documentVersion String
+  action          VerificationChangeAction
+  reason          String?
+  changedById     String?
+  changedBy       User?                    @relation("DocumentVerificationChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt       DateTime                 @default(now())
+
+  @@index([userId, kind, createdAt])
+}
+
+/// CN-20261012-049: mismo patrón para la verificación de la empresa.
+model CompanyVerificationChange {
+  id          String                   @id @default(cuid())
+  companyId   String
+  company     Company                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  action      VerificationChangeAction
+  reason      String?
+  changedById String?
+  changedBy   User?                    @relation("CompanyVerificationChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime                 @default(now())
+
+  @@index([companyId, createdAt])
 }
 
 model ExternalIdentity {
@@ -617,7 +759,34 @@ model Payment {
   assignment  ShiftAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   reference   String
   description String
+  /// Monto que recibe el trabajador (100% de lo publicado). La comisión de
+  /// Chambeaya se cobra ENCIMA de este monto, a la empresa; nunca se
+  /// descuenta de aquí.
   amountCents Int
+  /// Puntos básicos (1000 = 10,00%) copiados de `Shift.commissionBps` (o del
+  /// ajuste global si el turno es anterior a esta migración) al crear el
+  /// pago. Fijo desde ese momento.
+  commissionBps   Int      @default(0)
+  /// `floor((amountCents * commissionBps + 5000) / 10000)`, ver
+  /// `payment-amounts.ts#buildPaymentAmounts`.
+  commissionCents Int      @default(0)
+  /// IGV (puntos básicos) sobre `commissionCents`, copiado junto con
+  /// `commissionBps`.
+  taxBps          Int      @default(0)
+  taxCents        Int      @default(0)
+  /// `amountCents + commissionCents + taxCents`: lo que paga la empresa.
+  totalCents      Int      @default(0)
+  /// Adaptador que originó el pago. `'manual'`: generado por `checkOut`/
+  /// `resolveAssignment` (reporte manual, sin pasarela). `'legacy'`: creado
+  /// con el CRUD manual de pagos (`business.routes.ts`, hasta el Alcance D)
+  /// o backfill de un pago sin `assignmentId` anterior a esta migración;
+  /// siempre con comisión e IGV en 0. Los adaptadores de pasarela (Alcance E)
+  /// usarán otros valores.
+  provider    String        @default("manual")
+  /// Señala una discrepancia que un humano debe revisar (p. ej. un monto o
+  /// moneda que no coincide al recibir un webhook, Alcance E). No se usa
+  /// todavía en este alcance.
+  needsReview Boolean       @default(false)
   workerCount Int           @default(0)
   status      PaymentStatus @default(PENDING)
   dueAt       DateTime?
@@ -625,10 +794,117 @@ model Payment {
   workerConfirmedAt DateTime?
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
+  /// Intentos de checkout de una pasarela (Alcance E). Un pago `manual`
+  /// nunca tiene ninguno (`checkoutPayment` responde `409 PROVIDER_MANUAL`
+  /// antes de crear uno). Puede haber más de uno en el tiempo (un intento
+  /// vencido más otro nuevo tras un reintento), pero solo uno vigente
+  /// (`CREATED`) a la vez, garantizado por la transición `PENDING`->
+  /// `SCHEDULED` del propio `Payment`.
+  attempts    PaymentAttempt[]
 
   @@unique([companyId, reference])
   @@index([companyId, status])
   @@index([shiftId])
+}
+
+/// Estado de un intento de checkout de pasarela (Alcance E). `CREATED`: recién
+/// creado, esperando la decisión del proveedor (o que expire). `APPROVED`/
+/// `REJECTED`: el webhook (o el simulado) ya decidió. `EXPIRED`: nadie decidió
+/// antes de `expiresAt` (expiración perezosa: se marca al leer o reintentar,
+/// nunca con un cron).
+enum PaymentAttemptStatus {
+  CREATED
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+/// Un intento de checkout con una pasarela (`Payment.provider`, Alcance E:
+/// capa de adaptadores + proveedor simulado, sin mover dinero todavía). Nace
+/// junto con la transición `Payment` `PENDING`->`SCHEDULED`
+/// (`payments.service.ts#checkoutPayment`), en la misma transacción; el
+/// proveedor se llama DESPUÉS, fuera de esa transacción. `checkoutId` es lo
+/// que el proveedor (o el simulado) usa para referenciar este intento en su
+/// webhook; `totalCents`/`currency` son una copia congelada de
+/// `Payment.totalCents` al momento del checkout, para que el webhook pueda
+/// verificar que el monto que el proveedor confirma coincide (si no,
+/// `422 AMOUNT_MISMATCH` y `Payment.needsReview`).
+model PaymentAttempt {
+  id            String               @id @default(cuid())
+  paymentId     String
+  payment       Payment              @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  provider      String
+  checkoutId    String               @unique
+  status        PaymentAttemptStatus @default(CREATED)
+  totalCents    Int
+  currency      String               @default("PEN")
+  /// URL de retorno que el proveedor (o el simulado) entregó al crear el
+  /// checkout. Se guarda para que un doble clic (idempotencia de
+  /// `checkoutPayment` mientras el intento siga `CREATED` y vigente) devuelva
+  /// exactamente la misma URL sin volver a llamar al proveedor.
+  redirectUrl   String?
+  expiresAt     DateTime
+  failureReason String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  events        PaymentProviderEvent[]
+
+  @@index([paymentId])
+}
+
+/// Cada notificación recibida en `POST /api/payments/webhooks/:provider` (o
+/// generada por el checkout simulado, que pasa por la misma función de
+/// procesamiento). `@@unique([provider, eventId])` es la defensa contra
+/// duplicados: un `eventId` repetido del mismo proveedor (reintento de red
+/// del lado del proveedor, o el mismo clic dos veces en el simulado) viola
+/// esta restricción (`P2002`) y la petición responde `200` sin ningún efecto
+/// adicional, en vez de aplicar la transición dos veces. `payload` guarda el
+/// cuerpo verificado tal cual, para poder auditar cualquier discrepancia
+/// futura sin depender de los logs del proveedor.
+model PaymentProviderEvent {
+  id         String          @id @default(cuid())
+  provider   String
+  eventId    String
+  attemptId  String?
+  attempt    PaymentAttempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+  payload    Json
+  receivedAt DateTime        @default(now())
+
+  @@unique([provider, eventId])
+  @@index([attemptId])
+}
+
+/// Fila única (`id = 'global'`) con el % de comisión y el IGV vigentes. Un
+/// turno nuevo copia estos valores al publicarse (`Shift.commissionBps`/
+/// `taxBps`); cambiar esta fila nunca altera turnos ya publicados. `taxBps`
+/// es de solo lectura vía API en este alcance (no existe un endpoint que lo
+/// modifique).
+model PlatformSettings {
+  id            String    @id @default("global")
+  commissionBps Int       @default(1000)
+  taxBps        Int       @default(1800)
+  updatedAt     DateTime  @updatedAt
+  updatedById   String?
+  updatedBy     User?     @relation("PlatformSettingsUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+/// Auditoría inmutable de cada cambio a `PlatformSettings` (hoy solo
+/// `commissionBps`, vía `PATCH /api/admin/settings`). `changedById` es
+/// nullable con `onDelete: SetNull` (BAJO-3 de CN-20260926-012): con
+/// `Cascade`, borrar la cuenta del admin que hizo el cambio borraría la
+/// fila de auditoría entera, y una bitácora de dinero no debe poder
+/// desaparecer por la baja de quien la generó.
+model PlatformSettingChange {
+  id          String   @id @default(cuid())
+  field       String
+  oldValue    String
+  newValue    String
+  changedById String?
+  changedBy   User?    @relation("PlatformSettingChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@index([field, createdAt])
 }
 
 model WalletMovement {
@@ -644,4 +920,414 @@ model WalletMovement {
   @@index([workerId, createdAt])
   @@index([workerId, status])
   @@unique([workerId, reference])
+}
+
+/// Cuenta sin saldo materializado: el saldo se deriva del último movimiento
+/// inmutable. Las restricciones SQL de la migración aseguran que el tipo de
+/// titular coincida con exactamente una de las dos referencias.
+model CurrencyAccount {
+  id        String                   @id @default(cuid())
+  ownerType CurrencyAccountOwnerType
+  workerId  String?                  @unique
+  worker    User?                    @relation("WorkerCurrencyAccount", fields: [workerId], references: [id], onDelete: Restrict)
+  companyId String?                  @unique
+  company   Company?                 @relation("CompanyCurrencyAccount", fields: [companyId], references: [id], onDelete: Restrict)
+  movements CurrencyMovement[]
+  createdAt DateTime                 @default(now())
+
+  @@index([ownerType])
+}
+
+/// Libro mayor append-only de la moneda virtual. Nunca se actualiza ni se
+/// elimina desde la aplicación: `balanceAfter` es la foto resultante de cada
+/// movimiento y el saldo actual se deriva de la última fila por cuenta.
+model CurrencyMovement {
+  id                String                 @id @default(cuid())
+  accountId         String
+  account           CurrencyAccount        @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  sequence          Int
+  quantity          Int
+  balanceAfter      Int
+  action            CurrencyMovementAction
+  reason            String?
+  relatedEntityType String?
+  relatedEntityId   String?
+  idempotencyKey    String                 @unique
+  /// M4: clave del catálogo de la acción que generó el movimiento.
+  actionKey         String?
+  /// M4: en una devolución, el cargo original. Único: un cargo se devuelve una sola vez.
+  refundOfId        String?                @unique
+  refundOf          CurrencyMovement?      @relation("CurrencyRefund", fields: [refundOfId], references: [id], onDelete: Restrict)
+  refund            CurrencyMovement?      @relation("CurrencyRefund")
+  createdById       String?
+  createdBy         User?                  @relation("CurrencyMovementCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt         DateTime               @default(now())
+
+  @@unique([accountId, sequence])
+  @@index([createdById, createdAt])
+}
+
+/// M2: catálogo configurable de costos y premios de la moneda virtual. Una
+/// fila por (acción, actor). `actionKey` es una clave estable validada por la
+/// aplicación (`CURRENCY_ACTION_KEYS`); `kind`, `actor` y `actionKey` no se
+/// editan. `freeMonthlyQuota` (usos gratis por mes calendario de Lima) y
+/// `refundWindowHours` (devolución automática, la usa M4) solo aplican a COST.
+/// `isProvisional` queda en true hasta que un administrador edite la fila.
+model CurrencyCatalogEntry {
+  id                String              @id @default(cuid())
+  actionKey         String
+  actor             CurrencyAccountOwnerType
+  kind              CurrencyCatalogKind
+  amount            Int
+  active            Boolean             @default(true)
+  freeMonthlyQuota  Int                 @default(0)
+  refundWindowHours Int?
+  isProvisional     Boolean             @default(true)
+  updatedAt         DateTime            @updatedAt
+  updatedById       String?
+  updatedBy         User?               @relation("CurrencyCatalogUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  changes           CurrencyCatalogChange[]
+
+  @@unique([actionKey, actor])
+}
+
+/// Historial inmutable de cada cambio al catálogo: una fila por campo
+/// modificado, con valor anterior, nuevo, motivo y autor (como
+/// `PlatformSettingChange`; `changedById` pasa a nulo si se borra al admin).
+model CurrencyCatalogChange {
+  id          String               @id @default(cuid())
+  entryId     String
+  entry       CurrencyCatalogEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  actionKey   String
+  actor       CurrencyAccountOwnerType
+  field       String
+  oldValue    String
+  newValue    String
+  reason      String
+  changedById String?
+  changedBy   User?                @relation("CurrencyCatalogChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime             @default(now())
+
+  @@index([entryId, createdAt])
+}
+
+/// M4: una fila por instancia de acción con costo ejecutada (publicar un
+/// puesto, postular...), cobrada o dentro de la cuota gratuita. Sirve para:
+/// contar la cuota gratuita mensual (calendario de Lima), el tope de gasto
+/// diario, la idempotencia por instancia (`instanceKey`) y la devolución
+/// automática (`refundDueAt`/`refundSettledAt`).
+model CurrencyActionUse {
+  id                String                   @id @default(cuid())
+  userId            String
+  user              User                     @relation("CurrencyActionUseUser", fields: [userId], references: [id], onDelete: Cascade)
+  actor             CurrencyAccountOwnerType
+  actionKey         String
+  /// Identifica la instancia (`job-publish:{postingId}`...). Única: reintentos y
+  /// clics repetidos nunca cobran dos veces.
+  instanceKey       String                   @unique
+  accountId         String?
+  chargedAmount     Int                      @default(0)
+  /// Movimiento de débito (sin FK: el libro es inmutable y se consulta aparte).
+  movementId        String?
+  relatedEntityType String?
+  relatedEntityId   String?
+  occurredAt        DateTime
+  /// Instante a partir del cual se evalúa la devolución (congelado al cobrar).
+  refundDueAt       DateTime?
+  /// Cuándo se resolvió la devolución (devuelta o no elegible).
+  refundSettledAt   DateTime?
+  refundMovementId  String?
+
+  @@index([userId, actionKey, occurredAt])
+  @@index([userId, occurredAt])
+  @@index([refundSettledAt, refundDueAt])
+}
+
+/// M4: ajustes numéricos editables por el administrador con historial (tope de
+/// gasto diario, duración de un puesto destacado). Una fila por clave fija.
+model CurrencySetting {
+  key           String    @id
+  value         Int
+  isProvisional Boolean   @default(true)
+  updatedAt     DateTime  @updatedAt
+  updatedById   String?
+  updatedBy     User?     @relation("CurrencySettingUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+model CurrencySettingChange {
+  id          String   @id @default(cuid())
+  key         String
+  oldValue    String
+  newValue    String
+  reason      String
+  changedById String?
+  changedBy   User?    @relation("CurrencySettingChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@index([key, createdAt])
+}
+
+/// M6: un premio otorgado por un hecho (perfil completo, documento verificado...).
+/// `factKey` (`{actionKey}:{hecho}`) es único: aunque dos transacciones coincidan,
+/// un mismo hecho nunca paga dos veces. Además sirve para el tope diario/mensual de
+/// premios (`occurredAt` usa el reloj de la moneda) y para el estado de cada premio.
+/// El bono de bienvenida no se registra aquí (no cuenta para el tope de premios).
+model CurrencyRewardGrant {
+  id                String                   @id @default(cuid())
+  /// Titular del premio: el trabajador o el usuario dueño de la empresa.
+  userId            String
+  user              User                     @relation("CurrencyRewardGrantUser", fields: [userId], references: [id], onDelete: Cascade)
+  actor             CurrencyAccountOwnerType
+  actionKey         String
+  factKey           String                   @unique
+  amount            Int
+  /// Movimiento del libro (sin FK: el libro es inmutable y se consulta aparte).
+  movementId        String?
+  relatedEntityType String?
+  relatedEntityId   String?
+  occurredAt        DateTime
+
+  @@index([userId, occurredAt])
+  @@index([userId, actionKey, occurredAt])
+}
+
+/// M6: referido de un trabajador. Se crea al registrarse con un código válido y
+/// el referido es único (`referredId`): solo cuenta una vez. El premio al
+/// referidor se otorga cuando el referido completa su perfil (`rewardedAt`).
+model WorkerReferral {
+  id         String    @id @default(cuid())
+  referrerId String
+  referrer   User      @relation("WorkerReferrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referredId String    @unique
+  referred   User      @relation("WorkerReferred", fields: [referredId], references: [id], onDelete: Cascade)
+  code       String
+  rewardedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([referrerId, createdAt])
+}
+
+/// M4: contacto y CV de un candidato que no postuló, desbloqueados por una
+/// empresa. Único por (empresa, candidato): se paga una sola vez.
+model CandidateContactUnlock {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation("CompanyContactUnlocks", fields: [companyId], references: [id], onDelete: Cascade)
+  workerUserId String
+  worker       User     @relation("WorkerContactUnlocks", fields: [workerUserId], references: [id], onDelete: Cascade)
+  movementId   String?
+  createdAt    DateTime @default(now())
+
+  @@unique([companyId, workerUserId])
+  @@index([workerUserId])
+}
+
+// ---------------------------------------------------------------------------
+// M3: puestos fijos formales y embudo de selección. Valores en inglés, igual
+// que el resto del esquema (el mapeo a los términos de producto está en
+// `docs/reference/api.md`). No tocan los turnos temporales.
+// ---------------------------------------------------------------------------
+
+enum JobPostingStatus {
+  DRAFT
+  PUBLISHED
+  PAUSED
+  CLOSED
+  /// Todas las vacantes están cubiertas por contrataciones confirmadas.
+  FILLED
+}
+
+enum JobModality {
+  ONSITE
+  REMOTE
+  HYBRID
+}
+
+enum JobWorkload {
+  FULL_TIME
+  PART_TIME
+}
+
+enum JobContractType {
+  INDEFINITE
+  FIXED_TERM
+  INTERNSHIP
+  OTHER
+}
+
+/// Embudo: APPLIED, SHORTLISTED, INTERVIEW, OFFER, ACCEPTED, HIRED; salidas
+/// REJECTED (decide la empresa) y WITHDRAWN (decide el trabajador, también al
+/// rechazar una oferta). La máquina de estados vive en
+/// `modules/jobs/job-application-state.ts`.
+enum JobApplicationStatus {
+  APPLIED
+  SHORTLISTED
+  INTERVIEW
+  OFFER
+  ACCEPTED
+  HIRED
+  REJECTED
+  WITHDRAWN
+}
+
+enum JobInterviewMode {
+  ONSITE
+  VIDEO
+  PHONE
+}
+
+enum JobOfferStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  /// Reemplazada por una versión nueva antes de ser respondida.
+  SUPERSEDED
+  /// La empresa descartó al candidato con la oferta aún sin responder.
+  WITHDRAWN
+}
+
+enum JobApplicationEventType {
+  APPLIED
+  SHORTLISTED
+  INTERVIEW_SCHEDULED
+  OFFER_ISSUED
+  OFFER_ACCEPTED
+  OFFER_DECLINED
+  HIRED
+  REJECTED
+  WITHDRAWN
+  /// M4: el trabajador volvió a postular tras retirarse (se reactiva la misma fila).
+  APPLICATION_REOPENED
+}
+
+model JobPosting {
+  id                 String           @id @default(cuid())
+  companyId          String
+  /// RESTRICT (M4): la constancia de una oferta aceptada no desaparece por
+  /// cascada al borrar la empresa; el borrado administrativo se bloquea.
+  company            Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  title              String
+  description        String
+  responsibilities   String?
+  requirements       String?
+  benefits           String?
+  modality           JobModality
+  workload           JobWorkload
+  /// Rango salarial MENSUAL en céntimos de `currency`, visible al candidato.
+  salaryMinCents     Int
+  salaryMaxCents     Int
+  currency           String           @default("PEN")
+  location           String
+  contractType       JobContractType
+  expectedStartDate  DateTime?
+  vacancies          Int
+  /// Derivado: solo lo incrementa la confirmación de una contratación
+  /// (`HIRED`), en la misma transacción que la hace. Ninguna ruta lo edita.
+  /// `CHECK (filledVacancies <= vacancies)` en la migración.
+  filledVacancies    Int              @default(0)
+  screeningQuestions Json?
+  status             JobPostingStatus @default(DRAFT)
+  publishedAt        DateTime?
+  closedAt           DateTime?
+  /// M4: destacado hasta este instante (orden preferente en la búsqueda).
+  highlightedUntil   DateTime?
+  applications       JobApplication[]
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([companyId, status])
+  @@index([status, publishedAt, id])
+  @@index([status, highlightedUntil])
+}
+
+model JobApplication {
+  id               String               @id @default(cuid())
+  postingId        String
+  posting          JobPosting           @relation(fields: [postingId], references: [id], onDelete: Restrict)
+  workerId         String
+  /// RESTRICT (M4): ver `JobPosting.company`.
+  worker           User                 @relation("JobApplicationWorker", fields: [workerId], references: [id], onDelete: Restrict)
+  status           JobApplicationStatus @default(APPLIED)
+  screeningAnswers Json?
+  interviewAt      DateTime?
+  interviewMode    JobInterviewMode?
+  interviewNote    String?
+  decisionReason   String?
+  hiredAt          DateTime?
+  /// M4: postulación con prioridad (pagada); la empresa la ve primero.
+  isPriority       Boolean              @default(false)
+  prioritizedAt    DateTime?
+  /// M4: la resolvió el sistema porque el puesto se cerró (`POSTING_CLOSED`) o
+  /// se cubrió (`POSTING_FILLED`) sin contratarla. No es una decisión de la
+  /// empresa; las listas del trabajador la ocultan salvo el historial.
+  autoClosedReason String?
+  offers           JobOffer[]
+  uploads          JobOfferUpload[]
+  events           JobApplicationEvent[]
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  @@unique([postingId, workerId])
+  @@index([workerId, status])
+  @@index([postingId, status])
+}
+
+/// Oferta versionada. Una nueva oferta crea una versión nueva y marca la
+/// anterior `SUPERSEDED`. Al aceptarse se guarda `acceptanceSnapshot` y un
+/// trigger de la migración impide cualquier `UPDATE` posterior de la fila.
+model JobOffer {
+  id                 String           @id @default(cuid())
+  applicationId      String
+  application        JobApplication   @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  version            Int
+  status             JobOfferStatus   @default(PENDING)
+  salaryCents        Int
+  currency           String           @default("PEN")
+  contractType       JobContractType
+  startDate          DateTime
+  note               String?
+  documentStorageKey String?          @unique
+  documentName       String?
+  documentMediaType  String?
+  documentSizeBytes  Int?
+  documentSha256     String?
+  respondedAt        DateTime?
+  acceptanceSnapshot Json?
+  createdAt          DateTime         @default(now())
+
+  @@unique([applicationId, version])
+}
+
+/// Documento PDF subido por la empresa antes de emitir la oferta. Se consume
+/// (`consumedAt`) al emitirla; el archivo vive en el almacenamiento privado.
+model JobOfferUpload {
+  id            String         @id @default(cuid())
+  applicationId String
+  application   JobApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  storageKey    String         @unique
+  originalName  String
+  mediaType     String
+  sizeBytes     Int
+  sha256        String
+  consumedAt    DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@index([applicationId, consumedAt])
+}
+
+model JobApplicationEvent {
+  id            String                  @id @default(cuid())
+  applicationId String
+  application   JobApplication          @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  actorId       String?
+  actor         User?                   @relation("JobApplicationEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole     ShiftEventActorRole
+  type          JobApplicationEventType
+  fromStatus    JobApplicationStatus?
+  toStatus      JobApplicationStatus?
+  detail        String?
+  createdAt     DateTime                @default(now())
+
+  @@index([applicationId, createdAt])
+  @@index([actorId, createdAt])
 }

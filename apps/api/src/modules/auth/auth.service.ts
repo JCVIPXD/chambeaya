@@ -7,6 +7,8 @@ import {
 
 import { Prisma, PrismaClient, type User } from "@prisma/client";
 
+import { normalizeReferralCode } from "../currency/currency.referrals.js";
+
 export type AccountRole = "WORKER" | "BUSINESS" | "ADMIN";
 
 export interface RegisterInput {
@@ -15,6 +17,8 @@ export interface RegisterInput {
   email: string;
   password: string;
   dniOrRuc: string;
+  /** M6: código de referido de otro trabajador (opcional, solo trabajadores). */
+  referralCode?: string | null;
 }
 
 export interface GoogleIdentityInput {
@@ -54,6 +58,20 @@ export interface AuthService {
     token: string,
     password: string,
   ): Promise<AuthSession> | AuthSession;
+  /**
+   * Cambia la contraseña de una cuenta que YA tiene una contraseña local
+   * configurada (cualquier rol). Distinto de `setInitialGooglePassword`, que
+   * solo sirve para fijar la PRIMERA contraseña de una cuenta creada con
+   * Google (`localPasswordConfigured=false`). Verifica `currentPassword`,
+   * exige que `newPassword` sea válida y distinta de la actual, y borra
+   * todas las demás `AuthSession` del usuario conservando la que hizo la
+   * petición.
+   */
+  changePassword(
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<AuthSession> | AuthSession;
 }
 
 interface Account extends Omit<RegisterInput, "password"> {
@@ -70,11 +88,17 @@ export class AuthError extends Error {
       | "DUPLICATE_ACCOUNT"
       | "DUPLICATE_IDENTIFIER"
       | "INVALID_REGISTRATION"
+      | "INVALID_REFERRAL_CODE"
       | "INVALID_SESSION"
       | "GOOGLE_EMAIL_ALREADY_REGISTERED"
       | "GOOGLE_PROFILE_SETUP_EXPIRED"
       | "PASSWORD_SETUP_NOT_AVAILABLE"
-      | "GOOGLE_SIGN_IN_UNAVAILABLE",
+      | "GOOGLE_SIGN_IN_UNAVAILABLE"
+      | "INVALID_CURRENT_PASSWORD"
+      | "WEAK_PASSWORD"
+      | "PASSWORD_UNCHANGED"
+      | "GOOGLE_ONLY_ACCOUNT"
+      | "PASSWORD_CHANGED_CONCURRENTLY",
   ) {
     super(code);
   }
@@ -208,6 +232,34 @@ export class LocalAuthService implements AuthService {
     throw new AuthError('GOOGLE_SIGN_IN_UNAVAILABLE');
   }
 
+  changePassword(
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+  ): AuthSession {
+    const tokenHash = hashToken(token);
+    const account = this.sessions.get(tokenHash);
+    if (!account) throw new AuthError('INVALID_SESSION');
+    if (!account.localPasswordConfigured) {
+      throw new AuthError('GOOGLE_ONLY_ACCOUNT');
+    }
+    if (!passwordMatches(currentPassword, account)) {
+      throw new AuthError('INVALID_CURRENT_PASSWORD');
+    }
+    if (!isValidPassword(newPassword)) throw new AuthError('WEAK_PASSWORD');
+    if (passwordMatches(newPassword, account)) {
+      throw new AuthError('PASSWORD_UNCHANGED');
+    }
+    account.salt = randomBytes(16).toString('hex');
+    account.passwordHash = hashPassword(newPassword, account.salt);
+    for (const [hash, sessionAccount] of this.sessions) {
+      if (sessionAccount === account && hash !== tokenHash) {
+        this.sessions.delete(hash);
+      }
+    }
+    return publicSession(token, account);
+  }
+
   private sessionFor(account: Account): AuthSession {
     const token = createOpaqueToken();
     this.sessions.set(hashToken(token), account);
@@ -215,23 +267,54 @@ export class LocalAuthService implements AuthService {
   }
 }
 
+export type AuthServiceOptions = {
+  /**
+   * Se invoca tras crear la cuenta de un trabajador (bono de bienvenida, M4). Un fallo se
+   * registra pero NUNCA deshace el registro: el bono es idempotente y la ruta de
+   * administración `/api/admin/currency/welcome-bonus/backfill` lo regulariza.
+   */
+  onWorkerCreated?: (workerId: string) => Promise<void>;
+};
+
 export class DatabaseAuthService implements AuthService {
-  constructor(private readonly prisma = new PrismaClient()) {}
+  constructor(private readonly prisma = new PrismaClient(), private readonly options: AuthServiceOptions = {}) {}
+
+  private async notifyWorkerCreated(account: User) {
+    if (account.role !== 'WORKER' || !this.options.onWorkerCreated) return;
+    try {
+      await this.options.onWorkerCreated(account.id);
+    } catch (error) {
+      console.error('WELCOME_BONUS_FAILED', error);
+    }
+  }
 
   async register(input: RegisterInput): Promise<AuthSession> {
     const normalized = normalizeRegistration(input);
     const salt = randomBytes(16).toString("hex");
+    const data = {
+      email: normalized.email,
+      passwordHash: hashPassword(input.password, salt),
+      salt,
+      role: input.role,
+      name: normalized.name,
+      identifier: normalized.identifier,
+    };
+    // M6: un código de referido válido enlaza la cuenta nueva con su referidor en la misma
+    // transacción (el referido es único y nunca el propio titular del código).
+    const rawCode = typeof input.referralCode === "string" ? input.referralCode.trim() : "";
+    const referralCode = rawCode ? normalizeReferralCode(rawCode) : null;
+    if (rawCode && (!referralCode || input.role !== "WORKER")) throw new AuthError("INVALID_REFERRAL_CODE");
     try {
-      const account = await this.prisma.user.create({
-        data: {
-          email: normalized.email,
-          passwordHash: hashPassword(input.password, salt),
-          salt,
-          role: input.role,
-          name: normalized.name,
-          identifier: normalized.identifier,
-        },
-      });
+      const account = referralCode
+        ? await this.prisma.$transaction(async (tx) => {
+            const referrer = await tx.user.findFirst({ where: { referralCode, role: "WORKER" }, select: { id: true } });
+            if (!referrer) throw new AuthError("INVALID_REFERRAL_CODE");
+            const created = await tx.user.create({ data });
+            await tx.workerReferral.create({ data: { referrerId: referrer.id, referredId: created.id, code: referralCode } });
+            return created;
+          })
+        : await this.prisma.user.create({ data });
+      await this.notifyWorkerCreated(account);
       return this.sessionFor(account);
     } catch (error) {
       if (
@@ -245,6 +328,10 @@ export class DatabaseAuthService implements AuthService {
         throw new AuthError(
           identifierIsDuplicated ? "DUPLICATE_IDENTIFIER" : "DUPLICATE_ACCOUNT",
         );
+      }
+      // El referidor se borró entre la lectura del código y el enlace.
+      if (referralCode && error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
+        throw new AuthError("INVALID_REFERRAL_CODE");
       }
       throw error;
     }
@@ -367,6 +454,7 @@ export class DatabaseAuthService implements AuthService {
         },
       });
       await this.prisma.googleProfileSetup.delete({ where: { id: setup.id } });
+      await this.notifyWorkerCreated(account);
       return this.sessionFor(account);
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -404,6 +492,81 @@ export class DatabaseAuthService implements AuthService {
       },
     });
     return publicSession(token, this.toAccount(account));
+  }
+
+  async changePassword(
+    token: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<AuthSession> {
+    if (!token) throw new AuthError('INVALID_SESSION');
+    const currentTokenHash = hashToken(token);
+    const session = await this.prisma.authSession.findUnique({
+      where: { tokenHash: currentTokenHash },
+      include: { user: true },
+    });
+    if (!session || session.expiresAt <= new Date()) {
+      // Idempotente por la misma razón que en `restore` (CN-20260923-013, BAJO-1).
+      if (session) await this.prisma.authSession.deleteMany({ where: { id: session.id } });
+      throw new AuthError('INVALID_SESSION');
+    }
+    const account = this.toAccount(session.user);
+    if (!account.localPasswordConfigured) {
+      throw new AuthError('GOOGLE_ONLY_ACCOUNT');
+    }
+    if (!passwordMatches(currentPassword, account)) {
+      throw new AuthError('INVALID_CURRENT_PASSWORD');
+    }
+    if (!isValidPassword(newPassword)) throw new AuthError('WEAK_PASSWORD');
+    if (passwordMatches(newPassword, account)) {
+      throw new AuthError('PASSWORD_UNCHANGED');
+    }
+    const salt = randomBytes(16).toString('hex');
+    const passwordHash = hashPassword(newPassword, salt);
+    // El hash leído más arriba (`session.user.passwordHash`), fuera de esta
+    // transacción, es lo que acabamos de verificar contra `currentPassword`.
+    const readPasswordHash = session.user.passwordHash;
+
+    const updatedUser = await this.prisma.$transaction(async (tx) => {
+      // Control de concurrencia optimista (CN-20260926-008, MEDIO-1): dos
+      // peticiones simultáneas con la misma contraseña actual leen el mismo
+      // `passwordHash` fuera de la transacción y las dos pasan la
+      // verificación de arriba. Sin condicionar este `update` al hash que
+      // cada una leyó, ambas lo sobrescribirían igual ("la última en escribir
+      // gana" en silencio): las dos responderían `200`, pero solo una
+      // contraseña quedaría vigente y cada transacción habría borrado la
+      // sesión de la otra (reproducido 20/20 por `auditor-opus`). `updateMany`
+      // con `passwordHash: readPasswordHash` en el `where` hace que solo la
+      // primera transacción en comprometerse afecte una fila: la de después
+      // ve `count === 0` porque el hash ya cambió, y no borra ninguna sesión.
+      const updated = await tx.user.updateMany({
+        where: { id: session.userId, passwordHash: readPasswordHash },
+        data: { salt, passwordHash },
+      });
+      if (updated.count === 0) {
+        throw new AuthError('PASSWORD_CHANGED_CONCURRENTLY');
+      }
+      // Se ejecuta DESPUÉS del `update` y dentro de la MISMA transacción:
+      // borra toda sesión que exista en este momento salvo la actual (sin
+      // filtrar por fecha), lo que también alcanza a una sesión creada por
+      // un login concurrente que ya se había confirmado antes de este punto.
+      //
+      // Riesgo residual, documentado (no cerrado por esta corrección): un
+      // login que ya haya leído la fila del usuario con el hash viejo antes
+      // de que el `update` de arriba se comprometa, y que recién inserte su
+      // `AuthSession` después de que este `deleteMany` corra, sobrevive.
+      // `login()` no comparte transacción ni bloqueo con `changePassword()`,
+      // así que esta ventana no se puede cerrar solo desde aquí; cerrarla
+      // exigiría serializar `login()` contra `changePassword()` a nivel de
+      // fila (por ejemplo con un bloqueo consultivo por usuario), un cambio
+      // en la ruta más caliente de la API que se deja fuera de esta
+      // corrección (ver riesgos de `CN-20260926-009` en `docs/PROGRESO.md`).
+      await tx.authSession.deleteMany({
+        where: { userId: session.userId, tokenHash: { not: currentTokenHash } },
+      });
+      return tx.user.findUniqueOrThrow({ where: { id: session.userId } });
+    });
+    return publicSession(token, this.toAccount(updatedUser));
   }
 
   private async sessionFor(account: User): Promise<AuthSession> {

@@ -10,8 +10,10 @@ class AdaptiveWorkerScaffold extends StatelessWidget {
     required this.selectedIndex,
     required this.onDestinationSelected,
     required this.body,
+    this.destinations = workerDestinations,
   });
 
+  final List<WorkerDestination> destinations;
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
   final Widget body;
@@ -26,7 +28,7 @@ class AdaptiveWorkerScaffold extends StatelessWidget {
           bottomNavigationBar: NavigationBar(
             selectedIndex: selectedIndex,
             onDestinationSelected: onDestinationSelected,
-            destinations: workerDestinations
+            destinations: destinations
                 .map(
                   (destination) => NavigationDestination(
                     icon: Icon(destination.icon),
@@ -48,7 +50,7 @@ class AdaptiveWorkerScaffold extends StatelessWidget {
                   selectedIndex: selectedIndex,
                   onDestinationSelected: onDestinationSelected,
                   labelType: NavigationRailLabelType.all,
-                  destinations: workerDestinations
+                  destinations: destinations
                       .map(
                         (destination) => NavigationRailDestination(
                           icon: Icon(destination.icon),
@@ -71,6 +73,7 @@ class AdaptiveWorkerScaffold extends StatelessWidget {
           body: Row(
             children: [
               _DesktopSidebar(
+                destinations: destinations,
                 selectedIndex: selectedIndex,
                 onDestinationSelected: onDestinationSelected,
               ),
@@ -85,10 +88,12 @@ class AdaptiveWorkerScaffold extends StatelessWidget {
 
 class _DesktopSidebar extends StatelessWidget {
   const _DesktopSidebar({
+    required this.destinations,
     required this.selectedIndex,
     required this.onDestinationSelected,
   });
 
+  final List<WorkerDestination> destinations;
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
 
@@ -152,7 +157,7 @@ class _DesktopSidebar extends StatelessWidget {
                 ),
               ),
             ),
-            ...workerDestinations.indexed.map((entry) {
+            ...destinations.indexed.map((entry) {
               final index = entry.$1;
               final destination = entry.$2;
               final selected = index == selectedIndex;

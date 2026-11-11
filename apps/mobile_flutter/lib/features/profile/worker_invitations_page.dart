@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/app_theme.dart';
+import '../jobs/jobs_format.dart';
+import '../wallet/wallet_models.dart';
+import '../wallet/wallet_repository.dart';
 import 'talent_invitation_repository.dart';
 
 /// Lets the worker see the invitations companies sent to their talent
@@ -9,9 +12,26 @@ import 'talent_invitation_repository.dart';
 /// `POST /api/workers/me/talent-invitations/:id/{accept,decline}`; the card
 /// only reflects the server's response, never an optimistic guess.
 class WorkerInvitationsPage extends StatefulWidget {
-  const WorkerInvitationsPage({super.key, required this.repository});
+  const WorkerInvitationsPage({
+    super.key,
+    required this.repository,
+    this.showShiftInfo = true,
+    this.wallet,
+    this.onResponded,
+  });
 
   final TalentInvitationRepository repository;
+
+  /// `false` oculta el turno asociado a la invitación (turnos temporales apagados).
+  final bool showShiftInfo;
+
+  /// Opcional: con la billetera se muestra el premio por responder a tiempo
+  /// (`INVITATION_RESPONDED`), que fija la API.
+  final WalletRepository? wallet;
+
+  /// Se llama tras responder, para refrescar el saldo (el premio se acredita
+  /// en la misma operación).
+  final VoidCallback? onResponded;
 
   @override
   State<WorkerInvitationsPage> createState() => _WorkerInvitationsPageState();
@@ -22,11 +42,32 @@ class _WorkerInvitationsPageState extends State<WorkerInvitationsPage> {
   var _isLoading = true;
   String? _error;
   final Set<String> _responding = {};
+  String? _rewardHint;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadRewardHint();
+  }
+
+  /// El premio y la moneda salen de la API; si no se pueden leer no se
+  /// muestra nada (las invitaciones se responden igual).
+  Future<void> _loadRewardHint() async {
+    final wallet = widget.wallet;
+    if (wallet == null) return;
+    try {
+      final rewards = await wallet.rewards();
+      final item = rewards.item(ActionKeys.invitationResponded);
+      if (!mounted || item == null) return;
+      setState(() {
+        _rewardHint =
+            'Responder una invitación a tiempo te da ${formatCoins(item.amount, rewards.currency)} '
+            '(una vez por invitación, tanto si aceptas como si rechazas).';
+      });
+    } catch (_) {
+      // Sin aviso de premio.
+    }
   }
 
   Future<void> _load() async {
@@ -68,6 +109,7 @@ class _WorkerInvitationsPageState extends State<WorkerInvitationsPage> {
           ];
         }
       });
+      widget.onResponded?.call();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -106,6 +148,7 @@ class _WorkerInvitationsPageState extends State<WorkerInvitationsPage> {
   @override
   Widget build(BuildContext context) => _InvitationsScaffold(
     onRefresh: _isLoading ? null : _load,
+    rewardHint: _rewardHint,
     child: _buildBody(),
   );
 
@@ -133,6 +176,7 @@ class _WorkerInvitationsPageState extends State<WorkerInvitationsPage> {
           .map(
             (invitation) => _InvitationCard(
               invitation: invitation,
+              showShift: widget.showShiftInfo,
               responding: _responding.contains(invitation.id),
               onAccept: invitation.isRespondable
                   ? () => _respond(invitation, true)
@@ -168,8 +212,10 @@ class _InvitationCard extends StatelessWidget {
     required this.responding,
     required this.onAccept,
     required this.onDecline,
+    this.showShift = true,
   });
 
+  final bool showShift;
   final TalentInvitation invitation;
   final bool responding;
   final VoidCallback? onAccept;
@@ -178,7 +224,7 @@ class _InvitationCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final presentation = _statusPresentation(invitation.status);
-    final shift = invitation.shift;
+    final shift = showShift ? invitation.shift : null;
     final message = invitation.message?.trim();
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
@@ -340,8 +386,13 @@ class _InvitationsMessage extends StatelessWidget {
 }
 
 class _InvitationsScaffold extends StatelessWidget {
-  const _InvitationsScaffold({required this.child, this.onRefresh});
+  const _InvitationsScaffold({
+    required this.child,
+    this.onRefresh,
+    this.rewardHint,
+  });
 
+  final String? rewardHint;
   final Widget child;
   final VoidCallback? onRefresh;
 
@@ -379,6 +430,29 @@ class _InvitationsScaffold extends StatelessWidget {
                 'Empresas que te invitaron directamente desde el directorio de talento',
                 style: TextStyle(color: context.palette.muted, fontSize: 14),
               ),
+              if (rewardHint != null) ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: context.palette.accentSoft,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.card_giftcard_rounded, color: AppColors.teal),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          rewardHint!,
+                          style: TextStyle(color: context.palette.ink),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 24),
               child,
             ],

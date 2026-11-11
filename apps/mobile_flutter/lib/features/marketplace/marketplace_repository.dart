@@ -106,9 +106,11 @@ WorkerMarketplaceRepository createWorkerMarketplaceRepository({
 
 class DemoWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
   DemoWorkerMarketplaceRepository()
-    : _shifts = List<Shift>.from(data.availableShifts);
+    : _shifts = List<Shift>.from(data.availableShifts),
+      _paymentHistory = List<PaymentRecord>.from(data.paymentHistory);
 
   final List<Shift> _shifts;
+  final List<PaymentRecord> _paymentHistory;
   final Set<String> _savedShiftIds = {};
   var _isAvailable = true;
   final Map<String, ApplicationState> _applicationStates = {
@@ -169,11 +171,32 @@ class DemoWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
       .toList(growable: false);
 
   @override
-  Future<List<PaymentRecord>> walletMovements() async => paymentHistory;
+  Future<List<PaymentRecord>> walletMovements() async =>
+      List.unmodifiable(_paymentHistory);
 
   @override
   Future<void> confirmPayment(String paymentId) async {
-    throw StateError('Este pago de demostración no requiere confirmación');
+    final index = _paymentHistory.indexWhere(
+      (payment) => payment.id == paymentId,
+    );
+    if (index == -1 || !_paymentHistory[index].canConfirmReceipt) {
+      // Misma regla que la API real (`PAYMENT_NOT_REPORTABLE`): un pago
+      // inexistente, ya confirmado o que todavía no está pagado no admite
+      // esta acción.
+      throw StateError('Este pago no admite confirmar la recepción');
+    }
+    final current = _paymentHistory[index];
+    _paymentHistory[index] = PaymentRecord(
+      id: current.id,
+      company: current.company,
+      role: current.role,
+      amount: current.amount,
+      status: current.status,
+      reference: current.reference,
+      receiptConfirmed: true,
+      canConfirmReceipt: false,
+      date: current.date,
+    );
   }
 
   @override

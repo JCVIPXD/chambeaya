@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import cors, { type CorsOptions } from 'cors';
 import express, { type Express } from 'express';
 
@@ -10,9 +11,30 @@ import { createBusinessRouter } from './modules/business/business.routes.js';
 import type { BusinessOperations } from './modules/business/business.service.js';
 import { createAdminRouter } from './modules/admin/admin.routes.js';
 import { createTalentRouter } from './modules/talent/talent.routes.js';
-import type { TalentOperations } from './modules/talent/talent.service.js';
-import type { TalentInvitationOperations } from './modules/talent/talent_invitation.service.js';
+import { DatabaseTalentService, type TalentOperations } from './modules/talent/talent.service.js';
+import { DatabaseTalentInvitationService, type TalentInvitationOperations } from './modules/talent/talent_invitation.service.js';
+import { DatabaseCandidateUnlockService, type CandidateUnlockOperations } from './modules/talent/candidate_unlock.service.js';
 import { createRateLimitMiddleware, type RateLimitOptions } from './middleware/rate_limit.js';
+import { createPaymentsWebhookRouter, createSimulatedPaymentsRouter } from './modules/payments/payments.routes.js';
+import { temporaryShiftsEnabled } from './modules/temporary-shifts.js';
+import { createAdminCurrencyRouter, createBusinessCurrencyRouter, createWorkerCurrencyRouter } from './modules/currency/currency.routes.js';
+import { CurrencyCatalogService, type CurrencyUsageCounter } from './modules/currency/currency.catalog.service.js';
+import { CurrencyLedgerService } from './modules/currency/currency.service.js';
+import { CurrencyActionService } from './modules/currency/currency.actions.js';
+import { createJobCurrencyHooks } from './modules/currency/currency.hooks.js';
+import { CurrencyQuoteService } from './modules/currency/currency.quote.js';
+import { CurrencyRefundService } from './modules/currency/currency.refunds.js';
+import { ProfileRewardService } from './modules/currency/currency.profile-rewards.js';
+import { WorkerReferralService } from './modules/currency/currency.referrals.js';
+import { CurrencyRewardService } from './modules/currency/currency.rewards.js';
+import { CurrencyRewardStatusService } from './modules/currency/currency.reward-status.js';
+import { CurrencyVerificationService } from './modules/currency/currency.verification.js';
+import { CurrencySettingsService } from './modules/currency/currency.settings.js';
+import { WelcomeBonusService } from './modules/currency/currency.welcome.js';
+import { createBusinessJobsRouter, createJobEventsRouter, createWorkerJobsRouter } from './modules/jobs/jobs.routes.js';
+import { JobService, type JobHooks } from './modules/jobs/jobs.service.js';
+import { jobEvents, type JobEvents } from './modules/jobs/jobs.events.js';
+import { PrivateDocumentStorage } from './modules/talent/private_document_storage.js';
 
 const DEFAULT_AUTH_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_AUTH_RATE_LIMIT_MAX = 20;
@@ -40,14 +62,18 @@ function resolveAuthRateLimitOptions(): RateLimitOptions {
  *   visible (se registra un error y no se permite ningún origen) en lugar de
  *   abrir el acceso en silencio.
  */
-function resolveCorsOptions(): CorsOptions | undefined {
+// `Retry-After` (503 SERIALIZATION_RETRY_EXHAUSTED) no es una cabecera visible para el navegador entre
+// orígenes distintos salvo que se exponga: el panel web la lee para ofrecer el reintento.
+const EXPOSED_HEADERS = ['Retry-After'];
+
+function resolveCorsOptions(): CorsOptions {
   const raw = process.env.CORS_ALLOWED_ORIGINS;
   const origins = raw
     ? raw.split(',').map((origin) => origin.trim()).filter((origin) => origin.length > 0)
     : [];
 
   if (origins.length > 0) {
-    return { origin: origins };
+    return { origin: origins, exposedHeaders: EXPOSED_HEADERS };
   }
 
   if (process.env.NODE_ENV === 'production') {
@@ -55,10 +81,10 @@ function resolveCorsOptions(): CorsOptions | undefined {
     console.error(
       '[cors] CORS_ALLOWED_ORIGINS no está definida en producción; se bloquean todos los orígenes de navegador.',
     );
-    return { origin: false };
+    return { origin: false, exposedHeaders: EXPOSED_HEADERS };
   }
 
-  return undefined;
+  return { exposedHeaders: EXPOSED_HEADERS };
 }
 
 export function createApp(options: {
@@ -68,6 +94,8 @@ export function createApp(options: {
   marketplaceEvents?: MarketplaceShiftEvents;
   talentService?: TalentOperations;
   talentInvitationService?: TalentInvitationOperations;
+  /** Desbloqueo de contacto y CV de candidatos que no postularon (M4). */
+  candidateUnlockService?: CandidateUnlockOperations;
   /**
    * Configura el limitador de intentos de las rutas sensibles de
    * `/api/auth`. `false` lo desactiva por completo (uso exclusivo de
@@ -83,10 +111,55 @@ export function createApp(options: {
    * defecto de `createMarketplaceRouter`.
    */
   marketplaceFeedRefreshIntervalMs?: number;
+  /**
+   * `PrismaClient` compartido por el webhook (`/api/payments/webhooks/:provider`)
+   * y el checkout simulado (`/api/payments/simulated/:checkoutId/...`),
+   * Alcance E. Las pruebas lo inyectan para apuntar a la base de pruebas;
+   * sin esto, cada router abriría su propio `PrismaClient` por defecto.
+   */
+  paymentsPrisma?: PrismaClient;
+  /** Cliente compartido por el libro mayor de Chambitas. */
+  currencyPrisma?: PrismaClient;
+  /** Contador de usos del catálogo mostrado por `/currency/catalog`; por defecto lee los usos reales (M4). */
+  currencyUsageCounter?: CurrencyUsageCounter;
+  /** Reloj de las acciones con costo (cuota mensual, tope diario, devolución); solo para pruebas. */
+  currencyClock?: () => Date;
+  /** Cliente, almacenamiento, ganchos (M4) y bus de avisos de los puestos fijos (M3). */
+  jobsPrisma?: PrismaClient;
+  jobsStorage?: PrivateDocumentStorage;
+  /** Almacenamiento privado de los documentos del trabajador (talento y revisión del admin); por defecto `DOCUMENT_STORAGE_ROOT`. */
+  documentStorage?: PrivateDocumentStorage;
+  jobsHooks?: JobHooks;
+  jobsEvents?: JobEvents;
+  /** Habilita el flujo legado de turnos temporales. Por defecto se toma de
+   * `TEMPORARY_SHIFTS_ENABLED`, apagado salvo valor literal `true`. */
+  temporaryShiftsEnabled?: boolean;
 } = {}): Express {
   const app = express();
-  const authService = options.authService ?? new DatabaseAuthService();
   const shiftEvents = options.marketplaceEvents ?? marketplaceShiftEvents;
+  const paymentsPrisma = options.paymentsPrisma ?? new PrismaClient();
+  const currencyPrisma = options.currencyPrisma ?? new PrismaClient();
+  const documentStorage = options.documentStorage ?? new PrivateDocumentStorage();
+  const currencyLedger = new CurrencyLedgerService(currencyPrisma);
+  const currencyCatalog = new CurrencyCatalogService(currencyPrisma, options.currencyUsageCounter, undefined, options.currencyClock);
+  // M4: cobro de acciones, bono de bienvenida y devolución comparten un reloj y un cliente.
+  const currencyActions = new CurrencyActionService(options.currencyClock);
+  const welcomeBonus = new WelcomeBonusService(currencyPrisma, currencyActions);
+  const authService = options.authService ?? new DatabaseAuthService(undefined, { onWorkerCreated: async (workerId) => { await welcomeBonus.grantForWorker(workerId); } });
+  const currencyQuotes = new CurrencyQuoteService(currencyPrisma, currencyActions);
+  // M6: premios automáticos. Comparten reloj y cliente con el resto de la moneda.
+  const currencyRewards = new CurrencyRewardService(options.currencyClock);
+  const referrals = new WorkerReferralService(currencyPrisma, currencyRewards);
+  const rewardStatus = new CurrencyRewardStatusService(currencyPrisma, currencyRewards);
+  const talentService = options.talentService ?? new DatabaseTalentService(currencyPrisma, documentStorage, new ProfileRewardService(currencyRewards, referrals), currencyActions, options.currencyClock);
+  const jobsService = new JobService(options.jobsPrisma ?? new PrismaClient(), {
+    storage: options.jobsStorage,
+    hooks: options.jobsHooks ?? createJobCurrencyHooks(currencyActions, currencyRewards),
+    events: options.jobsEvents,
+  });
+  const talentInvitations = options.talentInvitationService ?? new DatabaseTalentInvitationService(currencyPrisma, currencyActions, currencyRewards);
+  const candidateUnlocks = options.candidateUnlockService ?? new DatabaseCandidateUnlockService(currencyPrisma, currencyActions);
+  const legacyShiftsEnabled = options.temporaryShiftsEnabled ?? temporaryShiftsEnabled();
 
   const authRateLimiter =
     options.rateLimit === false
@@ -114,6 +187,12 @@ export function createApp(options: {
   }
 
   app.use(cors(resolveCorsOptions()));
+  // Webhook de pagos (Alcance E): ANTES de `express.json()` global. La firma
+  // (`webhook-signature.ts`) se calcula sobre el `rawBody` exacto que llegó
+  // por la red; `express.json()` lo consumiría y lo dejaría irrecuperable.
+  // Sin sesión: la única defensa es la firma HMAC + su propio rate limit
+  // (`createPaymentsWebhookRouter`).
+  app.use('/api/payments', createPaymentsWebhookRouter(paymentsPrisma));
   app.use(express.json());
   app.get('/', (_request, response) => {
     response.json({
@@ -127,11 +206,28 @@ export function createApp(options: {
   });
   app.use('/api', createMarketplaceRouter(options.marketplaceService, shiftEvents, authService, {
     feedRefreshIntervalMs: options.marketplaceFeedRefreshIntervalMs,
+    temporaryShiftsEnabled: legacyShiftsEnabled,
   }));
-  app.use('/api', createTalentRouter(authService, options.talentService, options.talentInvitationService));
+  app.use('/api', createWorkerCurrencyRouter(authService, currencyLedger, currencyCatalog, currencyQuotes, { rewards: rewardStatus, referrals }));
+  app.use('/api', createTalentRouter(authService, talentService, talentInvitations, candidateUnlocks));
   app.use('/api/auth', createAuthRouter(authService, { rateLimiter: authRateLimiter }));
-  app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish()));
-  app.use('/api/admin', createAdminRouter(authService));
+  app.use('/api/business', createBusinessRouter(authService, options.businessService, () => shiftEvents.publish(), legacyShiftsEnabled));
+  app.use('/api/business', createBusinessCurrencyRouter(authService, currencyLedger, currencyCatalog, currencyQuotes, { rewards: rewardStatus }));
+  app.use('/api/business', createBusinessJobsRouter(authService, jobsService));
+  app.use('/api/workers', createWorkerJobsRouter(authService, jobsService));
+  app.use('/api', createJobEventsRouter(authService, options.jobsEvents ?? jobEvents));
+  app.use('/api/admin', createAdminRouter(authService, undefined, undefined, {
+    onCompanyCreated: async (ownerId) => { await welcomeBonus.grantForCompanyOwner(ownerId); },
+  }));
+  app.use('/api/admin', createAdminCurrencyRouter(authService, currencyLedger, currencyCatalog, {
+    settings: new CurrencySettingsService(currencyPrisma),
+    welcome: welcomeBonus,
+    refunds: new CurrencyRefundService(currencyPrisma, options.currencyClock),
+    verification: new CurrencyVerificationService(currencyPrisma, currencyRewards, documentStorage),
+  }));
+  // Checkout simulado (Alcance E): sesión BUSINESS normal, después de
+  // `express.json()` global, a diferencia del webhook de arriba.
+  app.use('/api/payments', createSimulatedPaymentsRouter(authService, paymentsPrisma));
 
   return app;
 }

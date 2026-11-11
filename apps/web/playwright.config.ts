@@ -1,9 +1,14 @@
 import { defineConfig, devices } from '@playwright/test';
 
+import './e2e/restore-tracked-files.cjs';
+
 const baseURL = 'http://127.0.0.1:3100';
+// Segundo panel compilado SIN la bandera de turnos temporales (el valor por defecto de producción).
+export const flagOffURL = 'http://127.0.0.1:3101';
 
 export default defineConfig({
   testDir: './e2e',
+  globalTeardown: './e2e/global-teardown.mjs',
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
@@ -21,15 +26,33 @@ export default defineConfig({
     { name: 'chromium-desktop', use: { ...devices['Desktop Chrome'] } },
     { name: 'chromium-mobile', use: { ...devices['Pixel 7'] } },
   ],
-  webServer: {
-    command: 'npm run build && npm run start -- --hostname 127.0.0.1 --port 3100',
-    url: baseURL,
-    reuseExistingServer: false,
-    timeout: 180_000,
-    env: {
-      // The browser fixture intercepts this origin; no real API or accounts are used.
-      NEXT_PUBLIC_API_URL: `${baseURL}/api`,
-      NEXT_TELEMETRY_DISABLED: '1',
+  webServer: [
+    {
+      // Ambos builds pasan por un script que restaura tsconfig.json y next-env.d.ts: `next build` los reescribe
+      // (tipos de producción en el de siempre, y otro distDir en el segundo panel).
+      command: 'node scripts/build-keeping-tracked-files.mjs && npm run start -- --hostname 127.0.0.1 --port 3100',
+      url: baseURL,
+      reuseExistingServer: false,
+      timeout: 180_000,
+      env: {
+        // The browser fixture intercepts this origin; no real API or accounts are used.
+        NEXT_PUBLIC_API_URL: `${baseURL}/api`,
+        TEMPORARY_SHIFTS_ENABLED: 'true',
+        NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED: 'true',
+        NEXT_TELEMETRY_DISABLED: '1',
+      },
     },
-  },
+    {
+      command: 'node scripts/build-keeping-tracked-files.mjs && npm run start -- --hostname 127.0.0.1 --port 3101',
+      url: flagOffURL,
+      reuseExistingServer: false,
+      timeout: 180_000,
+      env: {
+        NEXT_PUBLIC_API_URL: `${flagOffURL}/api`,
+        NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED: 'false',
+        NEXT_DIST_DIR: '.next-flag-off',
+        NEXT_TELEMETRY_DISABLED: '1',
+      },
+    },
+  ],
 });

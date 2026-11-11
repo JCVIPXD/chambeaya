@@ -12,6 +12,23 @@ import type { AuthSession } from '../auth/auth.service.js';
 import { companyCanViewApplicantCv } from '../talent/cv_access.js';
 import { deriveShiftStatus, isTerminalShift, nextOperationalAction, resolveAssignmentLifecycle } from '../operations/shift-state.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
+import { buildPaymentAmounts, getPlatformSettings } from '../payments/payment-amounts.js';
+import {
+  checkoutPayment as checkoutPaymentWithProvider,
+  expireStaleScheduledPayments,
+  PaymentNotFoundError,
+  PaymentNotPayableError as PaymentGatewayNotPayableError,
+  ProviderManualError,
+  ProviderUnavailableError,
+  activePaymentProviderName,
+  resolvePaymentProvider,
+  type CheckoutResponse,
+} from '../payments/payments.service.js';
+
+// Se reexportan para que `business.routes.ts` pueda distinguirlos en
+// `sendError` sin importar directamente del módulo `payments` (mismo
+// patrón que el resto de errores de dominio de este archivo).
+export { PaymentNotFoundError, ProviderManualError, ProviderUnavailableError };
 
 // Se reexporta para no romper a quien ya lo importaba desde este módulo.
 export { withSerializableRetry };
@@ -51,6 +68,17 @@ export type ShiftInput = {
   modality?: 'PRESENCIAL' | 'REMOTO' | 'HIBRIDO';
   notes?: string | null;
   rescueActive?: boolean;
+  /**
+   * Los bps que el panel mostró en la vista previa al momento de enviar el
+   * formulario (`GET /business/payment-settings`). Si no coinciden con el
+   * ajuste global vigente al crear el turno, `createShift` lanza
+   * `CommissionChangedError` (409 `COMMISSION_CHANGED`) en vez de publicar
+   * con un % que la empresa nunca vio. Ignorados por `updateShift`: editar
+   * un turno ya publicado nunca toca su comisión (queda congelada desde que
+   * se creó).
+   */
+  expectedCommissionBps?: number;
+  expectedTaxBps?: number;
 };
 
 export type WorkerInput = {
@@ -70,16 +98,6 @@ export type ConversationInput = {
   status?: ConversationStatus;
 };
 
-export type PaymentInput = {
-  reference: string;
-  description: string;
-  amountCents: number;
-  workerCount?: number;
-  status?: PaymentStatus;
-  dueAt?: Date | null;
-  processedAt?: Date | null;
-};
-
 export type ApplicationDecision = 'ACCEPTED' | 'REJECTED';
 export type PendingApplicationsSummary = { count: number; shiftIds: string[] };
 export type AssignmentResolutionOutcome = 'COMPLETED' | 'CANCELLED';
@@ -88,9 +106,56 @@ export class BusinessRecordNotFoundError extends Error {}
 export class BusinessValidationError extends Error {}
 export class BusinessForbiddenError extends Error {}
 
+/**
+ * `POST /business/payments/:id/mark-paid` (Alcance D) contra un pago que
+ * existe y es de la empresa, pero no está en condición de marcarse pagado:
+ * ya no es `PENDING` (otra llamada ganó la carrera, o está `PROCESSED`/
+ * `CANCELLED`), o su `provider` no es `'manual'`/`'legacy'` (una pasarela,
+ * Alcance E, tiene su propio flujo de confirmación vía webhook, nunca este
+ * endpoint manual). 409, nunca 400: el `id` es válido y de esta empresa,
+ * solo que la transición pedida ya no aplica.
+ */
+export class PaymentNotPayableError extends Error {}
+
+/**
+ * "Cerrada sin pago" (Alcance D; corrección de MEDIO-1 de `CN-20260926-020`):
+ * una asignación que llegó a `NO_SHOW` o `ABANDONED` (el trabajador se
+ * presentó o no) y que una decisión de la empresa cerró sin generar
+ * `Payment`. Nunca se detecta por texto libre (`ShiftEvent.detail`): un
+ * motivo de `cancelShift` que casualmente empezara con cierto prefijo podía
+ * falsear el conteo, y una `NO_SHOW`/`ABANDONED` nunca resuelta lo evadía
+ * sin dejar ningún rastro. La señal es estructurada, en `ShiftAssignment`:
+ * `closedWithoutPayment`/`closedWithoutPaymentAt`/`closedWithoutPaymentById`,
+ * escritos en los dos únicos caminos que la producen -`resolveAssignment`
+ * con `outcome: 'CANCELLED'` (abajo) y `cancelShift` arrastrando una
+ * asignación `NO_SHOW` (más abajo)-, nunca en una `ASSIGNED` simple (jamás
+ * llegó a "presentarse o no", cancelar un turno futuro no es evasión) ni en
+ * una ya `CANCELLED`/`COMPLETED`. `GET /api/admin/commissions` los cuenta
+ * por empresa junto con `pendingResolution` (`NO_SHOW`/`ABANDONED` que la
+ * empresa todavía no resolvió), para que dejarlas sin resolver no las
+ * esconda del reporte.
+ */
+
+/**
+ * BAJO-4 de CN-20260926-012: la vista previa que la empresa vio antes de
+ * enviar el formulario (`GET /business/payment-settings`) puede haber
+ * quedado obsoleta si el admin cambió el ajuste global mientras la empresa
+ * completaba los demás campos. `createShift` la lanza cuando el
+ * `expectedCommissionBps`/`expectedTaxBps` que el formulario envía no
+ * coincide con el ajuste vigente AHORA MISMO, en vez de fijar en el turno
+ * un % que la empresa nunca llegó a ver. Lleva los valores vigentes para
+ * que el panel pueda refrescar su vista previa sin una segunda petición.
+ */
+export class CommissionChangedError extends Error {
+  constructor(public readonly commissionBps: number, public readonly taxBps: number) {
+    super('COMMISSION_CHANGED');
+  }
+}
+
 export interface BusinessOperations {
   getCompany(session: AuthSession): Promise<unknown>;
   updateCompany(session: AuthSession, input: CompanyUpdate): Promise<unknown>;
+  paymentSettings(session: AuthSession): Promise<unknown>;
   listShifts(session: AuthSession): Promise<unknown>;
   getShift(session: AuthSession, id: string): Promise<unknown>;
   createShift(session: AuthSession, input: ShiftInput): Promise<unknown>;
@@ -118,9 +183,20 @@ export interface BusinessOperations {
   deleteMessage(session: AuthSession, conversationId: string, messageId: string): Promise<void>;
   listPayments(session: AuthSession): Promise<unknown>;
   getPayment(session: AuthSession, id: string): Promise<unknown>;
-  createPayment(session: AuthSession, input: PaymentInput): Promise<unknown>;
-  updatePayment(session: AuthSession, id: string, input: Partial<PaymentInput>): Promise<unknown>;
-  deletePayment(session: AuthSession, id: string): Promise<void>;
+  /**
+   * Único endpoint de escritura que le queda al CRUD de pagos (Alcance D
+   * retira `POST`/`PATCH`/`DELETE`: la empresa ya no puede inventar,
+   * alterar montos ni borrar pagos). Solo transiciona un pago `PENDING` con
+   * `provider` `'manual'` o `'legacy'` a `PROCESSED`; nunca toca ningún
+   * monto.
+   */
+  markPaymentPaid(session: AuthSession, id: string): Promise<unknown>;
+  /**
+   * `POST /business/payments/:id/checkout` (Alcance E). Delega en
+   * `payments.service.ts#checkoutPayment` tras resolver la empresa dueña de
+   * la sesión; solo aplica si el proveedor activo no es `'manual'`.
+   */
+  checkoutPayment(session: AuthSession, id: string): Promise<CheckoutResponse>;
 }
 
 export class DatabaseBusinessService implements BusinessOperations {
@@ -133,6 +209,19 @@ export class DatabaseBusinessService implements BusinessOperations {
   async updateCompany(session: AuthSession, input: CompanyUpdate) {
     const company = await this.companyFor(session);
     return this.prisma.company.update({ where: { id: company.id }, data: input });
+  }
+
+  /**
+   * Ajuste global vigente que se congelaría en un turno nuevo, para la
+   * vista previa del formulario de publicación. `mode: 'manual'` queda fijo
+   * en este alcance; el Alcance E lo leerá de `PAYMENT_PROVIDER`.
+   */
+  async paymentSettings(session: AuthSession) {
+    void session; // No depende de la empresa: el ajuste es global.
+    const { commissionBps, taxBps } = await getPlatformSettings(this.prisma);
+    // Alcance E: `mode` ya no queda fijo en `'manual'`; es el nombre del
+    // adaptador activo (`PAYMENT_PROVIDER`, ver `payments.service.ts`).
+    return { commissionBps, taxBps, currency: 'PEN', mode: resolvePaymentProvider().name };
   }
 
   async listShifts(session: AuthSession) {
@@ -148,7 +237,29 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async createShift(session: AuthSession, input: ShiftInput) {
     const company = await this.companyFor(session);
-    const shift = await this.prisma.shift.create({ data: { ...input, companyId: company.id, confirmedWorkers: 0 } });
+    const { expectedCommissionBps, expectedTaxBps, ...shiftData } = input;
+    // La comisión y el IGV vigentes quedan fijados en el turno al publicarlo
+    // (decisión del plan de pagos): un cambio posterior del ajuste global
+    // (`PlatformSettings`, `PATCH /api/admin/settings`) nunca altera turnos
+    // ya publicados, editados o no. No hay ciclo de "borrador" para un turno
+    // (`createShift` siempre lo deja en `PUBLISHED`, ver `ShiftInput`), así
+    // que no existe un estado previo a la publicación donde fijar esto antes
+    // valdría la pena.
+    const { commissionBps, taxBps } = await getPlatformSettings(this.prisma);
+    // BAJO-4 de CN-20260926-012: si el formulario indica qué % mostró y ya
+    // no coincide con el vigente, se rechaza en vez de publicar con un %
+    // que la empresa no vio. Sin `expectedCommissionBps`/`expectedTaxBps`
+    // (llamadas que no los envían) no se exige nada, para no romper otros
+    // clientes de esta API.
+    if (
+      (expectedCommissionBps !== undefined && expectedCommissionBps !== commissionBps) ||
+      (expectedTaxBps !== undefined && expectedTaxBps !== taxBps)
+    ) {
+      throw new CommissionChangedError(commissionBps, taxBps);
+    }
+    const shift = await this.prisma.shift.create({
+      data: { ...shiftData, companyId: company.id, confirmedWorkers: 0, commissionBps, taxBps },
+    });
     await this.prisma.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'PUBLISHED', detail: 'Turno publicado' } });
     return shift;
   }
@@ -186,6 +297,19 @@ export class DatabaseBusinessService implements BusinessOperations {
     // Solo comprueba la propiedad (404 si el turno no es de la empresa); el
     // estado y las asignaciones se leen DENTRO de la transacción reintentable.
     const owned = await this.ownedShift(session, id);
+    // Corrección de MEDIO-1 (nuevo) de CN-20260926-022: sin esto, una
+    // asignación que ya venció su ventana de check-in pero seguía `ASSIGNED`
+    // en la base (nadie había abierto las postulaciones ni `resolve` para
+    // persistir el `NO_SHOW`) pasaba a `CANCELLED` por el `updateMany` de
+    // `ASSIGNED` de abajo, SIN la señal `closedWithoutPayment` -era otra vía
+    // para ocultar un cierre sin pago con solo no abrir el panel-. Mismo
+    // patrón que ya usa `resolveAssignment` (ver esa función): se persiste el
+    // ciclo de vida en su propia transacción, ANTES de la de `cancelShift`,
+    // para que la transacción de abajo relea el estado ya correcto
+    // (`NO_SHOW`/`ABANDONED`) y aplique el `updateMany` que corresponde. Su
+    // resultado no se usa como base de nada: `owned` sigue siendo solo una
+    // lectura previa de propiedad.
+    await this.resolveShiftAssignmentsLifecycle(owned);
     // `Serializable` + reintento (BAJO-1 y BAJO-2 de CN-20260920-004): antes esta
     // transacción no tenía aislamiento y los guards se evaluaban fuera de ella,
     // así que un `resolveAssignment` concurrente (que también es Serializable)
@@ -214,7 +338,19 @@ export class DatabaseBusinessService implements BusinessOperations {
       // PostgreSQL detectaba un interbloqueo (`40P01`) tras 1 s y una de las dos
       // llamadas respondía `500`. Ver `docs/reference/api.md`, "Orden de bloqueo".
       await tx.shiftApplication.updateMany({ where: { shiftId: shift.id, status: { in: ['PENDING', 'ACCEPTED'] } }, data: { status: 'CANCELLED' } });
-      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: { in: ['ASSIGNED', 'NO_SHOW'] } }, data: { status: 'CANCELLED' } });
+      // Separado en dos `updateMany` (antes uno solo): una `NO_SHOW` sí
+      // "se presentó o no" (llegó a vencer su ventana de check-in) y esta
+      // cancelación la cierra sin pago por decisión de la empresa, así que
+      // cuenta como `closedWithoutPayment` (corrección de MEDIO-1 de
+      // CN-20260926-020, "ocultar, segunda vía"). Una `ASSIGNED` simple
+      // nunca llegó a ese punto -cancelar un turno futuro no es evasión- y
+      // no lleva la señal.
+      const cancelledAt = new Date();
+      await tx.shiftAssignment.updateMany({ where: { shiftId: shift.id, status: 'ASSIGNED' }, data: { status: 'CANCELLED' } });
+      await tx.shiftAssignment.updateMany({
+        where: { shiftId: shift.id, status: 'NO_SHOW' },
+        data: { status: 'CANCELLED', closedWithoutPayment: true, closedWithoutPaymentAt: cancelledAt, closedWithoutPaymentById: session.userId },
+      });
       await tx.shiftCancellation.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', reason: reason.trim() } });
       await tx.shiftEvent.create({ data: { shiftId: shift.id, actorId: session.userId, actorRole: 'BUSINESS', type: 'CANCELLED', detail: reason.trim() } });
       return tx.shift.update({ where: { id: shift.id }, data: { status: 'CANCELLED', confirmedWorkers: 0 }, include: { company: true } });
@@ -431,6 +567,12 @@ export class DatabaseBusinessService implements BusinessOperations {
         data: {
           status: outcome,
           completedAt: outcome === 'COMPLETED' ? completedAt : assignment.completedAt,
+          // Señal estructurada de "cerrada sin pago" (ver el comentario
+          // arriba de este archivo): nunca se lee para nada más que este
+          // `if`, y nunca depende de `reason` ni de ningún texto.
+          ...(outcome === 'CANCELLED'
+            ? { closedWithoutPayment: true, closedWithoutPaymentAt: completedAt, closedWithoutPaymentById: session.userId }
+            : {}),
         },
       });
       const sourceLabel = sourceStatus === 'ABANDONED' ? 'abandonada (check-in sin check-out)' : 'no-show (sin check-in a tiempo)';
@@ -446,6 +588,12 @@ export class DatabaseBusinessService implements BusinessOperations {
         },
       });
       if (outcome === 'COMPLETED') {
+        // `Shift.commissionBps`/`taxBps` siempre tienen un valor (`NOT NULL`
+        // desde la migración que los introdujo: los turnos anteriores a ella
+        // quedaron en 0/0, decisión del usuario en MEDIO-2 de
+        // CN-20260926-012). Nunca se lee el ajuste global aquí: cada turno
+        // ya trae el suyo, fijado para siempre al publicarse.
+        const amounts = buildPaymentAmounts(assignment.shift.payCents, assignment.shift.commissionBps, assignment.shift.taxBps);
         // Misma forma de `Payment` que crea `checkOut` en
         // `marketplace.service.ts`: un reporte manual, nunca una pasarela ni
         // custodia de fondos. `upsert` es defensivo (idempotente si esta
@@ -459,7 +607,17 @@ export class DatabaseBusinessService implements BusinessOperations {
             assignmentId: assignment.id,
             reference: `CN-${owned.id.slice(-8).toUpperCase()}-${assignment.id.slice(-8).toUpperCase()}`,
             description: `${assignment.shift.title} · ${assignment.shift.company.name}`,
-            amountCents: assignment.shift.payCents,
+            amountCents: amounts.amountCents,
+            commissionBps: amounts.commissionBps,
+            commissionCents: amounts.commissionCents,
+            taxBps: amounts.taxBps,
+            taxCents: amounts.taxCents,
+            totalCents: amounts.totalCents,
+            // Alcance E: el pago nace con el proveedor ACTIVO en este
+            // instante (no fijo en `'manual'`), para que el reporte de
+            // comisiones (`GET /api/admin/commissions`) lo clasifique bien
+            // como "por facturar" (manual) o de pasarela.
+            provider: resolvePaymentProvider().name,
             workerCount: 1,
             status: 'PENDING',
             dueAt: completedAt,
@@ -636,6 +794,10 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async listPayments(session: AuthSession) {
     const company = await this.companyFor(session);
+    // Expiración perezosa (Alcance E): antes de listar, cualquier pago
+    // `SCHEDULED` de esta empresa cuyo intento vigente ya venció vuelve a
+    // `PENDING`. Nunca hay un cron: se resuelve al leer.
+    await expireStaleScheduledPayments(this.prisma, { companyId: company.id });
     return this.prisma.payment.findMany({
       where: { companyId: company.id },
       include: { shift: { select: { id: true, title: true, startsAt: true, endsAt: true } }, assignment: { include: { worker: { select: { id: true, name: true, email: true } } } } },
@@ -645,37 +807,94 @@ export class DatabaseBusinessService implements BusinessOperations {
 
   async getPayment(session: AuthSession, id: string) {
     const company = await this.companyFor(session);
+    await expireStaleScheduledPayments(this.prisma, { id, companyId: company.id });
     const payment = await this.prisma.payment.findFirst({ where: { id, companyId: company.id } });
     if (!payment) throw new BusinessRecordNotFoundError('PAYMENT_NOT_FOUND');
     return payment;
   }
 
-  async createPayment(session: AuthSession, input: PaymentInput) {
+  /**
+   * Alcance D: único escritor de `Payment` que le queda a la empresa (el
+   * CRUD manual -crear/editar/borrar- se retira: inflaba montos y falseaba
+   * el registro de comisión). Solo transiciona `PENDING` -> `PROCESSED`
+   * para `provider` `'manual'` (nacido de `checkOut`/`resolveAssignment`) o
+   * `'legacy'` (creado con el CRUD antes de este cierre, o backfill de un
+   * pago sin `assignmentId`). También resuelve un pago de pasarela que quedó
+   * pendiente tras cambiar `PAYMENT_PROVIDER`: si su proveedor ya no es el
+   * activo, la empresa puede cerrarlo por esta vía aunque el checkout haya
+   * quedado `SCHEDULED`; en ese caso expira el intento abierto dentro de la
+   * misma transacción. Nunca permite marcar manualmente un pago del proveedor
+   * de pasarela que sigue activo.
+   *
+   * Atómico: el `updateMany` de abajo es el único guardián de la carrera
+   * (dos llamadas simultáneas, o esta contra un cambio de estado
+   * concurrente). Bajo `READ COMMITTED` (el nivel por defecto, sin falta de
+   * `Serializable`), Postgres serializa las dos escrituras sobre la misma
+   * fila: la segunda relee el `WHERE` tras el commit de la primera y afecta
+   * 0 filas, así que a lo sumo una transacción ve `count === 1` y crea el
+   * `ShiftEvent`. Nunca se lee el estado fuera de la transacción para
+   * decidir: eso dejaría una ventana donde dos lecturas "PENDING"
+   * simultáneas pasan el guard.
+   */
+  async markPaymentPaid(session: AuthSession, id: string) {
     const company = await this.companyFor(session);
-    return this.prisma.payment.create({ data: { ...input, companyId: company.id, processedAt: input.status === PaymentStatus.PROCESSED ? input.processedAt ?? new Date() : input.processedAt } });
-  }
-
-  async updatePayment(session: AuthSession, id: string, input: Partial<PaymentInput>) {
-    const payment = await this.getPayment(session, id) as { id: string; status: PaymentStatus; assignmentId: string | null; shiftId: string | null };
-    const nextStatus = input.status ?? payment.status;
-    const updated = await this.prisma.payment.update({
-      where: { id: payment.id },
-      data: {
-        ...input,
-        processedAt: nextStatus === PaymentStatus.PROCESSED
-          ? input.processedAt ?? new Date()
-          : input.processedAt ?? null,
-      },
+    const activeProvider = activePaymentProviderName();
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.payment.updateMany({
+        where: {
+          id,
+          companyId: company.id,
+          OR: [
+            { status: PaymentStatus.PENDING, provider: { in: ['manual', 'legacy'] } },
+            { status: PaymentStatus.PENDING, provider: { not: activeProvider } },
+            { status: PaymentStatus.SCHEDULED, provider: { not: activeProvider } },
+          ],
+        },
+        data: { status: PaymentStatus.PROCESSED, processedAt: new Date() },
+      });
+      if (updated.count === 0) {
+        // Distingue 404 (no existe o es de otra empresa) de 409 (existe,
+        // pero ya no es marcable: perdió la carrera, ya está
+        // PROCESSED/CANCELLED, o es de una pasarela). La misma transacción
+        // ve un estado consistente con el `updateMany` que acaba de fallar.
+        const existing = await tx.payment.findFirst({ where: { id, companyId: company.id }, select: { id: true } });
+        if (!existing) throw new BusinessRecordNotFoundError('PAYMENT_NOT_FOUND');
+        throw new PaymentNotPayableError('PAYMENT_NOT_PAYABLE');
+      }
+      // Si el proveedor fue desactivado mientras había un checkout abierto,
+      // esta resolución manual deja constancia de que el intento ya no puede
+      // completar el pago. La transición del Payment anterior toma el lock
+      // de fila primero, por lo que una aprobación concurrente gana una sola
+      // de las dos transiciones y la otra ve count = 0.
+      await tx.paymentAttempt.updateMany({
+        where: { paymentId: id, status: 'CREATED' },
+        data: { status: 'EXPIRED', failureReason: 'PROVIDER_DEACTIVATED' },
+      });
+      const payment = await tx.payment.findUniqueOrThrow({ where: { id } });
+      if (payment.shiftId) {
+        await tx.shiftEvent.create({ data: { shiftId: payment.shiftId, actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: payment.id } });
+      }
+      return payment;
     });
-    if (nextStatus === PaymentStatus.PROCESSED && payment.assignmentId && payment.shiftId) {
-      await this.prisma.shiftEvent.create({ data: { shiftId: payment.shiftId, actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: payment.id } });
-    }
-    return updated;
   }
 
-  async deletePayment(session: AuthSession, id: string) {
-    const payment = await this.getPayment(session, id) as { id: string };
-    await this.prisma.payment.delete({ where: { id: payment.id } });
+  /**
+   * Traduce los errores del módulo `payments` (genéricos, sin depender de
+   * `business.service.ts`) a los propios de este archivo cuando aplica
+   * (`PaymentNotFoundError`/`PaymentNotPayableError` ya existían aquí para
+   * `mark-paid`); `ProviderManualError`/`ProviderUnavailableError` se
+   * reexportan tal cual (ver arriba) porque son nuevos en este alcance.
+   */
+  async checkoutPayment(session: AuthSession, id: string) {
+    const company = await this.companyFor(session);
+    try {
+      return await checkoutPaymentWithProvider(this.prisma, company.id, id);
+    } catch (error) {
+      if (error instanceof PaymentGatewayNotPayableError) {
+        throw new PaymentNotPayableError(error.message);
+      }
+      throw error;
+    }
   }
 
   private async companyFor(session: AuthSession) {

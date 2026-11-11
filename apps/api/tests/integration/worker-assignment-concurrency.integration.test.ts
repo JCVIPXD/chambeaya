@@ -215,6 +215,8 @@ describe('a worker acting on their own assignment never produces a double effect
         requiredWorkers: 1,
         description: 'Turno de prueba de integración de la carrera del trabajador.',
         requirements: 'Disponibilidad completa para el horario indicado.',
+        // BAJO-1 de CN-20260926-014: obligatorios al crear (400 si faltan).
+        expectedCommissionBps: 1000, expectedTaxBps: 1800,
       });
     expect(created.status).toBe(201);
     const shiftId = created.body.id as string;

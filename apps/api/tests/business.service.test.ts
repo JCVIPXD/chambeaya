@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   BusinessValidationError,
+  CommissionChangedError,
   DatabaseBusinessService,
 } from '../src/modules/business/business.service.js';
 import type { AuthSession } from '../src/modules/auth/auth.service.js';
@@ -26,6 +27,124 @@ const session: AuthSession = {
 function companyUpsert() {
   return vi.fn(async () => ({ id: 'company-1', ownerId: session.userId, name: session.name }));
 }
+
+describe('DatabaseBusinessService.createShift', () => {
+  it('freezes the global commission and tax bps on the new shift', async () => {
+    const shiftCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'shift-new', ...data }));
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      platformSettings: { findUnique: vi.fn(async () => ({ commissionBps: 1234, taxBps: 1800 })) },
+      shift: { create: shiftCreate },
+      shiftEvent: { create: vi.fn(async () => undefined) },
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+    const shift = await service.createShift(session, {
+      title: 'Mozo', location: 'Lima', startsAt: new Date(), endsAt: new Date(Date.now() + 60 * 60 * 1000),
+      payCents: 10000, requiredWorkers: 1,
+    } as never);
+    expect(shiftCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ companyId: 'company-1', confirmedWorkers: 0, commissionBps: 1234, taxBps: 1800 }),
+    });
+    expect((shift as { commissionBps: number }).commissionBps).toBe(1234);
+  });
+
+  it('falls back to the default commission/tax when PlatformSettings["global"] is missing', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const shiftCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'shift-new', ...data }));
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      platformSettings: { findUnique: vi.fn(async () => null) },
+      shift: { create: shiftCreate },
+      shiftEvent: { create: vi.fn(async () => undefined) },
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+    await service.createShift(session, {
+      title: 'Mozo', location: 'Lima', startsAt: new Date(), endsAt: new Date(Date.now() + 60 * 60 * 1000),
+      payCents: 10000, requiredWorkers: 1,
+    } as never);
+    expect(shiftCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ commissionBps: 1000, taxBps: 1800 }),
+    });
+    errorSpy.mockRestore();
+  });
+
+  // BAJO-4 de CN-20260926-012: nunca se publica con un % que la empresa no
+  // vio en la vista previa del formulario.
+  it('rejects with CommissionChangedError when expectedCommissionBps no longer matches the current global rate', async () => {
+    const shiftCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'shift-new', ...data }));
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      platformSettings: { findUnique: vi.fn(async () => ({ commissionBps: 1500, taxBps: 1800 })) },
+      shift: { create: shiftCreate },
+      shiftEvent: { create: vi.fn(async () => undefined) },
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    const attempt = service.createShift(session, {
+      title: 'Mozo', location: 'Lima', startsAt: new Date(), endsAt: new Date(Date.now() + 60 * 60 * 1000),
+      payCents: 10000, requiredWorkers: 1, expectedCommissionBps: 1000, expectedTaxBps: 1800,
+    } as never);
+
+    await expect(attempt).rejects.toBeInstanceOf(CommissionChangedError);
+    await expect(attempt).rejects.toMatchObject({ commissionBps: 1500, taxBps: 1800 });
+    expect(shiftCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects with CommissionChangedError when expectedTaxBps no longer matches, even if the commission itself still matches', async () => {
+    const shiftCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'shift-new', ...data }));
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      platformSettings: { findUnique: vi.fn(async () => ({ commissionBps: 1000, taxBps: 2000 })) },
+      shift: { create: shiftCreate },
+      shiftEvent: { create: vi.fn(async () => undefined) },
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    await expect(service.createShift(session, {
+      title: 'Mozo', location: 'Lima', startsAt: new Date(), endsAt: new Date(Date.now() + 60 * 60 * 1000),
+      payCents: 10000, requiredWorkers: 1, expectedCommissionBps: 1000, expectedTaxBps: 1800,
+    } as never)).rejects.toBeInstanceOf(CommissionChangedError);
+    expect(shiftCreate).not.toHaveBeenCalled();
+  });
+
+  it('publishes normally when expectedCommissionBps/expectedTaxBps match, and never persists them on the Shift', async () => {
+    const shiftCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'shift-new', ...data }));
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      platformSettings: { findUnique: vi.fn(async () => ({ commissionBps: 1000, taxBps: 1800 })) },
+      shift: { create: shiftCreate },
+      shiftEvent: { create: vi.fn(async () => undefined) },
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    await service.createShift(session, {
+      title: 'Mozo', location: 'Lima', startsAt: new Date(), endsAt: new Date(Date.now() + 60 * 60 * 1000),
+      payCents: 10000, requiredWorkers: 1, expectedCommissionBps: 1000, expectedTaxBps: 1800,
+    } as never);
+
+    const data = shiftCreate.mock.calls[0]?.[0]?.data as Record<string, unknown>;
+    expect(data.commissionBps).toBe(1000);
+    expect(data).not.toHaveProperty('expectedCommissionBps');
+    expect(data).not.toHaveProperty('expectedTaxBps');
+  });
+
+  it('does not require expectedCommissionBps/expectedTaxBps: omitting them still publishes', async () => {
+    const shiftCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'shift-new', ...data }));
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      platformSettings: { findUnique: vi.fn(async () => ({ commissionBps: 1000, taxBps: 1800 })) },
+      shift: { create: shiftCreate },
+      shiftEvent: { create: vi.fn(async () => undefined) },
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    await expect(service.createShift(session, {
+      title: 'Mozo', location: 'Lima', startsAt: new Date(), endsAt: new Date(Date.now() + 60 * 60 * 1000),
+      payCents: 10000, requiredWorkers: 1,
+    } as never)).resolves.toBeTruthy();
+    expect(shiftCreate).toHaveBeenCalledOnce();
+  });
+});
 
 describe('DatabaseBusinessService.updateShift', () => {
   it('rejects editing a shift whose endsAt already passed, even without touching dates', async () => {
@@ -382,6 +501,9 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
   const shift = {
     id: 'shift-1', companyId: 'company-1', status: 'CHECKED_IN' as const, requiredWorkers: 1,
     payCents: 10000, title: 'Mozo',
+    // Comisión/IGV ya fijados al 10%/18%. El caso de un turno "legacy" (0%,
+    // backfill de la migración) tiene su propia prueba dedicada más abajo.
+    commissionBps: 1000, taxBps: 1800,
     startsAt: new Date(Date.now() - 5 * 60 * 60 * 1000),
     endsAt: new Date(Date.now() - 3 * 60 * 60 * 1000),
   };
@@ -448,7 +570,49 @@ describe('DatabaseBusinessService.resolveAssignment', () => {
     expect(paymentUpsert).toHaveBeenCalledOnce();
     expect(paymentUpsert.mock.calls[0]?.[0]).toMatchObject({
       where: { assignmentId: 'assignment-1' },
-      create: expect.objectContaining({ amountCents: 10000, workerCount: 1, status: 'PENDING' }),
+      create: expect.objectContaining({
+        amountCents: 10000, workerCount: 1, status: 'PENDING',
+        // El turno de este `describe` ya trae `commissionBps: 1000, taxBps:
+        // 1800` fijados (ver el fixture `shift`): S/100 + 10% + 18% de IGV
+        // sobre la comisión = S/111.80 (ejemplo del plan de pagos).
+        commissionBps: 1000, commissionCents: 1000, taxBps: 1800, taxCents: 180, totalCents: 11180,
+        provider: 'manual',
+      }),
+    });
+  });
+
+  // MEDIO-2 de CN-20260926-012 (decisión del usuario): un turno anterior a la
+  // migración de comisiones se cobra SIN comisión (0%, no el ajuste global).
+  // `Shift.commissionBps`/`taxBps` son `NOT NULL` desde esa misma migración
+  // (backfill a 0/0), así que ya no existe ningún respaldo al ajuste global
+  // dentro de `resolveAssignment`: esta prueba fija que un turno "legacy"
+  // (0/0) nunca consulta `PlatformSettings`.
+  it('a shift backfilled with 0% commission (pre-migration) never reads PlatformSettings and charges no commission', async () => {
+    const legacyShift = { ...shift, commissionBps: 0, taxBps: 0 };
+    const legacyAssignment = { ...abandonedAssignment(), shift: { ...legacyShift, company: { id: 'company-1', name: 'Restaurante Demo' } } };
+    const paymentUpsert = vi.fn(async (_args: { where: unknown; create: unknown; update: unknown }) => undefined);
+    const assignmentUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ ...legacyAssignment, ...data }));
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      shift: { findFirst: vi.fn(async () => legacyShift) },
+      shiftAssignment: { findMany: vi.fn(async () => []), findFirst: vi.fn(async () => legacyAssignment) },
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
+        shiftAssignment: { findFirst: vi.fn(async () => legacyAssignment), update: assignmentUpdate, findMany: vi.fn(async () => [{ status: 'COMPLETED' }]) },
+        shiftEvent: { create: vi.fn(async () => undefined) },
+        payment: { upsert: paymentUpsert },
+        shift: { update: vi.fn(async () => undefined) },
+      })),
+    };
+    const service = new DatabaseBusinessService(prisma as never);
+
+    await service.resolveAssignment(session, 'shift-1', 'assignment-1', 'COMPLETED');
+
+    // `prisma.platformSettings` no está definido en este doble: si el código
+    // intentara leerlo, esta llamada lanzaría en vez de resolver.
+    expect(paymentUpsert.mock.calls[0]?.[0]).toMatchObject({
+      create: expect.objectContaining({
+        amountCents: 10000, commissionBps: 0, commissionCents: 0, taxBps: 0, taxCents: 0, totalCents: 10000,
+      }),
     });
   });
 
@@ -938,6 +1102,11 @@ describe('DatabaseBusinessService.cancelShift', () => {
     const prisma = {
       company: { upsert: companyUpsert() },
       shift: { findFirst: vi.fn(async () => expiredShift) },
+      // Resuelve el ciclo de vida antes de cancelar (corrección de MEDIO-1
+      // de CN-20260926-022): sin asignaciones, el `preview` de
+      // `resolveShiftAssignmentsLifecycle` no encuentra nada que cambiar y
+      // vuelve sin abrir ninguna transacción propia.
+      shiftAssignment: { findMany: vi.fn(async () => []) },
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
         shiftAssignment: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => undefined) },
         shiftApplication: { updateMany: vi.fn(async () => undefined) },
@@ -962,7 +1131,13 @@ describe('DatabaseBusinessService.cancelShift', () => {
   // `ABANDONED` no puede coexistir con un turno cancelable (exige
   // `checkedInAt` no nulo, y el guard de `checkedIn > 0` ya bloquea la
   // cancelación en ese caso), así que basta con sumar `NO_SHOW` al filtro.
-  it('also cancels a lingering unresolved NO_SHOW assignment, so it stops being resolvable once the company cancels the whole shift', async () => {
+  //
+  // MEDIO-1 de CN-20260926-020 ("ocultar, segunda vía"): esa `NO_SHOW`
+  // arrastrada por `cancelShift` debe marcarse `closedWithoutPayment`, igual
+  // que si la empresa la hubiera cerrado con `resolveAssignment`. Por eso
+  // ahora son DOS `updateMany` (uno por `ASSIGNED`, sin la señal; otro por
+  // `NO_SHOW`, con ella), no uno solo con el mismo `data` para ambos.
+  it('also cancels a lingering unresolved NO_SHOW assignment, marking it closedWithoutPayment, so it stops being resolvable once the company cancels the whole shift', async () => {
     const shift = {
       id: 'shift-1',
       companyId: 'company-1',
@@ -973,6 +1148,7 @@ describe('DatabaseBusinessService.cancelShift', () => {
     const prisma = {
       company: { upsert: companyUpsert() },
       shift: { findFirst: vi.fn(async () => shift) },
+      shiftAssignment: { findMany: vi.fn(async () => []) },
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback({
         shiftAssignment: { count: vi.fn(async () => 0), updateMany: assignmentUpdateMany },
         shiftApplication: { updateMany: vi.fn(async () => undefined) },
@@ -986,8 +1162,17 @@ describe('DatabaseBusinessService.cancelShift', () => {
     await service.cancelShift(session, 'shift-1', 'La empresa ya no lo necesita');
 
     expect(assignmentUpdateMany).toHaveBeenCalledWith({
-      where: { shiftId: 'shift-1', status: { in: ['ASSIGNED', 'NO_SHOW'] } },
+      where: { shiftId: 'shift-1', status: 'ASSIGNED' },
       data: { status: 'CANCELLED' },
+    });
+    expect(assignmentUpdateMany).toHaveBeenCalledWith({
+      where: { shiftId: 'shift-1', status: 'NO_SHOW' },
+      data: {
+        status: 'CANCELLED',
+        closedWithoutPayment: true,
+        closedWithoutPaymentAt: expect.any(Date),
+        closedWithoutPaymentById: session.userId,
+      },
     });
   });
 });
@@ -1004,7 +1189,15 @@ describe('DatabaseBusinessService.cancelShift: aislamiento y lecturas dentro de 
   function attempts(txs: Record<string, unknown>[]) {
     let next = 0;
     const transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>, _options?: unknown) => callback(txs[Math.min(next++, txs.length - 1)]));
-    const prisma = { company: { upsert: companyUpsert() }, shift: { findFirst: vi.fn(async () => futureShift) }, $transaction: transaction };
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      shift: { findFirst: vi.fn(async () => futureShift) },
+      // Ídem: sin asignaciones que resolver, `resolveShiftAssignmentsLifecycle`
+      // (llamado antes de la transacción de `cancelShift`, corrección de
+      // MEDIO-1 de CN-20260926-022) no abre ninguna transacción propia.
+      shiftAssignment: { findMany: vi.fn(async () => []) },
+      $transaction: transaction,
+    };
     return { transaction, service: new DatabaseBusinessService(prisma as never) };
   }
   function tx(overrides: { status?: string; checkedIn?: number; failUpdateOnce?: boolean } = {}) {
@@ -1089,7 +1282,7 @@ describe('DatabaseBusinessService.cancelShift: aislamiento y lecturas dentro de 
 
 describe('DatabaseBusinessService.resolveAssignment: lecturas dentro de la transacción reintentable', () => {
   const past = { startsAt: new Date(Date.now() - 5 * 60 * 60 * 1000), endsAt: new Date(Date.now() - 3 * 60 * 60 * 1000) };
-  const baseShift = { id: 'shift-1', companyId: 'company-1', status: 'CANCELLED' as const, requiredWorkers: 1, payCents: 10000, title: 'Mozo', ...past };
+  const baseShift = { id: 'shift-1', companyId: 'company-1', status: 'CANCELLED' as const, requiredWorkers: 1, payCents: 10000, title: 'Mozo', commissionBps: 1000, taxBps: 1800, ...past };
   const serializationConflict = () => Object.assign(new Error('write conflict'), { code: 'P2034' });
 
   function assignmentRow(status: string, shiftStatus: string) {
@@ -1293,5 +1486,117 @@ describe('DatabaseBusinessService.listShiftApplications: indicador hasCv', () =>
     const args = findMany.mock.calls[0] as unknown as [{ include: { worker: { select: Record<string, unknown> } } }];
     expect(args[0].include.worker.select.documents).toEqual({ where: { kind: 'CV' }, select: { id: true } });
     expect(args[0].include.worker.select.talentProfile).toEqual({ select: { isVisible: true } });
+  });
+});
+
+// Alcance D: el CRUD manual de pagos (`createPayment`/`updatePayment`/
+// `deletePayment`) se retira -permitía inventar pagos, alterar montos y
+// saltarse la comisión-. El único escritor que le queda a la empresa es
+// `markPaymentPaid` (`POST /business/payments/:id/mark-paid`), cubierto
+// abajo.
+describe('DatabaseBusinessService.markPaymentPaid', () => {
+  function txWith(payment: Record<string, unknown> | null, updateManyCount: number) {
+    const updateMany = vi.fn(async () => ({ count: updateManyCount }));
+    const findFirst = vi.fn(async () => (payment ? { id: payment.id } : null));
+    const findUniqueOrThrow = vi.fn(async () => payment as never);
+    const shiftEventCreate = vi.fn(async () => undefined);
+    const paymentAttemptUpdateMany = vi.fn(async () => ({ count: 0 }));
+    const tx = { payment: { updateMany, findFirst, findUniqueOrThrow }, paymentAttempt: { updateMany: paymentAttemptUpdateMany }, shiftEvent: { create: shiftEventCreate } };
+    const prisma = {
+      company: { upsert: companyUpsert() },
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(tx)),
+    };
+    return { service: new DatabaseBusinessService(prisma as never), updateMany, paymentAttemptUpdateMany, findFirst, shiftEventCreate };
+  }
+
+  it('marks a PENDING manual payment as PROCESSED and records a PAYMENT_REPORTED event when it has a shift', async () => {
+    const payment = { id: 'payment-1', shiftId: 'shift-1', status: 'PROCESSED', provider: 'manual' };
+    const { service, updateMany, shiftEventCreate } = txWith(payment, 1);
+
+    const result = await service.markPaymentPaid(session, 'payment-1');
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'payment-1',
+        companyId: 'company-1',
+        OR: [
+          { status: 'PENDING', provider: { in: ['manual', 'legacy'] } },
+          { status: 'PENDING', provider: { not: 'manual' } },
+          { status: 'SCHEDULED', provider: { not: 'manual' } },
+        ],
+      },
+      data: { status: 'PROCESSED', processedAt: expect.any(Date) },
+    });
+    expect(shiftEventCreate).toHaveBeenCalledWith({
+      data: { shiftId: 'shift-1', actorId: session.userId, actorRole: 'BUSINESS', type: 'PAYMENT_REPORTED', detail: 'payment-1' },
+    });
+    expect(result).toEqual(payment);
+  });
+
+  it('marks a PENDING legacy payment as PROCESSED without a shift, and never creates a ShiftEvent', async () => {
+    const payment = { id: 'payment-2', shiftId: null, status: 'PROCESSED', provider: 'legacy' };
+    const { service, shiftEventCreate } = txWith(payment, 1);
+
+    const result = await service.markPaymentPaid(session, 'payment-2');
+
+    expect(shiftEventCreate).not.toHaveBeenCalled();
+    expect(result).toEqual(payment);
+  });
+
+  it('allows a pending payment from an inactive simulated provider to be resolved manually', async () => {
+    const payment = { id: 'payment-simulated', shiftId: null, status: 'PROCESSED', provider: 'simulated' };
+    const { service, updateMany } = txWith(payment, 1);
+
+    await service.markPaymentPaid(session, 'payment-simulated');
+
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        OR: [
+          { status: 'PENDING', provider: { in: ['manual', 'legacy'] } },
+          { status: 'PENDING', provider: { not: 'manual' } },
+          { status: 'SCHEDULED', provider: { not: 'manual' } },
+        ],
+      }),
+    }));
+  });
+
+  it('expires a live checkout when resolving a scheduled payment from an inactive provider', async () => {
+    const payment = { id: 'payment-scheduled', shiftId: null, status: 'PROCESSED', provider: 'simulated' };
+    const { service, paymentAttemptUpdateMany } = txWith(payment, 1);
+
+    await service.markPaymentPaid(session, 'payment-scheduled');
+
+    expect(paymentAttemptUpdateMany).toHaveBeenCalledWith({
+      where: { paymentId: 'payment-scheduled', status: 'CREATED' },
+      data: { status: 'EXPIRED', failureReason: 'PROVIDER_DEACTIVATED' },
+    });
+  });
+
+  it('responds 404 (BusinessRecordNotFoundError) when the payment does not exist or belongs to another company', async () => {
+    const { service } = txWith(null, 0);
+    const { BusinessRecordNotFoundError } = await import('../src/modules/business/business.service.js');
+
+    await expect(service.markPaymentPaid(session, 'payment-missing')).rejects.toThrow(BusinessRecordNotFoundError);
+    await expect(service.markPaymentPaid(session, 'payment-missing')).rejects.toMatchObject({ message: 'PAYMENT_NOT_FOUND' });
+  });
+
+  it('responds 409 (PaymentNotPayableError) when the payment exists but is no longer PENDING/manual-or-legacy', async () => {
+    const { service } = txWith({ id: 'payment-3' }, 0);
+    const { PaymentNotPayableError } = await import('../src/modules/business/business.service.js');
+
+    await expect(service.markPaymentPaid(session, 'payment-3')).rejects.toThrow(PaymentNotPayableError);
+    await expect(service.markPaymentPaid(session, 'payment-3')).rejects.toMatchObject({ message: 'PAYMENT_NOT_PAYABLE' });
+  });
+
+  it('the second of two concurrent mark-paid calls sees count 0 and gets 409, not a duplicate ShiftEvent', async () => {
+    // Simula la carrera: la primera llamada ya movió la fila a PROCESSED, así
+    // que el `updateMany` (condicionado a `status: PENDING`) de la segunda no
+    // afecta ninguna fila.
+    const payment = { id: 'payment-4', shiftId: 'shift-1' };
+    const { service, shiftEventCreate } = txWith(payment, 0);
+    const { PaymentNotPayableError } = await import('../src/modules/business/business.service.js');
+
+    await expect(service.markPaymentPaid(session, 'payment-4')).rejects.toThrow(PaymentNotPayableError);
+    expect(shiftEventCreate).not.toHaveBeenCalled();
   });
 });

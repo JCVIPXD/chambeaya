@@ -13,6 +13,8 @@ import type { NextConfig } from 'next';
 const nextConfig: NextConfig = {
   allowedDevOrigins: ['127.0.0.1'],
   basePath: process.env.NEXT_BASE_PATH || '',
+  // Las pruebas Playwright compilan una segunda copia con la bandera de turnos apagada en otra carpeta.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
 };
 
 export default nextConfig;

@@ -267,6 +267,12 @@ class HttpWorkerMarketplaceRepository implements WorkerMarketplaceRepository {
             : 'Pendiente',
         reference: movement['reference'] as String?,
         receiptConfirmed: movement['receiptConfirmed'] == true,
+        // Alcance D: booleano ya derivado por la API, nunca `provider` (que
+        // nunca llega a este DTO). Los movimientos que no vienen de un
+        // `Payment` (el resto de la billetera) no lo traen: `false` por
+        // defecto.
+        canConfirmReceipt: movement['canConfirmReceipt'] == true,
+        date: movement['createdAt'] as String?,
       );
     }).toList();
   }

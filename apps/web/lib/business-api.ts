@@ -62,6 +62,28 @@ export type ShiftRecord = {
   notes: string | null;
   rescueActive: boolean;
   status: 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
+  // Comisión de Chambeaya e IGV, fijados al publicar el turno (nunca
+  // cambian después). Siempre tienen un valor entero: `Shift.commissionBps`/
+  // `taxBps` son `NOT NULL` desde la migración que los introdujo (los
+  // turnos anteriores a ella quedaron fijados en 0, decisión del usuario
+  // en CN-20260926-012 MEDIO-2). Ningún turno lee un ajuste global de
+  // respaldo.
+  commissionBps: number;
+  taxBps: number;
+};
+
+// `GET /business/payment-settings`: ajuste global vigente que se congelaría
+// en un turno nuevo. Desde el Alcance E, `mode` es el nombre del proveedor de
+// pago ACTIVO (`PAYMENT_PROVIDER` en la API: `'manual'` en producción hoy,
+// `'simulated'` en desarrollo o mientras no haya proveedor real contratado).
+// El botón "Pagar" y la página de checkout simulado que lean este campo son
+// trabajo del Alcance F; aquí solo se amplía el tipo para no mentir sobre el
+// contrato real de la API.
+export type PaymentSettingsRecord = {
+  commissionBps: number;
+  taxBps: number;
+  currency: 'PEN';
+  mode: string;
 };
 
 // Estado persistido de una asignación. `NO_SHOW` (confirmó y nunca hizo
@@ -126,7 +148,7 @@ export type WorkerRecord = {
   availability: string | null;
 };
 export type SpecialtyRecord = { id: string; slug: string; name: string; category: string };
-export type TalentCardRecord = { id: string; name: string; headline: string | null; district: string | null; availabilityText: string | null; isAvailable: boolean; specialties: SpecialtyRecord[]; completion: number; reputation: { averageRating: number | null; reviewCount: number } };
+export type TalentCardRecord = { id: string; isHighlighted?: boolean; name: string; headline: string | null; district: string | null; availabilityText: string | null; isAvailable: boolean; specialties: SpecialtyRecord[]; completion: number; reputation: { averageRating: number | null; reviewCount: number } };
 export type TalentSearchResult = { items: TalentCardRecord[]; nextCursor: string | null };
 
 export type TalentInvitationStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED' | 'EXPIRED' | 'CANCELLED';
@@ -168,7 +190,20 @@ export type PaymentRecord = {
   id: string;
   reference: string;
   description: string;
+  // Monto que recibe el trabajador (100% de lo publicado). La comisión de
+  // Chambeaya se cobra ENCIMA, a la empresa; nunca se descuenta de aquí.
   amountCents: number;
+  // Puntos básicos (1000 = 10,00%) y céntimos fijados al crear el pago. Un
+  // pago `provider: 'legacy'` (backfill de un pago sin `assignmentId` de
+  // antes del Alcance C, o del CRUD manual que existió hasta el Alcance D)
+  // siempre trae comisión e IGV en 0 y `totalCents === amountCents`.
+  commissionBps: number;
+  commissionCents: number;
+  taxBps: number;
+  taxCents: number;
+  // `amountCents + commissionCents + taxCents`: lo que paga la empresa.
+  totalCents: number;
+  provider: string;
   workerCount: number;
   status: 'PENDING' | 'SCHEDULED' | 'PROCESSED' | 'CANCELLED';
   dueAt: string | null;
@@ -179,10 +214,56 @@ export type PaymentRecord = {
   workerConfirmedAt: string | null;
 };
 
+export type CheckoutResponse = {
+  attemptId: string;
+  redirectUrl: string;
+  expiresAt: string;
+};
+
+export type SimulatedCheckoutRecord = {
+  checkoutId: string;
+  status: 'CREATED' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+  expiresAt: string;
+  payment: {
+    id: string;
+    reference: string;
+    description: string;
+    totalCents: number;
+    currency: 'PEN';
+    status: 'PENDING' | 'SCHEDULED' | 'PROCESSED' | 'CANCELLED';
+  };
+};
+
 export class ApiError extends Error {
-  constructor(public readonly status: number, public readonly code: string) {
+  // `details` conserva el resto del cuerpo del error (por ejemplo `{cost, balance}` de
+  // `409 INSUFFICIENT_CURRENCY`) y `retryAfterSeconds` la cabecera `Retry-After` del
+  // `503 SERIALIZATION_RETRY_EXHAUSTED`. Ambos son opcionales: el resto del panel solo lee
+  // `status` y `code`.
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    public readonly details: Record<string, unknown> = {},
+    public readonly retryAfterSeconds: number | null = null,
+  ) {
     super(code);
   }
+}
+
+export function apiOrigin() {
+  return apiUrl;
+}
+
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(Math.ceil(seconds), 120) : null;
+}
+
+/** Convierte una respuesta no exitosa en un `ApiError` con el cuerpo y `Retry-After`. */
+export async function apiErrorFrom(response: Response): Promise<ApiError> {
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const { error, ...details } = payload;
+  return new ApiError(response.status, typeof error === 'string' ? error : 'REQUEST_FAILED', details, parseRetryAfter(response.headers.get('Retry-After')));
 }
 
 // Tiempo máximo de una petición (incluida la lectura del cuerpo). Sin un tope,
@@ -191,7 +272,7 @@ export class ApiError extends Error {
 // Al vencer se aborta y se lanza `ApiError(0, 'REQUEST_TIMEOUT')`.
 export const REQUEST_TIMEOUT_MS = 15_000;
 
-async function request<T>(path: string, options: RequestInit & { token?: string } = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestInit & { token?: string } = {}): Promise<T> {
   const { token, headers, signal: callerSignal, ...init } = options;
   const controller = new AbortController();
   let timedOut = false;
@@ -212,10 +293,7 @@ async function request<T>(path: string, options: RequestInit & { token?: string 
         ...headers,
       },
     });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as { error?: string };
-      throw new ApiError(response.status, payload.error ?? 'REQUEST_FAILED');
-    }
+    if (!response.ok) throw await apiErrorFrom(response);
     // `await` a propósito: el temporizador también cubre la lectura del cuerpo.
     return response.status === 204 ? undefined as T : await (response.json() as Promise<T>);
   } catch (error) {
@@ -231,6 +309,15 @@ export const authApi = {
   login: (email: string, password: string) => request<BusinessSession>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   restore: (token: string) => request<BusinessSession>('/auth/session', { token }),
   logout: (token: string) => request<void>('/auth/session', { method: 'DELETE', token }),
+  // Exige la contraseña actual; borra todas las demás sesiones y conserva la
+  // que hizo la petición (`token`). Distinto del flujo de primera contraseña
+  // de una cuenta creada con Google. Ver `docs/reference/api.md`.
+  changePassword: (token: string, currentPassword: string, newPassword: string) =>
+    request<BusinessSession>('/auth/password/change', {
+      method: 'POST',
+      token,
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
 };
 
 function resource<T>(path: string) {
@@ -250,6 +337,9 @@ export const businessApi = {
   },
   subscription: {
     get: (token: string) => request<SubscriptionRecord>('/business/subscription', { token }),
+  },
+  paymentSettings: {
+    get: (token: string) => request<PaymentSettingsRecord>('/business/payment-settings', { token }),
   },
   shifts: {
     ...resource<ShiftRecord>('/business/shifts'),
@@ -303,5 +393,16 @@ export const businessApi = {
     updateMessage: (token: string, conversationId: string, messageId: string, input: unknown) => request<MessageRecord>(`/business/conversations/${conversationId}/messages/${messageId}`, { method: 'PATCH', token, body: JSON.stringify(input) }),
     removeMessage: (token: string, conversationId: string, messageId: string) => request<void>(`/business/conversations/${conversationId}/messages/${messageId}`, { method: 'DELETE', token }),
   },
-  payments: resource<PaymentRecord>('/business/payments'),
+  // Alcance D: se retira el CRUD manual (`create`/`update`/`remove`) — permitía
+  // a la empresa inventar pagos, alterar montos y saltarse la comisión. Solo
+  // queda la lectura y `markPaid`, el único cambio de estado permitido.
+  payments: {
+    list: (token: string) => request<PaymentRecord[]>('/business/payments', { token }),
+    get: (token: string, id: string) => request<PaymentRecord>(`/business/payments/${id}`, { token }),
+    markPaid: (token: string, id: string) => request<PaymentRecord>(`/business/payments/${id}/mark-paid`, { method: 'POST', token }),
+    checkout: (token: string, id: string) => request<CheckoutResponse>(`/business/payments/${id}/checkout`, { method: 'POST', token }),
+    simulatedCheckout: (token: string, checkoutId: string) => request<SimulatedCheckoutRecord>(`/payments/simulated/${encodeURIComponent(checkoutId)}`, { token }),
+    approveSimulated: (token: string, checkoutId: string) => request<{ ok: true; result: string }>(`/payments/simulated/${encodeURIComponent(checkoutId)}/approve`, { method: 'POST', token }),
+    rejectSimulated: (token: string, checkoutId: string) => request<{ ok: true; result: string }>(`/payments/simulated/${encodeURIComponent(checkoutId)}/reject`, { method: 'POST', token }),
+  },
 };

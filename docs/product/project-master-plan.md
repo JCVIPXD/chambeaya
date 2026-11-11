@@ -646,8 +646,10 @@ el árbol de trabajo, sin comitear):
   las lecturas de postulaciones se secuencian (`apps/web/lib/request-sequence.ts`), así que
   una respuesta emitida antes del cierre y entregada después ya no repone las acciones de
   una fila resuelta; la confirmación se mantiene en "Guardando…" hasta que termina el
-  refresco; la tarjeta de Pagos dice "Registro de tus pagos directos a los trabajadores.
-  Chambeaya no cobra, guarda ni transfiere dinero"; y los tres botones de la confirmación
+  refresco; la tarjeta de Pagos decía entonces "Registro de tus pagos directos a los trabajadores.
+  Chambeaya no cobra, guarda ni transfiere dinero" (desde `CN-20260926-013` dice "El pago
+  al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte",
+  porque ahora existe la comisión); y los tres botones de la confirmación
   nombran al trabajador.
 - **Turno `CANCELLED` con asignación `COMPLETED` y pago pendiente** (`CN-20260920-003`,
   `CN-20260920-004`, `CN-20260920-005`, `CN-20260920-006`): `resolveAssignment` calcula el

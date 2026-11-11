@@ -1,4 +1,4 @@
-import { PrismaClient, type Company, type Prisma, type Shift } from '@prisma/client';
+import { PrismaClient, type Company, type PaymentStatus, type Prisma, type Shift } from '@prisma/client';
 
 import { filterShifts, type ShiftIndustry, type ShiftSearchFilter } from './shift_search.js';
 import {
@@ -10,6 +10,8 @@ import {
   type OperationalAssignmentStatus,
 } from '../operations/shift-state.js';
 import { withSerializableRetry } from '../operations/serializable-retry.js';
+import { buildPaymentAmounts } from '../payments/payment-amounts.js';
+import { resolvePaymentProvider } from '../payments/payments.service.js';
 
 export type DemoShiftStatus = 'PUBLISHED' | 'ASSIGNED' | 'CHECKED_IN' | 'COMPLETED' | 'CANCELLED';
 
@@ -368,7 +370,16 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
   async getWorkerConversation(workerId: string, conversationId: string) {
     const conversation = await this.prisma.conversation.findFirst({
       where: { id: conversationId, workerUserId: workerId },
-      include: { company: { select: { name: true } }, worker: true, shift: true, messages: { orderBy: { createdAt: 'asc' } } },
+      // `shift` con un `select` explícito, nunca `shift: true`: el trabajador
+      // no debe recibir `commissionBps`/`taxBps` del turno (ver
+      // `listWorkerConversations`, que ya usaba este mismo `select`, y
+      // `toWorkerPayment`/ALTO-1 de CN-20260926-012).
+      include: {
+        company: { select: { name: true } },
+        worker: true,
+        shift: { select: { id: true, title: true, startsAt: true, endsAt: true } },
+        messages: { orderBy: { createdAt: 'asc' } },
+      },
     });
     if (!conversation) throw new MarketplaceError('ASSIGNMENT_NOT_FOUND', 404);
     await this.prisma.message.updateMany({
@@ -671,6 +682,10 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       const status = deriveShiftStatus(current.shift.status as never, current.shift.requiredWorkers, assignments as never, current.shift);
       await tx.shift.update({ where: { id: shiftId }, data: { status } });
       await tx.shiftEvent.create({ data: { shiftId, actorId: workerId, actorRole: 'WORKER', type: 'CHECKED_OUT' } });
+      // `Shift.commissionBps`/`taxBps` siempre tienen un valor (`NOT NULL`
+      // desde la migración que los introdujo; MEDIO-2 de CN-20260926-012).
+      // Nunca se lee el ajuste global aquí: cada turno ya trae el suyo.
+      const amounts = buildPaymentAmounts(current.shift.payCents, current.shift.commissionBps, current.shift.taxBps);
       await tx.payment.upsert({
         where: { assignmentId: current.id },
         update: {},
@@ -680,7 +695,15 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
           assignmentId: current.id,
           reference: `CN-${shiftId.slice(-8).toUpperCase()}-${current.id.slice(-8).toUpperCase()}`,
           description: `${current.shift.title} · ${current.shift.company.name}`,
-          amountCents: current.shift.payCents,
+          amountCents: amounts.amountCents,
+          commissionBps: amounts.commissionBps,
+          commissionCents: amounts.commissionCents,
+          taxBps: amounts.taxBps,
+          taxCents: amounts.taxCents,
+          totalCents: amounts.totalCents,
+          // Alcance E: proveedor ACTIVO en este instante, no fijo en
+          // 'manual' (ver el mismo cambio en `business.service.ts#resolveAssignment`).
+          provider: resolvePaymentProvider().name,
           workerCount: 1,
           status: 'PENDING',
           dueAt: checkedOutAt,
@@ -710,6 +733,14 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       }
       if (application.assignment?.checkedInAt) throw new MarketplaceError('CANCELLATION_NOT_ALLOWED', 409);
       const assignmentId = application.assignment?.id;
+      // Revisado en la corrección de MEDIO-1 (nuevo) de CN-20260926-020/-022:
+      // esta ruta nunca marca `closedWithoutPayment`, ni siquiera si la
+      // asignación ya venció su ventana de check-in (lógicamente NO_SHOW sin
+      // persistir). A propósito: es una decisión del TRABAJADOR, no de la
+      // empresa (la señal solo existe para detectar que la empresa evada
+      // pagar un trabajo hecho), y de por sí nunca genera ni evita un
+      // `Payment` -`NO_SHOW`/`ABANDONED` nunca crean uno automáticamente-,
+      // así que no hay dinero que este camino pueda esconder.
       if (assignmentId) {
         await tx.shiftAssignment.update({ where: { id: assignmentId }, data: { status: 'CANCELLED' } });
       }
@@ -800,6 +831,13 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       reference: payment.reference,
       createdAt: payment.createdAt,
       receiptConfirmed: payment.workerConfirmedAt !== null,
+      // Alcance D: nunca se expone `provider` en crudo (ver
+      // `marketplace.no-commission-leak.test.ts`), pero el trabajador sí
+      // necesita saber cuándo puede confirmar la recepción. Deriva un
+      // booleano seguro: solo un pago manual, ya `PROCESSED` y todavía sin
+      // confirmar admite `POST /workers/payments/:id/confirm` (misma regla
+      // que aplica ese endpoint, ver `confirmPayment` más abajo).
+      canConfirmReceipt: payment.provider === 'manual' && payment.status === 'PROCESSED' && payment.workerConfirmedAt === null,
       source: 'PAYMENT',
     }));
     const allMovements = [...paymentMovements, ...movements].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
@@ -814,8 +852,19 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
       include: { assignment: true },
     });
     if (!payment) throw new MarketplaceError('PAYMENT_NOT_FOUND', 404);
-    if (payment.status !== 'PROCESSED') throw new MarketplaceError('PAYMENT_NOT_REPORTABLE', 409);
-    if (payment.workerConfirmedAt) return payment;
+    // Alcance D: solo un pago manual PROCESSED es confirmable por el
+    // trabajador (misma regla que deriva `canConfirmReceipt` en `wallet()`).
+    // Un pago de pasarela (Alcance E, todavía ninguna contratada) nunca es
+    // `'manual'`: se confirma por su propio webhook, nunca por este
+    // endpoint. `'legacy'` tampoco aplica, pero ya queda excluido antes: no
+    // tiene `assignmentId`, así que el `findFirst` de arriba (filtrado por
+    // `assignment: { workerId }`) nunca lo encuentra.
+    if (payment.status !== 'PROCESSED' || payment.provider !== 'manual') throw new MarketplaceError('PAYMENT_NOT_REPORTABLE', 409);
+    // Nunca se devuelve la fila `Payment` cruda: expondría `commissionCents`/
+    // `taxCents`/`totalCents`/`provider` al trabajador (ALTO-1 de
+    // CN-20260926-012). `toWorkerPayment` es la única forma permitida de
+    // responder un pago en las rutas del trabajador.
+    if (payment.workerConfirmedAt) return toWorkerPayment(payment);
     const updated = await this.prisma.payment.update({
       where: { id: payment.id },
       data: { workerConfirmedAt: new Date() },
@@ -829,7 +878,7 @@ export class DatabaseMarketplaceService implements MarketplaceOperations {
         detail: payment.id,
       },
     });
-    return updated;
+    return toWorkerPayment({ ...updated, assignment: payment.assignment });
   }
 
   async recordWalletMovement(workerId: string, movement: { amountCents: number; description: string; status?: 'PENDING' | 'RELEASED' | 'REVERSED'; reference?: string }) {
@@ -871,6 +920,41 @@ function toMarketplaceShift(shift: PublishedShift): DemoShift {
     modality: shift.modality,
     companyVerified: false,
     paymentProtected: false,
+  };
+}
+
+/**
+ * Único mapeo permitido de un `Payment` hacia una respuesta del trabajador
+ * (hoy solo `confirmPayment`). Lista blanca explícita -nunca un `include`/
+ * spread de la fila cruda-: el trabajador recibe su propio `amountCents`
+ * (el 100% de lo publicado) y nunca `commissionBps`/`commissionCents`/
+ * `taxBps`/`taxCents`/`totalCents`/`provider`/`needsReview` (ALTO-1 de
+ * CN-20260926-012). Mismo criterio que `wallet()`, que ya construye sus
+ * movimientos con una lista blanca equivalente.
+ */
+function toWorkerPayment(payment: {
+  id: string;
+  description: string;
+  amountCents: number;
+  status: PaymentStatus;
+  reference: string;
+  dueAt: Date | null;
+  processedAt: Date | null;
+  createdAt: Date;
+  workerConfirmedAt: Date | null;
+  assignment: { shiftId: string } | null;
+}) {
+  return {
+    id: payment.id,
+    description: payment.description,
+    amountCents: payment.amountCents,
+    status: payment.status,
+    reference: payment.reference,
+    dueAt: payment.dueAt,
+    processedAt: payment.processedAt,
+    createdAt: payment.createdAt,
+    workerConfirmedAt: payment.workerConfirmedAt,
+    shiftId: payment.assignment?.shiftId ?? null,
   };
 }
 

@@ -87,14 +87,15 @@ if [[ "$cors_allowed_origins" == *"tudominio.com"* ]]; then
   exit 1
 fi
 
-# NEXT_BASE_PATH se compila dentro del panel Next.js (apps/web/Dockerfile.production);
-# CN-20260925-006 dejó un solo dominio con tres rutas (/, /empresas, /api), y
-# el panel solo enruta bien si esta variable empieza con "/" y no termina con
-# una barra sobrante ("/empresas/" rompería las coincidencias exactas de la
-# plantilla de Nginx, ver deploy/nginx/chambeaya.conf.template).
+# NEXT_BASE_PATH se compila dentro del panel Next.js (apps/web/Dockerfile.production).
+# BAJO-2 de CN-20260925-007: antes se aceptaba cualquier valor con "/" al
+# inicio y sin barra final, pero tanto la plantilla de Nginx
+# (deploy/nginx/chambeaya.conf.template) como scripts/instalar-produccion.sh
+# fijan "/empresas" a mano (NEXT_BASE_PATH_VALUE): otro valor deja el panel
+# compilado para una ruta que Nginx nunca enruta hacia él.
 next_base_path="$(sed -n 's/^NEXT_BASE_PATH=//p' "$ENV_FILE" | head -n 1)"
-if [[ "$next_base_path" != /* || "$next_base_path" == */ ]]; then
-  echo "NEXT_BASE_PATH debe empezar con '/' y no terminar en '/' (ej. /empresas); tiene '${next_base_path}'." >&2
+if [[ "$next_base_path" != "/empresas" ]]; then
+  echo "NEXT_BASE_PATH debe ser exactamente '/empresas' (la plantilla de Nginx y el instalador no soportan otra ruta); tiene '${next_base_path}'." >&2
   exit 1
 fi
 
@@ -111,6 +112,55 @@ if [[ "$trust_proxy" == "true" ]]; then
   echo "host) y vuelve a ejecutar este script." >&2
   echo >&2
 fi
+
+# Motivo (CN-20260925-alcance-A): sin este aviso, GOOGLE_OAUTH_WEB_CLIENT_ID
+# vacío desactiva el botón "Ingresar con Google" en silencio (worker-app lo
+# recibe como ARG de build, apps/mobile_flutter/Dockerfile.production:30,36;
+# la API lo lee en runtime, google_identity.ts). Igual que el aviso de
+# API_TRUST_PROXY de arriba, deploy-hosting.sh también debe avisarlo: es el
+# camino habitual de actualización, no solo instalar-produccion.sh.
+google_client_id="$(sed -n 's/^GOOGLE_OAUTH_WEB_CLIENT_ID=//p' "$ENV_FILE" | head -n 1)"
+if [[ -z "$google_client_id" ]]; then
+  echo >&2
+  echo "AVISO: GOOGLE_OAUTH_WEB_CLIENT_ID está vacío en $ENV_FILE; 'Ingresar con Google'" >&2
+  echo "queda desactivado (app y panel). Para activarlo: pon el valor en $ENV_FILE" >&2
+  echo "(termina en .apps.googleusercontent.com) y vuelve a ejecutar" >&2
+  echo "./scripts/deploy-hosting.sh (reconstruye worker-app con el valor nuevo); luego" >&2
+  echo "autoriza el origen https de tu dominio en la consola de Google Cloud." >&2
+  echo >&2
+fi
+
+# Alcance E del plan de pagos: mismas guardas que assertPaymentConfig
+# (server.ts), pero ANTES de levantar contenedores, para no dejar la API
+# reiniciándose en bucle por una variable de pagos mal puesta. Ninguna de
+# las tres exige nada si PAYMENT_PROVIDER sigue en "manual" (el valor por
+# defecto y el único soportado en producción hoy).
+payment_provider="$(sed -n 's/^PAYMENT_PROVIDER=//p' "$ENV_FILE" | head -n 1)"
+payment_provider="${payment_provider:-manual}"
+if [[ "$payment_provider" != "manual" && "$payment_provider" != "simulated" ]]; then
+  echo "PAYMENT_PROVIDER debe ser 'manual' o 'simulated' en $ENV_FILE (valor actual: '${payment_provider}')." >&2
+  exit 1
+fi
+if [[ "$payment_provider" != "manual" ]]; then
+  payment_webhook_secret="$(sed -n 's/^PAYMENT_WEBHOOK_SECRET=//p' "$ENV_FILE" | head -n 1)"
+  if [[ ${#payment_webhook_secret} -lt 32 ]]; then
+    echo "PAYMENT_WEBHOOK_SECRET debe tener al menos 32 caracteres en $ENV_FILE cuando PAYMENT_PROVIDER='${payment_provider}'." >&2
+    exit 1
+  fi
+fi
+if [[ "$payment_provider" == "simulated" ]]; then
+  payment_simulation_allowed="$(sed -n 's/^PAYMENT_SIMULATION_ALLOWED=//p' "$ENV_FILE" | head -n 1)"
+  if [[ "$payment_simulation_allowed" != "true" ]]; then
+    echo >&2
+    echo "AVISO: PAYMENT_PROVIDER=simulated en un despliegue de PRODUCCIÓN simula el" >&2
+    echo "cobro sin mover dinero real. Si esto es intencional (una demo controlada)," >&2
+    echo "pon PAYMENT_SIMULATION_ALLOWED=true en $ENV_FILE; si no, la API se negará a" >&2
+    echo "arrancar (assertPaymentConfig, ver docs/guides/deployment.md)." >&2
+    echo >&2
+    exit 1
+  fi
+fi
+echo "Modo de pagos activo: ${payment_provider}."
 
 api_port="$(sed -n 's/^API_HOST_PORT=//p' "$ENV_FILE" | head -n 1)"
 web_port="$(sed -n 's/^WEB_HOST_PORT=//p' "$ENV_FILE" | head -n 1)"

@@ -5,10 +5,13 @@ import {
   Building2,
   CheckCircle2,
   ChevronRight,
+  CircleDollarSign,
   ClipboardList,
+  KeyRound,
   LogOut,
   Search,
   RefreshCw,
+  Settings,
   Shield,
   Users,
   X,
@@ -17,14 +20,36 @@ import {
 import {
   adminApi,
   adminLogin,
+  type AdminCommissionsReport,
+  type AdminCommissionsTotals,
   type AdminCompany,
   type AdminIncident,
   type AdminOverview,
+  type AdminPlatformSettings,
   type AdminSession,
   type AdminWorker,
 } from "../../lib/admin-api";
+import { ChangePasswordModal } from "../../components/change-password-modal";
 
 const key = "chambeaya_admin_session";
+
+// Corrección de ALTO-1 de CN-20260926-020: la fecha "de hoy" para el filtro
+// de Comisiones debe ser la fecha de calendario de LIMA, nunca la del
+// navegador/servidor donde corre este componente (que puede tener otro
+// huso horario, o ninguno configurado). `Intl.DateTimeFormat` con
+// `timeZone: 'America/Lima'` hace la conversión explícita una sola vez, en
+// vez de sumar/restar horas a mano en cada sitio que necesite "hoy".
+const limaDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Lima",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+/** La fecha de hoy en Lima, en formato `AAAA-MM-DD`. */
+function limaTodayIso(): string {
+  return limaDateFormatter.format(new Date());
+}
+
 export default function AdminPage() {
   const [session, setSession] = useState<AdminSession | null>(null);
   const [restoringSession, setRestoringSession] = useState(true);
@@ -54,7 +79,7 @@ export default function AdminPage() {
     }
   }, []);
   if (restoringSession)
-    return <main className="admin-auth"><div className="admin-auth-card">Validando sesiÃ³nâ€¦</div></main>;
+    return <main className="admin-auth"><div className="admin-auth-card">Validando sesión…</div></main>;
   if (!session)
     return (
       <main className="admin-auth">
@@ -75,6 +100,11 @@ export default function AdminPage() {
               try {
                 const next = await adminLogin(email, password);
                 localStorage.setItem(key, JSON.stringify(next));
+                // Corrección de CN-20260926-008 (MEDIO-2): sin esto, la
+                // contraseña quedaba en el estado de `AdminPage` (que nunca
+                // se desmonta) después de entrar, y volvía a aparecer en el
+                // campo si más tarde se pulsaba "Salir".
+                setPassword("");
                 setSession(next);
               } catch {
                 setError(
@@ -113,8 +143,20 @@ export default function AdminPage() {
     <AdminWorkspace
       session={session}
       onLogout={() => {
+        // El estado local se limpia de inmediato, sin esperar a la API
+        // (corrección de CN-20260926-008, BAJO-2: antes esta llamada
+        // bloqueaba la salida hasta 8 s por `AbortSignal.timeout`, sin
+        // ninguna señal para quien esperaba). La contraseña se limpia aquí
+        // también, por si el login no llegó a hacerlo (MEDIO-2); el correo
+        // se conserva a propósito, por conveniencia para volver a entrar.
         localStorage.removeItem(key);
         setSession(null);
+        setPassword("");
+        // Best effort: revoca el token en el servidor sin bloquear ni
+        // condicionar la salida a su resultado (mismo criterio que
+        // `logout()` del panel de empresa en `apps/web/app/page.tsx`, que
+        // también limpia primero y llama después).
+        void adminApi.logout(session.token).catch(() => undefined);
       }}
     />
   );
@@ -251,10 +293,16 @@ function AdminWorkspace({
   const [companies, setCompanies] = useState<AdminCompany[]>([]);
   const [workers, setWorkers] = useState<AdminWorker[]>([]);
   const [incidents, setIncidents] = useState<AdminIncident[]>([]);
+  const [settings, setSettings] = useState<AdminPlatformSettings | null>(null);
+  // Métrica del resumen: "por facturar" del mes en curso (con el IGV
+  // aparte), siempre ese rango fijo, independiente del filtro de la sección
+  // "Comisiones".
+  const [monthCommissions, setMonthCommissions] =
+    useState<AdminCommissionsTotals | null>(null);
   const [loading, setLoading] = useState(true);
   const [failedSections, setFailedSections] = useState<string[]>([]);
   const [section, setSection] = useState<
-    "overview" | "companies" | "workers" | "incidents"
+    "overview" | "companies" | "workers" | "incidents" | "settings" | "commissions"
   >("overview");
   const [query, setQuery] = useState("");
   const [incidentFilter, setIncidentFilter] = useState<
@@ -268,6 +316,35 @@ function AdminWorkspace({
     null,
   );
   const [savingCompany, setSavingCompany] = useState(false);
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  // Rango del mes en curso, en fecha de calendario de LIMA (`limaTodayIso`,
+  // nunca la hora local del navegador): usado como valor inicial del filtro
+  // de "Comisiones" y como rango fijo de la métrica del resumen.
+  const monthRange = useMemo(() => {
+    const today = limaTodayIso();
+    const from = `${today.slice(0, 7)}-01`;
+    return { from, to: today };
+  }, []);
+  const [commissionsReport, setCommissionsReport] =
+    useState<AdminCommissionsReport | null>(null);
+  const [commissionsFrom, setCommissionsFrom] = useState(monthRange.from);
+  const [commissionsTo, setCommissionsTo] = useState(monthRange.to);
+  const [loadingCommissions, setLoadingCommissions] = useState(false);
+  const [commissionsError, setCommissionsError] = useState("");
+  const loadCommissionsReport = async (from: string, to: string) => {
+    setLoadingCommissions(true);
+    setCommissionsError("");
+    try {
+      const report = await adminApi.commissions(session.token, { from, to });
+      setCommissionsReport(report);
+    } catch {
+      setCommissionsError("No se pudo cargar el reporte de comisiones.");
+    } finally {
+      setLoadingCommissions(false);
+    }
+  };
   const load = async () => {
     setLoading(true);
     const results = await Promise.allSettled([
@@ -275,21 +352,49 @@ function AdminWorkspace({
       adminApi.companies(session.token),
       adminApi.workers(session.token),
       adminApi.incidents(session.token),
+      adminApi.settings(session.token),
+      adminApi.commissions(session.token, monthRange),
     ]);
-    const labels = ["resumen", "empresas", "trabajadores", "incidencias"];
+    const labels = ["resumen", "empresas", "trabajadores", "incidencias", "configuración", "comisiones"];
     const failures = results.flatMap((result, index) =>
       result.status === "rejected" ? [labels[index]] : [],
     );
-    const [summary, companyData, workerData, incidentData] = results;
+    const [summary, companyData, workerData, incidentData, settingsData, commissionsData] = results;
     if (summary.status === "fulfilled") setOverview(summary.value);
     if (companyData.status === "fulfilled") setCompanies(companyData.value);
     if (workerData.status === "fulfilled") setWorkers(workerData.value);
     if (incidentData.status === "fulfilled") setIncidents(incidentData.value);
+    if (settingsData.status === "fulfilled") setSettings(settingsData.value);
+    if (commissionsData.status === "fulfilled") setMonthCommissions(commissionsData.value.totals);
     setFailedSections(failures);
     setLoading(false);
   };
+  const saveSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSettingsError("");
+    const data = new FormData(event.currentTarget);
+    const commissionPercent = Number(data.get("commissionPercent"));
+    if (!Number.isFinite(commissionPercent) || commissionPercent < 0 || commissionPercent > 50) {
+      setSettingsError("El porcentaje debe estar entre 0% y 50%.");
+      return;
+    }
+    // Puntos básicos enteros (1000 = 10,00%): redondea el porcentaje con dos
+    // decimales que admite el campo a la unidad entera que espera la API.
+    const commissionBps = Math.round(commissionPercent * 100);
+    setSavingSettings(true);
+    try {
+      const saved = await adminApi.updateSettings(session.token, commissionBps);
+      setSettings(saved);
+    } catch {
+      setSettingsError("No se pudo guardar el cambio. Intenta nuevamente.");
+    } finally {
+      setSavingSettings(false);
+    }
+  };
   useEffect(() => {
     void load();
+    void loadCommissionsReport(commissionsFrom, commissionsTo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const normalizedQuery = query.trim().toLowerCase();
   const filteredCompanies = useMemo(
@@ -406,6 +511,12 @@ function AdminWorkspace({
           <button className="secondary-button" onClick={() => void load()}>
             <RefreshCw size={16} /> Actualizar
           </button>
+          <button
+            className="secondary-button"
+            onClick={() => setPasswordModalOpen(true)}
+          >
+            <KeyRound size={16} /> Cambiar contraseña
+          </button>
           <button className="secondary-button" onClick={onLogout}>
             <LogOut size={16} /> Salir
           </button>
@@ -424,6 +535,8 @@ function AdminWorkspace({
             ["companies", "Empresas"],
             ["workers", "Trabajadores"],
             ["incidents", "Incidencias"],
+            ["commissions", "Comisiones"],
+            ["settings", "Configuración"],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -439,7 +552,7 @@ function AdminWorkspace({
           </button>
         ))}
       </nav>
-      {section !== "overview" && (
+      {section !== "overview" && section !== "settings" && section !== "commissions" && (
         <div className="admin-toolbar">
           <label className="admin-search">
             <Search size={16} />
@@ -553,6 +666,44 @@ function AdminWorkspace({
                       </span>
                     </button>
                   ))}
+                </div>
+              </article>
+              <article className="admin-panel">
+                <div className="admin-panel-head">
+                  <div>
+                    <p className="eyebrow">Modo manual · sin pasarela</p>
+                    <h2>Comisión por facturar (mes en curso)</h2>
+                  </div>
+                  <CircleDollarSign size={18} />
+                </div>
+                <div className="admin-list">
+                  <div className="admin-list-row">
+                    <div>
+                      <strong>
+                        S/{" "}
+                        {monthCommissions
+                          ? (monthCommissions.toInvoiceCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })
+                          : "0.00"}
+                      </strong>
+                      <small>
+                        + IGV S/{" "}
+                        {monthCommissions
+                          ? (monthCommissions.toInvoiceTaxCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })
+                          : "0.00"}
+                      </small>
+                    </div>
+                  </div>
+                  <button
+                    className="admin-list-row"
+                    type="button"
+                    onClick={() => setSection("commissions")}
+                  >
+                    <div>
+                      <strong>Ver desglose por empresa</strong>
+                      <small>Incluye cerrados sin pago, para detectar evasión</small>
+                    </div>
+                    <ChevronRight size={15} />
+                  </button>
                 </div>
               </article>
             </section>
@@ -694,6 +845,203 @@ function AdminWorkspace({
                   </button>
                 ))}
               </div>
+            </section>
+          )}
+          {section === "settings" && (
+            <section className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <p className="eyebrow">Ajuste global</p>
+                  <h2>Configuración</h2>
+                </div>
+                <Settings size={18} />
+              </div>
+              <form className="admin-settings-form" onSubmit={saveSettings}>
+                <div className="field">
+                  <label htmlFor="admin-commission-percent">Comisión de Chambeaya</label>
+                  <div className="admin-settings-percent">
+                    <input
+                      id="admin-commission-percent"
+                      name="commissionPercent"
+                      type="number"
+                      required
+                      step="0.01"
+                      defaultValue={settings ? settings.commissionBps / 100 : ""}
+                      key={settings?.commissionBps ?? "loading"}
+                    />
+                    <span>%</span>
+                  </div>
+                  <small>
+                    Se cobra a la empresa, encima del pago al trabajador. Este
+                    cambio solo aplica a los turnos que se publiquen desde
+                    ahora: los turnos ya publicados conservan la comisión con
+                    la que se publicaron, aunque cambies este valor.
+                  </small>
+                </div>
+                <div className="field">
+                  <label htmlFor="admin-tax-percent">IGV sobre la comisión</label>
+                  <div className="admin-settings-percent readonly">
+                    <input
+                      id="admin-tax-percent"
+                      type="number"
+                      value={settings ? settings.taxBps / 100 : ""}
+                      disabled
+                      readOnly
+                    />
+                    <span>%</span>
+                  </div>
+                  <small>Solo lectura en este alcance.</small>
+                </div>
+                {settingsError && <p className="admin-error">{settingsError}</p>}
+                <p className="admin-settings-meta">
+                  {settings?.updatedBy
+                    ? `Último cambio por ${settings.updatedBy.name}${settings.updatedAt ? ` · ${new Date(settings.updatedAt).toLocaleString("es-PE")}` : ""}`
+                    : "Todavía no se registró ningún cambio manual."}
+                </p>
+                <div className="admin-modal-actions">
+                  <button className="primary-button" type="submit" disabled={savingSettings || !settings}>
+                    {savingSettings ? "Guardando…" : "Guardar cambio"}
+                  </button>
+                </div>
+              </form>
+            </section>
+          )}
+          {section === "commissions" && (
+            <section className="admin-panel">
+              <div className="admin-panel-head">
+                <div>
+                  <p className="eyebrow">Facturación de comisión por empresa</p>
+                  <h2>Comisiones</h2>
+                </div>
+                <CircleDollarSign size={18} />
+              </div>
+              <form
+                className="admin-settings-form admin-commissions-filter"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void loadCommissionsReport(commissionsFrom, commissionsTo);
+                }}
+              >
+                <div className="field">
+                  <label htmlFor="commissions-from">Desde</label>
+                  <input
+                    id="commissions-from"
+                    type="date"
+                    value={commissionsFrom}
+                    onChange={(event) => setCommissionsFrom(event.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="commissions-to">Hasta</label>
+                  <input
+                    id="commissions-to"
+                    type="date"
+                    value={commissionsTo}
+                    onChange={(event) => setCommissionsTo(event.target.value)}
+                  />
+                </div>
+                <div className="admin-modal-actions">
+                  <button className="primary-button" type="submit" disabled={loadingCommissions}>
+                    {loadingCommissions ? "Cargando…" : "Aplicar filtro"}
+                  </button>
+                </div>
+              </form>
+              {commissionsError && <p className="admin-error">{commissionsError}</p>}
+              {commissionsReport && (
+                <>
+                  <div className="admin-list">
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>
+                          Por facturar (modo manual): S/{" "}
+                          {(commissionsReport.totals.toInvoiceCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </strong>
+                        <small>
+                          + IGV S/ {(commissionsReport.totals.toInvoiceTaxCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </small>
+                      </div>
+                    </div>
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>
+                          Cobrada (pasarela): S/{" "}
+                          {(commissionsReport.totals.collectedCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </strong>
+                        <small>Sin proveedor contratado todavía: siempre 0.</small>
+                      </div>
+                    </div>
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>
+                          Por cobrar (pasarela): S/{" "}
+                          {(commissionsReport.totals.pendingCollectionCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                        </strong>
+                        <small>{commissionsReport.totals.payments} pagos en el período</small>
+                      </div>
+                    </div>
+                    <div className="admin-list-row">
+                      <div>
+                        <strong>{commissionsReport.totals.pendingResolution} pendientes de decisión</strong>
+                        <small>
+                          Asignaciones NO_SHOW o abandonadas que ninguna empresa resolvió todavía (no depende del período consultado)
+                        </small>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="admin-panel-head">
+                    <div>
+                      <p className="eyebrow">Desglose</p>
+                      <h2>Por empresa</h2>
+                    </div>
+                    <span className="admin-count">{commissionsReport.companies.length}</span>
+                  </div>
+                  <div className="admin-list">
+                    {commissionsReport.companies.map((row) => (
+                      // Todo el detalle numérico va DENTRO del único `div`
+                      // flexible (`flex:1; min-width:0`), como líneas
+                      // apiladas, en vez de repartirlo en varios `span`
+                      // hermanos con `white-space:nowrap`
+                      // (`.admin-status`): con textos largos, esos hermanos
+                      // no encogen y el `div` flexible termina en 0px de
+                      // ancho en una pantalla angosta, lo que deja el
+                      // nombre de la empresa técnicamente invisible (sin
+                      // caja) pese a seguir en el árbol de accesibilidad.
+                      <div className="admin-list-row" key={row.companyId}>
+                        <span className="admin-avatar">{row.name[0]}</span>
+                        <div>
+                          <strong>{row.name}</strong>
+                          <small>
+                            {row.ruc} · {row.payments} pagos
+                          </small>
+                          <small>
+                            Por facturar S/{" "}
+                            {(row.toInvoiceCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                            {" "}+ IGV S/{" "}
+                            {(row.toInvoiceTaxCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                          </small>
+                          <small>
+                            Cobrada S/ {(row.collectedCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })} · Por cobrar S/{" "}
+                            {(row.pendingCollectionCents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+                          </small>
+                        </div>
+                        <span className={row.closedWithoutPayment > 0 ? "admin-status admin-error" : "admin-status"}>
+                          {row.closedWithoutPayment} cerrados sin pago
+                        </span>
+                        <span className={row.pendingResolution > 0 ? "admin-status admin-error" : "admin-status"}>
+                          {row.pendingResolution} pendientes de decisión
+                        </span>
+                      </div>
+                    ))}
+                    {commissionsReport.companies.length === 0 && (
+                      <div className="empty-state compact-empty-state">
+                        <CheckCircle2 size={22} />
+                        <strong>Sin actividad en el período</strong>
+                        <span>Ninguna empresa tuvo pagos ni cierres sin pago en el rango seleccionado.</span>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </section>
           )}
           {selected &&
@@ -879,6 +1227,19 @@ function AdminWorkspace({
             />
           )}
         </div>
+      )}
+      {passwordModalOpen && (
+        <ChangePasswordModal
+          variant="admin"
+          onClose={() => setPasswordModalOpen(false)}
+          onSubmit={async ({ currentPassword, newPassword }) => {
+            await adminApi.changePassword(
+              session.token,
+              currentPassword,
+              newPassword,
+            );
+          }}
+        />
       )}
     </main>
   );

@@ -34,3 +34,5 @@ apps/mobile_flutter/ios/Flutter/flutter_export_environment.sh
 # reales, y nunca debe commitearse.
 deploy/nginx/chambeaya.conf.generado
 deploy/nginx/*.bak.*
+.next-flag-off/
+**/.next-flag-off/

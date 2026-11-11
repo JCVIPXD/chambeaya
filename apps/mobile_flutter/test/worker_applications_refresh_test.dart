@@ -412,7 +412,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     final repository = _Repository();
     await tester.pumpWidget(
-      MaterialApp(home: WorkerShell(repository: repository)),
+      MaterialApp(home: WorkerShell(temporaryShiftsEnabled: true, repository: repository)),
     );
     await tester.pump();
     await tester.pump();
@@ -451,7 +451,7 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       final repository = _Repository();
       await tester.pumpWidget(
-        MaterialApp(home: WorkerShell(repository: repository, initialIndex: 1)),
+        MaterialApp(home: WorkerShell(temporaryShiftsEnabled: true, repository: repository, initialIndex: 1)),
       );
       await tester.pump();
       await tester.pump();
@@ -495,7 +495,7 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       final repository = _Repository();
       await tester.pumpWidget(
-        MaterialApp(home: WorkerShell(repository: repository, initialIndex: 1)),
+        MaterialApp(home: WorkerShell(temporaryShiftsEnabled: true, repository: repository, initialIndex: 1)),
       );
       await tester.pump();
       await tester.pump();

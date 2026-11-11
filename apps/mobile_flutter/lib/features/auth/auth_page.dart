@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/config/temporary_shifts.dart' as feature_flags;
 import '../../theme/app_theme.dart';
 import '../onboarding/onboarding_page.dart';
 import 'auth_repository.dart';
@@ -14,7 +15,12 @@ class AuthPage extends StatefulWidget {
     this.repository,
     this.onAuthenticated,
     this.initialGooglePasswordSetupSession,
+    this.temporaryShiftsEnabled = feature_flags.temporaryShiftsEnabled,
   });
+
+  /// Con `false` (valor por defecto) los textos hablan de puestos fijos
+  /// formales; con `true` conservan los de turnos.
+  final bool temporaryShiftsEnabled;
   final AppAudience role;
   final bool demoMode;
   final AuthRepository? repository;
@@ -31,6 +37,8 @@ class _AuthPageState extends State<AuthPage> {
   final _email = TextEditingController();
   final _password = TextEditingController();
   final _identifier = TextEditingController();
+  final _referral = TextEditingController();
+  var _showReferral = false;
   // Existing workers should be able to access the app immediately. Registration
   // remains available through the explicit toggle below.
   var _isRegistering = false;
@@ -47,8 +55,7 @@ class _AuthPageState extends State<AuthPage> {
       !widget.demoMode && _canRegister && _googleClientId.isNotEmpty;
   bool get _isCompletingGoogleProfile =>
       _pendingGoogleProfileSetupToken != null;
-  bool get _isCompletingGooglePassword =>
-      _pendingGooglePasswordSession != null;
+  bool get _isCompletingGooglePassword => _pendingGooglePasswordSession != null;
   bool get _isInGoogleOnboarding =>
       _isCompletingGoogleProfile || _isCompletingGooglePassword;
 
@@ -64,7 +71,13 @@ class _AuthPageState extends State<AuthPage> {
     _email.dispose();
     _password.dispose();
     _identifier.dispose();
+    _referral.dispose();
     super.dispose();
+  }
+
+  /// Enter en el último campo del formulario envía el formulario.
+  void _submitFromKeyboard(String _) {
+    if (!_isLoading) _submit();
   }
 
   Future<void> _submit() async {
@@ -97,6 +110,7 @@ class _AuthPageState extends State<AuthPage> {
               email: _email.text,
               password: _password.text,
               identifier: _identifier.text,
+              referralCode: _referral.text,
             )
           : await repository.login(
               email: _email.text,
@@ -216,6 +230,9 @@ class _AuthPageState extends State<AuthPage> {
     if (_isRegistering && failure.code == 'INVALID_REGISTRATION') {
       return 'Revisa nombre, correo, contraseña y DNI: deben cumplir los requisitos indicados.';
     }
+    if (_isRegistering && failure.code == 'INVALID_REFERRAL_CODE') {
+      return 'Ese código de referido no existe. Revísalo o déjalo vacío para crear tu cuenta sin código.';
+    }
     if (failure.code == 'DUPLICATE_IDENTIFIER') {
       return 'Ese DNI ya está asociado a otra cuenta. Usa un DNI distinto o inicia sesión.';
     }
@@ -293,16 +310,24 @@ class _AuthPageState extends State<AuthPage> {
   }
 
   Widget _buildIntro(BuildContext context, {required bool compact}) {
+    final shifts = widget.temporaryShiftsEnabled;
     final title = widget.role == AppAudience.worker
-        ? 'Tu próximo turno empieza aquí'
+        ? (shifts ? 'Tu próximo turno empieza aquí' : 'Tu próximo empleo empieza aquí')
         : 'Organiza tu equipo con claridad';
     final description = widget.role == AppAudience.worker
-        ? 'Encuentra oportunidades confiables, postúlate en pocos pasos y lleva el control de cada turno.'
-        : 'Publica turnos, revisa postulaciones y confirma a la persona indicada desde un solo lugar.';
+        ? (shifts
+              ? 'Encuentra oportunidades confiables, postúlate en pocos pasos y lleva el control de cada turno.'
+              : 'Encuentra puestos fijos formales, postúlate en pocos pasos y sigue cada etapa de tu proceso.')
+        : (shifts
+              ? 'Publica turnos, revisa postulaciones y confirma a la persona indicada desde un solo lugar.'
+              : 'Publica puestos, revisa postulaciones y elige a la persona indicada desde un solo lugar.');
 
     final benefits = widget.role == AppAudience.worker
-        ? const [
-            (Icons.search_rounded, 'Turnos cerca de ti'),
+        ? [
+            (
+              Icons.search_rounded,
+              shifts ? 'Turnos cerca de ti' : 'Puestos fijos formales',
+            ),
             (Icons.bolt_rounded, 'Postulación rápida'),
             (Icons.timeline_rounded, 'Estados fáciles de seguir'),
           ]
@@ -394,7 +419,9 @@ class _AuthPageState extends State<AuthPage> {
               Expanded(
                 child: Text(
                   widget.role == AppAudience.worker
-                      ? 'Busca → postúlate → confirma'
+                      ? (widget.temporaryShiftsEnabled
+                            ? 'Busca → postúlate → confirma'
+                            : 'Busca → postúlate → recibe tu oferta')
                       : 'Publica → elige → confirma',
                   style: const TextStyle(
                     color: Colors.white,
@@ -519,6 +546,7 @@ class _AuthPageState extends State<AuthPage> {
                 children: [
                   if (_isCompletingGoogleProfile)
                     TextFormField(
+                      key: const ValueKey('auth-google-dni'),
                       controller: _identifier,
                       keyboardType: TextInputType.number,
                       maxLength: 8,
@@ -538,9 +566,12 @@ class _AuthPageState extends State<AuthPage> {
                   if (_isInGoogleOnboarding) ...[
                     SizedBox(height: fieldGap),
                     TextFormField(
+                      key: const ValueKey('auth-google-password'),
                       controller: _password,
                       obscureText: true,
                       autofillHints: const [AutofillHints.newPassword],
+                      textInputAction: TextInputAction.done,
+                      onFieldSubmitted: _submitFromKeyboard,
                       decoration: InputDecoration(
                         labelText: 'Contraseña de Chambeaya',
                         helperText:
@@ -560,10 +591,10 @@ class _AuthPageState extends State<AuthPage> {
                         return null;
                       },
                     ),
-                  ]
-                  else ...[
+                  ] else ...[
                     if (_isRegistering && _canRegister)
                       TextFormField(
+                        key: const ValueKey('auth-name'),
                         controller: _name,
                         decoration: InputDecoration(
                           labelText: 'Nombre completo',
@@ -577,6 +608,7 @@ class _AuthPageState extends State<AuthPage> {
                     if (_isRegistering && _canRegister)
                       SizedBox(height: fieldGap),
                     TextFormField(
+                      key: const ValueKey('auth-email'),
                       controller: _email,
                       keyboardType: TextInputType.emailAddress,
                       autofillHints: const [AutofillHints.email],
@@ -592,6 +624,7 @@ class _AuthPageState extends State<AuthPage> {
                     ),
                     SizedBox(height: fieldGap),
                     TextFormField(
+                      key: const ValueKey('auth-password'),
                       controller: _password,
                       obscureText: true,
                       autofillHints: [
@@ -599,6 +632,13 @@ class _AuthPageState extends State<AuthPage> {
                             ? AutofillHints.newPassword
                             : AutofillHints.password,
                       ],
+                      // En el registro siguen el DNI y el código: Enter avanza.
+                      textInputAction: _isRegistering && _canRegister
+                          ? TextInputAction.next
+                          : TextInputAction.done,
+                      onFieldSubmitted: _isRegistering && _canRegister
+                          ? null
+                          : _submitFromKeyboard,
                       decoration: InputDecoration(
                         labelText: 'Contraseña',
                         contentPadding: fieldContentPadding,
@@ -619,8 +659,15 @@ class _AuthPageState extends State<AuthPage> {
                     if (_isRegistering && _canRegister) ...[
                       SizedBox(height: fieldGap),
                       TextFormField(
+                        key: const ValueKey('auth-dni'),
                         controller: _identifier,
                         keyboardType: TextInputType.number,
+                        textInputAction: _showReferral
+                            ? TextInputAction.next
+                            : TextInputAction.done,
+                        onFieldSubmitted: _showReferral
+                            ? null
+                            : _submitFromKeyboard,
                         decoration: InputDecoration(
                           labelText: 'DNI',
                           contentPadding: fieldContentPadding,
@@ -631,6 +678,32 @@ class _AuthPageState extends State<AuthPage> {
                             ? 'El DNI debe tener exactamente 8 dígitos'
                             : null,
                       ),
+                      if (_showReferral) ...[
+                        SizedBox(height: fieldGap),
+                        TextFormField(
+                          key: const ValueKey('auth-referral'),
+                          controller: _referral,
+                          textCapitalization: TextCapitalization.characters,
+                          autocorrect: false,
+                          maxLength: 8,
+                          textInputAction: TextInputAction.done,
+                          onFieldSubmitted: _submitFromKeyboard,
+                          decoration: InputDecoration(
+                            labelText: 'Código de referido (opcional)',
+                            helperText:
+                                'Si alguien te invitó, escribe su código de 8 caracteres.',
+                            counterText: '',
+                            contentPadding: fieldContentPadding,
+                          ),
+                          validator: (value) {
+                            final code = (value ?? '').trim();
+                            if (code.isEmpty) return null;
+                            return RegExp(r'^[A-Za-z0-9]{8}$').hasMatch(code)
+                                ? null
+                                : 'El código tiene 8 letras o números';
+                          },
+                        ),
+                      ],
                     ],
                   ],
                 ],
@@ -677,6 +750,17 @@ class _AuthPageState extends State<AuthPage> {
                 ),
               ),
             ],
+            if (_canRegister &&
+                _isRegistering &&
+                !_isInGoogleOnboarding &&
+                !_showReferral)
+              Center(
+                child: TextButton(
+                  key: const ValueKey('auth-show-referral'),
+                  onPressed: () => setState(() => _showReferral = true),
+                  child: const Text('Tengo un código de referido'),
+                ),
+              ),
             if (_canRegister && !_isInGoogleOnboarding)
               Center(
                 child: TextButton(
@@ -762,7 +846,9 @@ class _AuthPageState extends State<AuthPage> {
               children: [
                 TextSpan(
                   text: widget.role == AppAudience.worker
-                      ? 'busca · postúlate · confirma'
+                      ? (widget.temporaryShiftsEnabled
+                            ? 'busca · postúlate · confirma'
+                            : 'busca · postúlate · recibe tu oferta')
                       : 'publica · elige · confirma',
                   style: const TextStyle(
                     color: AppColors.muted,
@@ -801,21 +887,13 @@ class _BrandMark extends StatelessWidget {
         ),
       ),
       const SizedBox(width: 12),
-      Text.rich(
-        TextSpan(
-          text: 'CUMPLE ',
-          style: TextStyle(
-            color: AppColors.navy,
-            fontSize: compact ? 16 : 20,
-            fontWeight: FontWeight.w900,
-            letterSpacing: -.4,
-          ),
-          children: const [
-            TextSpan(
-              text: 'NOW',
-              style: TextStyle(color: AppColors.tealDark),
-            ),
-          ],
+      Text(
+        'CHAMBEAYA',
+        style: TextStyle(
+          color: AppColors.navy,
+          fontSize: compact ? 16 : 20,
+          fontWeight: FontWeight.w900,
+          letterSpacing: -.4,
         ),
       ),
     ],

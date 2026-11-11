@@ -1,7 +1,15 @@
 import { raw, Router } from 'express';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
 
 import { AuthError, type AuthService } from '../auth/auth.service.js';
+import { CurrencyError } from '../currency/currency.service.js';
+import { sendTransactionError } from '../operations/transaction-errors.js';
+import {
+  CANDIDATE_UNLOCK_ERROR_STATUS,
+  CandidateUnlockError,
+  DatabaseCandidateUnlockService,
+  type CandidateUnlockOperations,
+} from './candidate_unlock.service.js';
 import { DatabaseTalentService, TalentError, type TalentOperations } from './talent.service.js';
 import {
   DatabaseTalentInvitationService,
@@ -133,6 +141,7 @@ export function createTalentRouter(
   authService: AuthService,
   service: TalentOperations = new DatabaseTalentService(),
   invitations: TalentInvitationOperations = new DatabaseTalentInvitationService(),
+  unlocks: CandidateUnlockOperations = new DatabaseCandidateUnlockService(),
 ) {
   const router = Router();
   const session = async (request: import('express').Request) => authService.restore(bearerToken(request.header('authorization')));
@@ -156,8 +165,29 @@ export function createTalentRouter(
         response.status(TALENT_INVITATION_ERROR_STATUS[error.code]).json({ error: error.code });
         return;
       }
-      const code = error instanceof TalentError ? error.code : 'INVALID_TALENT_REQUEST';
-      const status = code === 'WORKER_ACCOUNT_REQUIRED' || code === 'BUSINESS_ACCOUNT_REQUIRED' ? 403 : code === 'SPECIALTY_NOT_FOUND' || code === 'APPLICATION_NOT_FOUND' || code === 'CV_NOT_AVAILABLE' ? 404 : code === 'REVIEW_ALREADY_EXISTS' ? 409 : 400;
+      if (error instanceof CandidateUnlockError) {
+        response.status(CANDIDATE_UNLOCK_ERROR_STATUS[error.code]).json({ error: error.code });
+        return;
+      }
+      // Cobro rechazado (saldo insuficiente, tope diario): la acción no ocurrió.
+      if (error instanceof CurrencyError) {
+        response.status(error.statusCode).json({ error: error.code, ...error.details });
+        return;
+      }
+      // Entrada inválida (zod): el único caso que responde 400 INVALID_TALENT_REQUEST.
+      if (error instanceof ZodError) {
+        response.status(400).json({ error: 'INVALID_TALENT_REQUEST' });
+        return;
+      }
+      // Reintentos `Serializable` agotados -> 503 reintentable; cuenta o registro ya borrado -> 404 (CN-20261012-049, BAJO-2).
+      if (sendTransactionError(response, error, { missingRecordCode: 'RESOURCE_NO_LONGER_EXISTS' })) return;
+      if (!(error instanceof TalentError)) {
+        console.error(error);
+        response.status(500).json({ error: 'INTERNAL_ERROR' });
+        return;
+      }
+      const code = error.code;
+      const status = code === 'WORKER_ACCOUNT_REQUIRED' || code === 'BUSINESS_ACCOUNT_REQUIRED' ? 403 : code === 'SPECIALTY_NOT_FOUND' || code === 'APPLICATION_NOT_FOUND' || code === 'CV_NOT_AVAILABLE' ? 404 : code === 'REVIEW_ALREADY_EXISTS' || code === 'PROFILE_NOT_VISIBLE' ? 409 : 400;
       response.status(status).json({ error: code });
     }
   };
@@ -165,6 +195,8 @@ export function createTalentRouter(
   router.get('/specialties', route(async (_request, response) => { response.json(await service.listSpecialties()); }));
   router.get('/workers/me/profile', route(async (request, response) => { response.json(await service.ownProfile(await workerSession(request))); }));
   router.patch('/workers/me/profile', route(async (request, response) => { response.json(await service.updateOwnProfile(await workerSession(request), profileSchema.parse(request.body))); }));
+  // PROFILE_HIGHLIGHT (M6): destaca el perfil propio en la búsqueda de talento (con costo).
+  router.post('/workers/me/profile/highlight', route(async (request, response) => { response.json(await service.highlightOwnProfile(await workerSession(request))); }));
   router.put('/workers/me/cv', raw({ type: 'application/pdf', limit: '5mb' }), route(async (request, response) => {
     const body = request.body;
     const encodedName = request.header('x-file-name');
@@ -262,6 +294,31 @@ export function createTalentRouter(
   router.get('/business/talent', route(async (request, response) => {
     const query = searchSchema.parse(request.query);
     response.json(await service.searchTalent(await businessSession(request), { ...query, availableOnly: query.availableOnly === 'true' }));
+  }));
+  // Desbloqueo de contacto y CV de un candidato que no postuló (CANDIDATE_CONTACT_UNLOCK, con costo).
+  router.get('/business/talent-unlocks', route(async (request, response) => {
+    response.json(await unlocks.list(await businessSession(request)));
+  }));
+  router.post('/business/talent/:profileId/unlock-contact', route(async (request, response) => {
+    const profileId = Array.isArray(request.params.profileId) ? request.params.profileId[0] ?? '' : request.params.profileId;
+    const result = await unlocks.unlock(await businessSession(request), profileId) as { idempotent?: boolean };
+    response.status(result.idempotent ? 200 : 201).json(result);
+  }));
+  router.get('/business/talent/:profileId/contact', route(async (request, response) => {
+    const profileId = Array.isArray(request.params.profileId) ? request.params.profileId[0] ?? '' : request.params.profileId;
+    response.json(await unlocks.contact(await businessSession(request), profileId));
+  }));
+  router.get('/business/talent/:profileId/cv', route(async (request, response) => {
+    const profileId = Array.isArray(request.params.profileId) ? request.params.profileId[0] ?? '' : request.params.profileId;
+    const document = await unlocks.downloadCv(await businessSession(request), profileId);
+    const filename = encodeURIComponent(document.originalName).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    response.set({
+      'Cache-Control': 'private, no-store',
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename*=UTF-8''${filename}`,
+      'X-Content-Type-Options': 'nosniff',
+    });
+    response.send(document.bytes);
   }));
   router.post('/assignments/:id/reviews', route(async (request, response) => {
     const assignmentId = Array.isArray(request.params.id) ? request.params.id[0] ?? '' : request.params.id;

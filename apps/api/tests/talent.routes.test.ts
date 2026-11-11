@@ -209,6 +209,8 @@ describe('worker talent routes', () => {
       isCertificationsVisible: boolean;
       isLanguagesVisible: boolean;
       isWorkAreaVisible: boolean;
+      highlightedAt: Date | null;
+      highlightedUntil: Date | null;
       user: {
         id: string;
         name: string;
@@ -241,6 +243,8 @@ describe('worker talent routes', () => {
         isCertificationsVisible: true,
         isLanguagesVisible: true,
         isWorkAreaVisible: true,
+        highlightedAt: null,
+        highlightedUntil: null,
         specialties: [],
         experiences: [],
         certifications: [],
@@ -271,45 +275,59 @@ describe('worker talent routes', () => {
       return (value ?? '').toLowerCase() === needle.toLowerCase();
     }
 
-    function matchesWhere(item: FakeProfile, where: Record<string, unknown>): boolean {
+    type Where = Record<string, unknown>;
+    type DateFilter = { lte?: Date; gt?: Date } | null;
+    function matchesDate(value: Date | null, filter: DateFilter | undefined) {
+      if (filter === undefined) return true;
+      if (filter === null) return value === null;
+      if (value === null) return false;
+      if (filter.lte && !(value.getTime() <= filter.lte.getTime())) return false;
+      if (filter.gt && !(value.getTime() > filter.gt.getTime())) return false;
+      return true;
+    }
+
+    // Evalua el subconjunto de filtros de Prisma que usa la busqueda (incluye AND/OR anidados y los campos de destacado).
+    function matchesWhere(item: FakeProfile, where: Where): boolean {
       const w = where as {
+        AND?: Where[];
+        id?: { gt: string };
         isVisible?: boolean;
         isAvailable?: boolean;
-        district?: { equals: string };
+        district?: { equals?: string; contains?: string };
+        headline?: { contains: string };
+        user?: { name: { contains: string } };
         specialties?: { some: { specialtyId: string } };
-        OR?: Array<{ headline?: { contains: string }; district?: { contains: string }; user?: { name: { contains: string } } }>;
+        highlightedAt?: DateFilter;
+        highlightedUntil?: DateFilter;
+        OR?: Where[];
       };
+      if (w.AND && !w.AND.every((part) => matchesWhere(item, part))) return false;
+      if (w.id && !(item.id > w.id.gt)) return false;
       if (w.isVisible !== undefined && item.isVisible !== w.isVisible) return false;
       if (w.isAvailable !== undefined && item.isAvailable !== w.isAvailable) return false;
-      if (w.district && !equalsInsensitive(item.district, w.district.equals)) return false;
+      if (w.district?.equals !== undefined && !equalsInsensitive(item.district, w.district.equals)) return false;
+      if (w.district?.contains !== undefined && !containsInsensitive(item.district, w.district.contains)) return false;
+      if (w.headline && !containsInsensitive(item.headline, w.headline.contains)) return false;
+      if (w.user && !containsInsensitive(item.user.name, w.user.name.contains)) return false;
       if (w.specialties && !item.specialties.some((entry) => entry.specialtyId === w.specialties!.some.specialtyId)) return false;
-      if (w.OR) {
-        const matches = w.OR.some((condition) => {
-          if (condition.headline) return containsInsensitive(item.headline, condition.headline.contains);
-          if (condition.district) return containsInsensitive(item.district, condition.district.contains);
-          if (condition.user) return containsInsensitive(item.user.name, condition.user.name.contains);
-          return false;
-        });
-        if (!matches) return false;
-      }
+      if (!matchesDate(item.highlightedAt, w.highlightedAt)) return false;
+      if (!matchesDate(item.highlightedUntil, w.highlightedUntil)) return false;
+      if (w.OR && !w.OR.some((condition) => matchesWhere(item, condition))) return false;
       return true;
     }
 
     function fakePrisma(profiles: FakeProfile[]) {
       return {
         workerTalentProfile: {
-          findMany: vi.fn(async ({ where, cursor, skip, take }: { where: Record<string, unknown>; cursor?: { id: string }; skip?: number; take: number }) => {
+          findMany: vi.fn(async ({ where, take }: { where: Where; take: number }) => {
             const matched = profiles.filter((item) => matchesWhere(item, where)).sort((a, b) => a.id.localeCompare(b.id));
-            let startIndex = 0;
-            if (cursor?.id) {
-              const cursorIndex = matched.findIndex((item) => item.id === cursor.id);
-              startIndex = cursorIndex === -1 ? matched.length : cursorIndex + (skip ?? 0);
-            }
-            return matched.slice(startIndex, startIndex + take);
+            return matched.slice(0, take);
           }),
         },
       };
     }
+
+    const cursorId = (cursor: string) => (JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as [string, string, string])[1];
 
     it('paginates a free-text search without skipping or repeating items, and keeps the id-ascending order stable', async () => {
       const profiles = [
@@ -327,7 +345,7 @@ describe('worker talent routes', () => {
       const page1 = await request(app).get('/api/business/talent?query=barista&limit=2').set('Authorization', `Bearer ${business.token}`);
       expect(page1.status).toBe(200);
       expect(page1.body.items.map((item: { id: string }) => item.id)).toEqual(['a1', 'a3']);
-      expect(page1.body.nextCursor).toBe('a3');
+      expect(cursorId(page1.body.nextCursor)).toBe('a3');
 
       const page2 = await request(app).get(`/api/business/talent?query=barista&limit=2&cursor=${page1.body.nextCursor}`).set('Authorization', `Bearer ${business.token}`);
       expect(page2.status).toBe(200);
@@ -337,6 +355,54 @@ describe('worker talent routes', () => {
       const allIds = [...page1.body.items, ...page2.body.items].map((item: { id: string }) => item.id);
       expect(allIds).toEqual(['a1', 'a3', 'a5']);
       expect(new Set(allIds).size).toBe(allIds.length);
+    });
+
+    it('lists highlighted profiles first and keeps the cursor stable across both segments even when a highlight expires mid-pagination', async () => {
+      const now = new Date('2026-10-12T15:00:00Z');
+      const hour = 3_600_000;
+      const profiles = [
+        profile({ id: 'c1' }),
+        profile({ id: 'c2', highlightedAt: new Date(now.getTime() - hour), highlightedUntil: new Date(now.getTime() + hour) }),
+        profile({ id: 'c3' }),
+        profile({ id: 'c4', highlightedAt: new Date(now.getTime() - hour), highlightedUntil: new Date(now.getTime() + 2 * hour) }),
+        profile({ id: 'c5' }),
+        // Destacado vencido: va con el resto.
+        profile({ id: 'c6', highlightedAt: new Date(now.getTime() - 5 * hour), highlightedUntil: new Date(now.getTime() - hour) }),
+        // Destacado comprado DESPUES del instante de la primera pagina: no altera la paginacion en curso.
+        profile({ id: 'c7' }),
+      ];
+      let clock = now;
+      const { authService, business } = await context();
+      const talentService = new DatabaseTalentService(fakePrisma(profiles) as unknown as PrismaClient, undefined, undefined, undefined, () => clock);
+      const app = createApp({ authService, talentService });
+      const get = (cursor?: string) => request(app).get(`/api/business/talent?limit=2${cursor ? `&cursor=${cursor}` : ''}`).set('Authorization', `Bearer ${business.token}`);
+
+      const page1 = await get();
+      expect(page1.body.items.map((item: { id: string }) => item.id)).toEqual(['c2', 'c4']);
+      expect(page1.body.items.every((item: { isHighlighted: boolean }) => item.isHighlighted)).toBe(true);
+      // Entre páginas vence c2 y se destaca c7: la partición sigue la de la primera página.
+      clock = new Date(now.getTime() + 3 * hour);
+      profiles[6]!.highlightedAt = clock;
+      profiles[6]!.highlightedUntil = new Date(clock.getTime() + 24 * hour);
+      const page2 = await get(page1.body.nextCursor);
+      const page3 = await get(page2.body.nextCursor);
+      const page4 = page3.body.nextCursor ? await get(page3.body.nextCursor) : { body: { items: [], nextCursor: null } };
+      const ids = [page1, page2, page3, page4].flatMap((page) => page.body.items.map((item: { id: string }) => item.id));
+      expect(ids).toEqual(['c2', 'c4', 'c1', 'c3', 'c5', 'c6', 'c7']);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(page4.body.nextCursor).toBeNull();
+      // Una búsqueda nueva ya ve el estado actual: c7 destacado, c2 y c4 vencidos.
+      const fresh = await get();
+      expect(fresh.body.items.map((item: { id: string }) => item.id)).toEqual(['c7', 'c1']);
+    });
+
+    it('treats a legacy plain-id cursor as a continuation of the regular segment', async () => {
+      const profiles = [profile({ id: 'd1' }), profile({ id: 'd2' }), profile({ id: 'd3' })];
+      const { authService, business } = await context();
+      const talentService = new DatabaseTalentService(fakePrisma(profiles) as unknown as PrismaClient);
+      const app = createApp({ authService, talentService });
+      const response = await request(app).get('/api/business/talent?limit=5&cursor=d1').set('Authorization', `Bearer ${business.token}`);
+      expect(response.body.items.map((item: { id: string }) => item.id)).toEqual(['d2', 'd3']);
     });
 
     it('never exposes private identity, contact or document data in the talent search response body', async () => {
@@ -354,7 +420,7 @@ describe('worker talent routes', () => {
       expect(Object.keys(item).sort()).toEqual(
         [
           'availabilityDays', 'availabilityPeriods', 'availabilityText', 'certifications', 'completion',
-          'district', 'experiences', 'headline', 'id', 'isAvailable', 'languages', 'name', 'reputation',
+          'district', 'experiences', 'headline', 'id', 'isAvailable', 'isHighlighted', 'languages', 'name', 'reputation',
           'specialties', 'workArea',
         ].sort(),
       );
@@ -372,7 +438,8 @@ describe('worker talent routes', () => {
       return {
         workerTalentProfile: {
           upsert: vi.fn(async () => record),
-          findMany: vi.fn(async () => [record]),
+          // Solo el segmento resto devuelve el registro (el segmento de destacados va vacio).
+          findMany: vi.fn(async ({ where }: { where: { AND?: Array<Record<string, unknown>> } }) => (where.AND?.some((part) => part.highlightedAt && part.highlightedUntil) ? [] : [record])),
         },
       };
     }

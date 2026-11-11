@@ -1,5 +1,5 @@
 import { test as base, expect } from '@playwright/test';
-import type { BusinessSession, CompanyRecord, SubscriptionRecord } from '../../lib/business-api';
+import type { BusinessSession, CompanyRecord, PaymentRecord, PaymentSettingsRecord, SubscriptionRecord } from '../../lib/business-api';
 import { DAY_MS, isoFromNow } from './dates';
 
 // Synthetic identities only. These credentials do not belong to an API account.
@@ -48,6 +48,16 @@ export const inactiveSubscription: SubscriptionRecord = {
   trialEndsAt: null,
 };
 
+// Ajuste global por defecto (10% de comisión + 18% de IGV sobre la comisión,
+// ver el plan de pagos). Un test puede sobreescribirlo con `test.use({
+// paymentSettings: { ... } })`, igual que `subscription`.
+export const defaultPaymentSettings: PaymentSettingsRecord = {
+  commissionBps: 1000,
+  taxBps: 1800,
+  currency: 'PEN',
+  mode: 'manual',
+};
+
 // Empresa con un plan `PRO` activado de forma manual (no existe endpoint de
 // activación; el plan solo puede venir de una fila creada por administración).
 export const proSubscription: SubscriptionRecord = {
@@ -59,14 +69,54 @@ export const proSubscription: SubscriptionRecord = {
   trialEndsAt: null,
 };
 
+// Alcance D: un pago `PENDING` de ejemplo (nacido de `checkOut`/
+// `resolveAssignment`, nunca del CRUD manual retirado) para los specs de
+// "Marcar como pagado". Un test puede sobreescribirlo con
+// `test.use({ payments: [...] })`, igual que `subscription`.
+export const pendingPayment: PaymentRecord = {
+  id: 'browser-test-payment-pending',
+  reference: 'CN-TEST-0001',
+  description: 'Mozo de salón · Empresa de pruebas UI',
+  amountCents: 10000,
+  commissionBps: 1000,
+  commissionCents: 1000,
+  taxBps: 1800,
+  taxCents: 180,
+  totalCents: 11180,
+  provider: 'manual',
+  workerCount: 1,
+  status: 'PENDING',
+  dueAt: isoFromNow(-1 * DAY_MS),
+  processedAt: null,
+  createdAt: isoFromNow(-1 * DAY_MS),
+  shift: { id: 'browser-test-shift', title: 'Mozo de salón', startsAt: isoFromNow(-2 * DAY_MS), endsAt: isoFromNow(-1 * DAY_MS) },
+  assignment: { id: 'browser-test-assignment', status: 'COMPLETED', worker: { id: 'browser-test-worker', name: 'Trabajador de pruebas', email: 'trabajador@example.test' } },
+  workerConfirmedAt: null,
+};
+
+export const simulatedPendingPayment: PaymentRecord = {
+  ...pendingPayment,
+  id: 'browser-test-payment-simulated',
+  reference: 'CN-TEST-SIM-0001',
+  provider: 'simulated',
+};
+
 type ApiCall ={ method: string; path: string; authorization: string | undefined };
 type BrowserApi = { calls: ApiCall[] };
 
-export const test = base.extend<{ browserApi: BrowserApi; subscription: SubscriptionRecord }>({
+export const test = base.extend<{ browserApi: BrowserApi; subscription: SubscriptionRecord; paymentSettings: PaymentSettingsRecord; payments: PaymentRecord[] }>({
   // Override per file/describe with `test.use({ subscription: ... })`.
   subscription: [activeSubscription, { option: true }],
-  browserApi: [async ({ context, baseURL, subscription }, use) => {
+  paymentSettings: [defaultPaymentSettings, { option: true }],
+  payments: [[], { option: true }],
+  browserApi: [async ({ context, baseURL, subscription, paymentSettings, payments }, use) => {
     const calls: ApiCall[] = [];
+    // Estado propio de este test (nunca compartido entre tests): el
+    // servidor simulado aplica `mark-paid` igual que la API real
+    // (`updateMany` condicionado a `status: 'PENDING'`), sobre una copia
+    // para no mutar el fixture importado.
+    let paymentRecords: PaymentRecord[] = payments.map((payment) => ({ ...payment }));
+    const simulatedAttempts = new Map<string, { paymentId: string; status: 'CREATED' | 'APPROVED' | 'REJECTED'; expiresAt: string }>();
     const unexpected: string[] = [];
     const pageErrors: string[] = [];
     let authenticated = false;
@@ -120,16 +170,119 @@ export const test = base.extend<{ browserApi: BrowserApi; subscription: Subscrip
         await route.fulfill({ status: 204 });
         return;
       }
+      if (path === '/api/auth/password/change' && method === 'POST') {
+        const body = request.postDataJSON() as
+          | { currentPassword?: string; newPassword?: string }
+          | null;
+        if (body?.currentPassword !== account.password) {
+          await route.fulfill({ status: 401, json: { error: 'INVALID_CURRENT_PASSWORD' } });
+          return;
+        }
+        await route.fulfill({ json: session });
+        return;
+      }
+
+      // Alcance D: único escritor que le queda a la empresa sobre un pago.
+      // Misma regla que la API real (`markPaymentPaid`): solo transiciona
+      // `PENDING` -> `PROCESSED`; cualquier otro estado responde 409.
+      const markPaidMatch = /^\/api\/business\/payments\/([^/]+)\/mark-paid$/.exec(path);
+      if (method === 'POST' && markPaidMatch) {
+        const id = markPaidMatch[1];
+        const target = paymentRecords.find((item) => item.id === id);
+        if (!target) {
+          await route.fulfill({ status: 404, json: { error: 'PAYMENT_NOT_FOUND' } });
+          return;
+        }
+        if (target.status !== 'PENDING') {
+          await route.fulfill({ status: 409, json: { error: 'PAYMENT_NOT_PAYABLE' } });
+          return;
+        }
+        const updated: PaymentRecord = { ...target, status: 'PROCESSED', processedAt: new Date().toISOString() };
+        paymentRecords = paymentRecords.map((item) => (item.id === id ? updated : item));
+        await route.fulfill({ json: updated });
+        return;
+      }
+
+      const checkoutMatch = /^\/api\/business\/payments\/([^/]+)\/checkout$/.exec(path);
+      if (method === 'POST' && checkoutMatch) {
+        const id = checkoutMatch[1];
+        const target = paymentRecords.find((item) => item.id === id);
+        if (!target || target.provider !== 'simulated' || !['PENDING', 'SCHEDULED'].includes(target.status)) {
+          await route.fulfill({ status: 409, json: { error: 'PAYMENT_NOT_PAYABLE' } });
+          return;
+        }
+        const existing = [...simulatedAttempts.entries()].find(([, attempt]) => attempt.paymentId === id);
+        const checkoutId = existing?.[0] ?? `checkout-${id}`;
+        if (!existing) {
+          simulatedAttempts.set(checkoutId, {
+            paymentId: id,
+            status: 'CREATED',
+            expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+          });
+          paymentRecords = paymentRecords.map((item) => item.id === id ? { ...item, status: 'SCHEDULED' } : item);
+        }
+        const attempt = simulatedAttempts.get(checkoutId)!;
+        await route.fulfill({ json: {
+          attemptId: checkoutId,
+          redirectUrl: new URL(`/pago-simulado/${checkoutId}`, baseURL).toString(),
+          expiresAt: attempt.expiresAt,
+        } });
+        return;
+      }
+
+      const simulatedMatch = /^\/api\/payments\/simulated\/([^/]+)(?:\/(approve|reject))?$/.exec(path);
+      if (simulatedMatch) {
+        const [, checkoutId, outcome] = simulatedMatch;
+        const attempt = simulatedAttempts.get(checkoutId);
+        const target = attempt && paymentRecords.find((item) => item.id === attempt.paymentId);
+        if (!attempt || !target) {
+          await route.fulfill({ status: 404, json: { error: 'ATTEMPT_NOT_FOUND' } });
+          return;
+        }
+        if (method === 'GET' && !outcome) {
+          await route.fulfill({ json: {
+            checkoutId,
+            status: attempt.status,
+            expiresAt: attempt.expiresAt,
+            payment: {
+              id: target.id,
+              reference: target.reference,
+              description: target.description,
+              totalCents: target.totalCents,
+              currency: 'PEN',
+              status: target.status,
+            },
+          } });
+          return;
+        }
+        if (method === 'POST' && outcome) {
+          if (outcome === 'approve') {
+            attempt.status = 'APPROVED';
+            paymentRecords = paymentRecords.map((item) => item.id === target.id ? { ...item, status: 'PROCESSED', processedAt: new Date().toISOString() } : item);
+            await route.fulfill({ json: { ok: true, result: 'approved' } });
+            return;
+          }
+          attempt.status = 'REJECTED';
+          if (target.status !== 'PROCESSED') {
+            paymentRecords = paymentRecords.map((item) => item.id === target.id ? { ...item, status: 'PENDING' } : item);
+          }
+          await route.fulfill({ json: { ok: true, result: target.status === 'PROCESSED' ? 'noop' : 'rejected' } });
+          return;
+        }
+      }
 
       const data: Record<string, unknown> = {
         '/api/business/company': company,
         '/api/business/subscription': subscription,
+        '/api/business/payment-settings': paymentSettings,
         '/api/business/shifts': [],
         '/api/business/workers': [],
         '/api/business/conversations': [],
-        '/api/business/payments': [],
+        '/api/business/payments': paymentRecords,
         '/api/business/applications/pending': { count: 0, shiftIds: [] },
         '/api/business/talent-invitations': [],
+        // El saldo de la moneda virtual se lee al abrir el panel (barra superior); el nombre lo da la API.
+        '/api/business/currency/balance': { currency: 'Chambitas', balance: 50 },
       };
       if (method === 'GET' && Object.hasOwn(data, path)) {
         await route.fulfill({ json: data[path] });

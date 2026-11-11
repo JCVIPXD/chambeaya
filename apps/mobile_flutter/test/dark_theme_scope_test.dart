@@ -142,7 +142,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: buildAppTheme(Brightness.light),
-          home: WorkerShell(
+          home: WorkerShell(temporaryShiftsEnabled: true, 
             repository: DemoWorkerMarketplaceRepository(),
             themeModeController: controller,
           ),

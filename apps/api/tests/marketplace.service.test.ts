@@ -376,6 +376,10 @@ describe('DatabaseMarketplaceService.checkOut time window and lifecycle', () => 
   const baseShift = {
     id: 'shift-1', companyId: 'company-1', title: 'Mozo', payCents: 10000,
     requiredWorkers: 1, status: 'CHECKED_IN',
+    // Comisión/IGV ya fijados (turno posterior a la migración de pagos): las
+    // pruebas de este `describe` no ejercen el `fallback` al ajuste global,
+    // que tiene su propia prueba dedicada más abajo.
+    commissionBps: 1000, taxBps: 1800,
     startsAt: new Date('2026-09-18T18:00:00.000Z'),
     endsAt: new Date('2026-09-19T00:00:00.000Z'),
     company: { name: 'Restaurante Demo' },
@@ -396,6 +400,30 @@ describe('DatabaseMarketplaceService.checkOut time window and lifecycle', () => 
     await expect(service.checkOut('worker-1', 'shift-1')).resolves.toMatchObject({ shiftId: 'shift-1' });
     expect(state.assignment.status).toBe('COMPLETED');
     expect(payment.upsert).toHaveBeenCalledOnce();
+    // S/100 + 10% de comisión + 18% de IGV sobre la comisión = S/111.80.
+    expect(payment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        amountCents: 10000, commissionBps: 1000, commissionCents: 1000, taxBps: 1800, taxCents: 180, totalCents: 11180, provider: 'manual',
+      }),
+    }));
+  });
+
+  // MEDIO-2 de CN-20260926-012 (decisión del usuario): un turno anterior a la
+  // migración se cobra SIN comisión (0%). `Shift.commissionBps`/`taxBps` son
+  // `NOT NULL` desde esa migración (backfill a 0/0): ya no hay ningún
+  // respaldo al ajuste global dentro de `checkOut`.
+  it('a shift backfilled with 0% commission (pre-migration) never reads PlatformSettings and charges no commission', async () => {
+    const legacyShift = { ...baseShift, commissionBps: 0, taxBps: 0 };
+    const { prisma, payment } = fakeAssignmentPrisma(checkedInAssignment, legacyShift);
+    vi.useFakeTimers({ toFake: ['Date'] }).setSystemTime(legacyShift.endsAt);
+    const service = new DatabaseMarketplaceService(prisma as never);
+
+    await expect(service.checkOut('worker-1', 'shift-1')).resolves.toMatchObject({ shiftId: 'shift-1' });
+    // `prisma.platformSettings` no está definido en este doble: si el código
+    // intentara leerlo, esta llamada lanzaría en vez de resolver.
+    expect(payment.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ amountCents: 10000, commissionBps: 0, commissionCents: 0, taxBps: 0, taxCents: 0, totalCents: 10000 }),
+    }));
   });
 
   it('flags a checked-in, never-checked-out assignment as ABANDONED past the grace period and closes the shift as CANCELLED (its endsAt already passed, so it cannot reopen to PUBLISHED), rejecting the check-out without creating a payment', async () => {
@@ -750,6 +778,7 @@ describe('DatabaseMarketplaceService worker actions lock their rows and re-read 
   const shiftRow = {
     id: 'shift-1', companyId: 'company-1', title: 'Mozo', payCents: 10000,
     requiredWorkers: 1, status: 'ASSIGNED',
+    commissionBps: 1000, taxBps: 1800,
     startsAt,
     endsAt: new Date('2026-09-19T00:00:00.000Z'),
     company: { name: 'Restaurante Demo' },

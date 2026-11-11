@@ -180,7 +180,7 @@ Future<void> _pumpShell(WidgetTester tester, {required bool dark}) async {
   await tester.pumpWidget(
     MaterialApp(
       theme: buildAppTheme(Brightness.light),
-      home: WorkerShell(
+      home: WorkerShell(temporaryShiftsEnabled: true, 
         repository: DemoWorkerMarketplaceRepository(),
         themeModeController: ThemeModeController(
           store: _NoopStore(),
@@ -453,7 +453,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             theme: buildAppTheme(Brightness.light),
-            home: WorkerShell(
+            home: WorkerShell(temporaryShiftsEnabled: true, 
               repository: _FailingSaveRepository(),
               themeModeController: ThemeModeController(
                 store: _NoopStore(),

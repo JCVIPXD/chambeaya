@@ -1,12 +1,21 @@
 import 'package:flutter/material.dart';
 
+import '../../core/config/temporary_shifts.dart' as feature_flags;
 import '../../theme/app_theme.dart';
 
 enum AppAudience { worker, company }
 
 class OnboardingPage extends StatefulWidget {
-  const OnboardingPage({required this.onComplete, super.key});
+  const OnboardingPage({
+    required this.onComplete,
+    super.key,
+    this.temporaryShiftsEnabled = feature_flags.temporaryShiftsEnabled,
+  });
   final ValueChanged<AppAudience> onComplete;
+
+  /// Con `false` (valor por defecto) la bienvenida habla solo de puestos fijos
+  /// formales; con `true` conserva los textos de turnos y reemplazos.
+  final bool temporaryShiftsEnabled;
 
   @override
   State<OnboardingPage> createState() => _OnboardingPageState();
@@ -14,17 +23,29 @@ class OnboardingPage extends StatefulWidget {
 
 class _OnboardingPageState extends State<OnboardingPage> {
   var step = 0;
-  static const steps = [
+  static const _commonSteps = [
     (
       Icons.verified_user_outlined,
       'Perfiles y datos claros',
       'Solo perfiles validados acceden a oportunidades confiables.',
     ),
-    (
-      Icons.insights_outlined,
-      'Índice CUMPLE',
-      'La puntualidad, asistencia y desempeño construyen tu reputación.',
-    ),
+  ];
+
+  // Paso 2: con turnos, el índice de reputación; con puestos fijos (bandera
+  // apagada) no hay índice, así que solo se habla del perfil.
+  static const _shiftReputationStep = (
+    Icons.insights_outlined,
+    'Índice Chambeaya',
+    'La puntualidad, asistencia y desempeño construyen tu reputación.',
+  );
+
+  static const _fixedProfileStep = (
+    Icons.badge_outlined,
+    'Tu perfil cuenta',
+    'Un perfil completo ayuda a las empresas a conocerte cuando revisan tu postulación.',
+  );
+
+  static const _shiftSteps = [
     (
       Icons.account_balance_wallet_outlined,
       'Pagos informados',
@@ -37,8 +58,28 @@ class _OnboardingPageState extends State<OnboardingPage> {
     ),
   ];
 
+  static const _fixedJobSteps = [
+    (
+      Icons.account_balance_wallet_outlined,
+      'Costos informados',
+      'Antes de toda acción con costo, ves cuánto es y cuánto te queda.',
+    ),
+    (
+      Icons.work_outline_rounded,
+      'Puestos fijos formales',
+      'Postula a empleos formales y sigue cada etapa del proceso hasta tu oferta.',
+    ),
+  ];
+
+  List<(IconData, String, String)> get steps => [
+    ..._commonSteps,
+    widget.temporaryShiftsEnabled ? _shiftReputationStep : _fixedProfileStep,
+    ...(widget.temporaryShiftsEnabled ? _shiftSteps : _fixedJobSteps),
+  ];
+
   @override
   Widget build(BuildContext context) {
+    final steps = this.steps;
     final item = steps[step];
     final isLast = step == steps.length - 1;
     return Scaffold(
@@ -57,18 +98,9 @@ class _OnboardingPageState extends State<OnboardingPage> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     const Text(
-                      'CUMPLE',
+                      'CHAMBEAYA',
                       style: TextStyle(
                         color: AppColors.navy,
-                        fontSize: 30,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: -1,
-                      ),
-                    ),
-                    const Text(
-                      'NOW',
-                      style: TextStyle(
-                        color: AppColors.teal,
                         fontSize: 30,
                         fontWeight: FontWeight.w900,
                         letterSpacing: -1,

@@ -61,7 +61,7 @@ Future<(_Cost, ThemeModeController)> _toggleFromTab(
   await tester.pumpWidget(
     MaterialApp(
       theme: buildAppTheme(Brightness.light),
-      home: WorkerShell(
+      home: WorkerShell(temporaryShiftsEnabled: true, 
         repository: DemoWorkerMarketplaceRepository(),
         initialIndex: initialIndex,
         themeModeController: controller,
@@ -154,15 +154,33 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: WorkerShell(repository: DemoWorkerMarketplaceRepository()),
+        home: WorkerShell(temporaryShiftsEnabled: true, repository: DemoWorkerMarketplaceRepository()),
       ),
     );
     await tester.pumpAndSettle();
-    expect(_tabTickerModes(tester), [true, false, false, false, false]);
+    // Con los turnos encendidos hay siete pestañas: las cinco heredadas más
+    // "Puestos fijos" y "Billetera".
+    expect(_tabTickerModes(tester), [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
 
     await tester.tap(find.text('Perfil'));
     await tester.pumpAndSettle();
-    expect(_tabTickerModes(tester), [false, false, false, true, false]);
+    expect(_tabTickerModes(tester), [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+    ]);
   });
 
   test('buildAppTheme builds each brightness once and keys by platform', () {

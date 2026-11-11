@@ -22,6 +22,7 @@ import {
   Download,
   FileText,
   Filter,
+  KeyRound,
   LayoutDashboard,
   Building2,
   LogOut,
@@ -34,6 +35,7 @@ import {
   Pencil,
   Plus,
   ReceiptText,
+  RefreshCw,
   Search,
   Send,
   ShieldCheck,
@@ -58,6 +60,7 @@ import {
   type ConversationRecord,
   type PendingApplicationsSummary,
   type PaymentRecord,
+  type PaymentSettingsRecord,
   type ShiftApplicationRecord,
   type SubscriptionRecord,
   type ShiftRecord,
@@ -77,9 +80,26 @@ import { keepIfEqual } from "../lib/stable-state";
 import { BusinessAuth } from "../components/business-auth";
 import { ApplicantCvButton } from "../components/applicant-cv";
 import { CrudModal } from "../components/crud-modal";
+import { ChangePasswordModal } from "../components/change-password-modal";
+import { JobsProvider } from "../features/jobs/jobs-context";
+import { OverviewView as FixedOverview } from "../features/jobs/overview-view";
+import { PostingsView } from "../features/jobs/postings-view";
+import { ApplicantsView } from "../features/jobs/applicants-view";
+import { TalentView } from "../features/jobs/talent-view";
+import { WalletView } from "../features/jobs/wallet-view";
+import { CompanyProfileView } from "../features/jobs/company-profile-view";
+
+// Los turnos temporales son un flujo legado. La API aplica la misma bandera;
+// ocultar estos controles evita ofrecer una acción que el servidor rechazaría.
+const temporaryShiftsEnabled = process.env.NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED === "true";
 
 type ViewName =
   | "Resumen"
+  | "Puestos"
+  | "Postulantes"
+  | "Talento"
+  | "Billetera"
+  | "Perfil de empresa"
   | "Turnos"
   | "Trabajadores"
   | "Mensajes"
@@ -106,6 +126,12 @@ type Shift = {
   screeningQuestions: string[];
   modality: ShiftRecord["modality"];
   notes?: string | null;
+  // Comisión de Chambeaya e IGV fijados al publicar. Siempre tienen un
+  // valor entero (turnos anteriores a la comisión quedaron fijados en 0).
+  // Al editar un turno ya publicado, la vista previa del formulario usa
+  // estos valores congelados, no el ajuste global vigente.
+  commissionBps: number;
+  taxBps: number;
 };
 type Worker = {
   id: string;
@@ -144,26 +170,46 @@ type Transaction = {
   workerName: string | null;
   date: string;
   workers: number;
+  // Monto que recibe el trabajador (100% de lo publicado).
   amount: number;
+  commission: number;
+  tax: number;
+  // `amount + commission + tax`: lo que paga la empresa.
+  total: number;
   status: "Procesado" | "Pendiente" | "Programado" | "Cancelado";
   rawStatus: PaymentRecord["status"];
+  provider: string;
   reference: string;
   dueAt: string | null;
+  // Fecha en que la empresa lo marcó como pagado (`mark-paid`). `null`
+  // mientras siga `PENDING`/`SCHEDULED`/`CANCELLED`.
+  processedAt: string | null;
 };
-type ModalKind = "worker" | "payment" | "conversation" | "company" | null;
+// Alcance D: "payment" se retira de este modal genérico. El CRUD manual de
+// pagos (crear/editar/borrar) desaparece; el único cambio de estado que le
+// queda a la empresa es "Marcar como pagado" (`markPaymentProcessed`, una
+// confirmación aparte, no un formulario).
+type ModalKind = "worker" | "conversation" | "company" | null;
 
-const navigation: {
-  label: ViewName;
-  icon: typeof LayoutDashboard;
-  badge?: string;
-}[] = [
-    { label: "Resumen", icon: LayoutDashboard },
-    { label: "Turnos", icon: CalendarDays },
-    { label: "Trabajadores", icon: Users },
-    { label: "Mensajes", icon: MessageSquareText },
-    { label: "Pagos", icon: CircleDollarSign },
-    { label: "Membresía", icon: BadgeCheck },
-  ];
+type NavItem = { label: ViewName; icon: typeof LayoutDashboard };
+
+// Navegación principal: puestos fijos y moneda virtual. Los turnos temporales (flujo legado) solo
+// aparecen con la bandera NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED; apagada no hay rastro de ellos.
+const fixedNavigation: NavItem[] = [
+  { label: "Resumen", icon: LayoutDashboard },
+  { label: "Puestos", icon: BriefcaseBusiness },
+  { label: "Postulantes", icon: UserCheck },
+  { label: "Talento", icon: Search },
+  { label: "Billetera", icon: WalletCards },
+  { label: "Perfil de empresa", icon: Building2 },
+];
+const legacyNavigation: NavItem[] = [
+  { label: "Turnos", icon: CalendarDays },
+  { label: "Trabajadores", icon: Users },
+  { label: "Mensajes", icon: MessageSquareText },
+  { label: "Pagos", icon: CircleDollarSign },
+  { label: "Membresía", icon: BadgeCheck },
+];
 
 const initialShifts: Shift[] = [];
 const initialWorkers: Worker[] = [];
@@ -240,6 +286,8 @@ function mapShift(record: ShiftRecord): Shift {
     screeningQuestions: record.screeningQuestions ?? [],
     modality: record.modality,
     notes: record.notes,
+    commissionBps: record.commissionBps,
+    taxBps: record.taxBps,
   };
 }
 function mapWorker(record: WorkerRecord): Worker {
@@ -300,12 +348,25 @@ function mapPayment(record: PaymentRecord): Transaction {
     reference: record.reference,
     description: record.description,
     workerName: record.assignment?.worker.name ?? null,
-    date: dateFormat.format(new Date(record.dueAt ?? record.createdAt)),
+    // Un pago ya pagado (`PROCESSED`) muestra la fecha en que se marcó como
+    // tal, no la fecha programada original.
+    date: dateFormat.format(
+      new Date(
+        record.status === "PROCESSED" && record.processedAt
+          ? record.processedAt
+          : record.dueAt ?? record.createdAt,
+      ),
+    ),
     workers: record.workerCount,
     amount: record.amountCents / 100,
+    commission: record.commissionCents / 100,
+    tax: record.taxCents / 100,
+    total: record.totalCents / 100,
     status: labels[record.status],
     rawStatus: record.status,
+    provider: record.provider,
     dueAt: record.dueAt?.slice(0, 10) ?? null,
+    processedAt: record.processedAt,
   };
 }
 
@@ -338,6 +399,15 @@ export default function HomePage() {
   const [subscription, setSubscription] = useState<SubscriptionRecord | null>(
     null,
   );
+  // Ajuste global vigente (comisión + IGV), usado por la vista previa del
+  // formulario de turno al CREAR uno nuevo. Al editar un turno ya publicado,
+  // la vista previa usa los valores congelados del propio turno.
+  const [paymentSettings, setPaymentSettings] =
+    useState<PaymentSettingsRecord | null>(null);
+  // BAJO-1 de CN-20260926-014: si esta lectura falla, `PublishModal` no debe
+  // inventar un 10%/18% ni dejar publicar un turno nuevo sin haber podido
+  // mostrar la vista previa real; muestra el error y ofrece reintentar.
+  const [paymentSettingsError, setPaymentSettingsError] = useState(false);
   const [activeNav, setActiveNav] = useState<ViewName>("Resumen");
   const [mobileMenu, setMobileMenu] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -411,9 +481,13 @@ export default function HomePage() {
   >("Todos");
   const [modalKind, setModalKind] = useState<ModalKind>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dataLoading, setDataLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const [createRequest, setCreateRequest] = useState(0);
+  const [wallet, setWallet] = useState<{ currency: string; balance: number | null }>({ currency: "", balance: null });
 
   useEffect(() => {
     const stored = window.localStorage.getItem(businessSessionKey);
@@ -447,7 +521,7 @@ export default function HomePage() {
   }, [session]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || !temporaryShiftsEnabled) return;
     let cancelled = false;
     const refreshPending = async () => {
       try {
@@ -765,8 +839,40 @@ export default function HomePage() {
     }
   }
 
+  // Independiente de `loadData`: un fallo aquí no debe impedir cargar el
+  // resto del panel (turnos, trabajadores, pagos...), y el modal de
+  // publicación necesita poder reintentarla sola sin recargar todo lo demás
+  // (BAJO-1 de CN-20260926-014).
+  async function loadPaymentSettings(token: string) {
+    try {
+      const data = await businessApi.paymentSettings.get(token);
+      setPaymentSettings(data);
+      setPaymentSettingsError(false);
+    } catch {
+      setPaymentSettings(null);
+      setPaymentSettingsError(true);
+    }
+  }
   async function loadData(token: string) {
     setDataLoading(true);
+    if (!temporaryShiftsEnabled) {
+      // Sin turnos temporales solo hacen falta la empresa y el plan; nada del flujo de turnos se consulta.
+      try {
+        const [companyData, subscriptionData] = await Promise.all([
+          businessApi.company.get(token),
+          businessApi.subscription.get(token),
+        ]);
+        setCompany(companyData);
+        setSubscription(subscriptionData);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) await logout();
+        else showToast("No se pudieron cargar los datos. Intenta nuevamente.");
+      } finally {
+        setDataLoading(false);
+      }
+      return;
+    }
+    void loadPaymentSettings(token);
     try {
       const [
         companyData,
@@ -918,10 +1024,7 @@ export default function HomePage() {
           }
           : null;
       })()
-      : modalKind === "payment"
-        ? ((paymentRecords.find((item) => item.id === editingId) as unknown as
-          Record<string, unknown> | undefined) ?? null)
-        : modalKind === "conversation"
+      : modalKind === "conversation"
           ? ((conversationRecords.find(
             (item) => item.id === editingId,
           ) as unknown as Record<string, unknown> | undefined) ?? null)
@@ -934,7 +1037,9 @@ export default function HomePage() {
   }
   function showToast(message: string) {
     setToast(message);
-    window.setTimeout(() => setToast(null), 3200);
+    // Un aviso nuevo reinicia el reloj: el temporizador del anterior no debe cortarlo antes de tiempo.
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 3200);
   }
   function authenticated(nextSession: BusinessSession) {
     window.localStorage.setItem(
@@ -948,6 +1053,8 @@ export default function HomePage() {
     setSession(null);
     setCompany(null);
     setSubscription(null);
+    setPaymentSettings(null);
+    setPaymentSettingsError(false);
     setShifts([]);
     setWorkerRecords([]);
     setConversationRecords([]);
@@ -969,6 +1076,16 @@ export default function HomePage() {
   async function publishShift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session) return;
+    // Defensa adicional al botón deshabilitado de `PublishModal` (BAJO-1 de
+    // CN-20260926-014): nunca se publica un turno nuevo sin el ajuste de
+    // comisión vigente. Editar un turno ya publicado no depende de esto
+    // (usa los valores ya congelados del propio turno).
+    if (!editingShift && !paymentSettings) {
+      showToast(
+        "No pudimos cargar el ajuste de comisión vigente. Reintenta antes de publicar.",
+      );
+      return;
+    }
     const data = new FormData(event.currentTarget);
     const screeningQuestions = String(data.get("screeningQuestions") || "")
       .split(/\r?\n/)
@@ -989,6 +1106,16 @@ export default function HomePage() {
         data.get("modality") || "PRESENCIAL",
       ) as ShiftRecord["modality"],
       notes: String(data.get("notes") || "") || null,
+      // Solo al crear: los bps que esta misma sesión mostró en la vista
+      // previa (BAJO-4 de CN-20260926-012). Si ya no coinciden con el
+      // ajuste vigente, la API responde 409 `COMMISSION_CHANGED` en vez de
+      // publicar con un % que la empresa no llegó a ver.
+      ...(!editingShift && paymentSettings
+        ? {
+          expectedCommissionBps: paymentSettings.commissionBps,
+          expectedTaxBps: paymentSettings.taxBps,
+        }
+        : {}),
     };
     setSaving(true);
     try {
@@ -1012,6 +1139,26 @@ export default function HomePage() {
           : "Turno publicado. Ya puedes asignar talento.",
       );
     } catch (error) {
+      const code = error instanceof ApiError ? error.code : null;
+      // BAJO-4 de CN-20260926-012: la comisión que el panel mostró cambió
+      // mientras la empresa completaba el formulario. Se refresca la vista
+      // previa con el valor vigente (`PublishModal` la recalcula sola al
+      // recibir el `paymentSettings` nuevo) y se deja el formulario abierto
+      // para que la empresa confirme de nuevo; nunca se publica con un %
+      // que no vio.
+      if (!editingShift && code === "COMMISSION_CHANGED") {
+        try {
+          const refreshed = await businessApi.paymentSettings.get(session.token);
+          setPaymentSettings(refreshed);
+        } catch {
+          // La vista previa no se pudo refrescar; el aviso ya explica que
+          // debe revisarla e intentar de nuevo.
+        }
+        showToast(
+          "La comisión de Chambeaya cambió mientras completabas el formulario. Revisa la nueva vista previa y publica de nuevo.",
+        );
+        return;
+      }
       // `SHIFT_ALREADY_ENDED` (el `endsAt` enviado ya pasó) y
       // `SHIFT_NOT_EDITABLE` (el turno persistido ya venció, sin importar qué
       // se edite) son ambos previsibles con `isShiftExpired`/el `min` del
@@ -1019,7 +1166,6 @@ export default function HomePage() {
       // carrera de UI (el reloj avanzó entre que se abrió el formulario y se
       // envió). El mensaje debe explicar el motivo real, no uno genérico. Ver
       // CN-20260916-099 MEDIO-2.
-      const code = error instanceof ApiError ? error.code : null;
       showToast(
         code === "SHIFT_ALREADY_ENDED" || code === "SHIFT_NOT_EDITABLE"
           ? "Este turno ya venció: no se puede guardar con una fecha de fin en el pasado."
@@ -1111,7 +1257,7 @@ export default function HomePage() {
       );
       setSelectedShiftId(target.id);
       setRescueActive(true);
-      showToast("CUMPLE Rescate activado.");
+      showToast("Rescate activado.");
     } catch {
       showToast("No se pudo activar el rescate.");
     }
@@ -1372,27 +1518,6 @@ export default function HomePage() {
             : [...current, mapped],
         );
       }
-      if (modalKind === "payment") {
-        const input = {
-          reference: String(data.get("reference")),
-          description: String(data.get("description")),
-          amountCents: Math.round(Number(data.get("amount")) * 100),
-          workerCount: Number(data.get("workerCount") || 0),
-          status: String(data.get("status")),
-          dueAt: data.get("dueAt")
-            ? new Date(String(data.get("dueAt"))).toISOString()
-            : null,
-        };
-        const saved = editingId
-          ? await businessApi.payments.update(session.token, editingId, input)
-          : await businessApi.payments.create(session.token, input);
-        const mapped = mapPayment(saved);
-        setPaymentRecords((current) =>
-          editingId
-            ? current.map((item) => (item.id === mapped.id ? mapped : item))
-            : [mapped, ...current],
-        );
-      }
       if (modalKind === "conversation") {
         const input = editingId
           ? {
@@ -1457,37 +1582,82 @@ export default function HomePage() {
       showToast("No se pudo eliminar el trabajador.");
     }
   }
-  async function removePayment(id: string) {
-    if (!session || !window.confirm("¿Eliminar este movimiento?")) return;
-    try {
-      await businessApi.payments.remove(session.token, id);
-      setPaymentRecords((current) => current.filter((item) => item.id !== id));
-      showToast("Movimiento eliminado.");
-    } catch {
-      showToast("No se pudo eliminar el movimiento.");
-    }
-  }
+  // Alcance D: "Marcar como pagado" (`POST /business/payments/:id/mark-paid`)
+  // es el único escritor que le queda a la empresa sobre un `Payment` — el
+  // CRUD manual (crear/editar/borrar) se retiró porque permitía inventar
+  // pagos y saltarse la comisión. La confirmación muestra el desglose
+  // completo (trabajador/comisión/IGV/total) y aclara que el pago al
+  // trabajador ya se hizo por fuera de la app, para que quede claro que este
+  // botón no mueve dinero, solo reporta que ya se movió por fuera.
   async function markPaymentProcessed(id: string) {
     if (!session) return;
     const payment = paymentRecords.find((item) => item.id === id);
-    if (!payment || payment.rawStatus === "PROCESSED") return;
-    if (
-      !window.confirm(
-        `Confirma que ya pagaste S/ ${payment.amount.toLocaleString("es-PE", { minimumFractionDigits: 2 })} al trabajador.`,
-      )
-    )
-      return;
+    const canResolveInactiveCheckout =
+      payment?.provider === "simulated" &&
+      paymentSettings?.mode === "manual" &&
+      (payment.rawStatus === "PENDING" || payment.rawStatus === "SCHEDULED");
+    if (!payment || (payment.rawStatus !== "PENDING" && !canResolveInactiveCheckout)) return;
+    const money = (value: number) =>
+      value.toLocaleString("es-PE", { minimumFractionDigits: 2 });
+    const confirmed = window.confirm(
+      [
+        `¿Confirmas que ya le pagaste a ${payment.workerName ?? "el trabajador"} por fuera de la app?`,
+        "",
+        `Trabajador (100%): S/ ${money(payment.amount)}`,
+        `Comisión Chambeaya: S/ ${money(payment.commission)}`,
+        `IGV sobre la comisión: S/ ${money(payment.tax)}`,
+        `Total que le corresponde pagar a tu empresa: S/ ${money(payment.total)}`,
+        "",
+        "El pago al trabajador se hace fuera de la app; la comisión de Chambeaya se factura aparte.",
+        "Esta acción no se puede deshacer.",
+      ].join("\n"),
+    );
+    if (!confirmed) return;
     try {
-      const saved = await businessApi.payments.update(session.token, id, {
-        status: "PROCESSED",
-      });
+      const saved = await businessApi.payments.markPaid(session.token, id);
       const mapped = mapPayment(saved);
       setPaymentRecords((current) =>
         current.map((item) => (item.id === mapped.id ? mapped : item)),
       );
-      showToast("Pago reportado. El trabajador ya puede confirmar la recepción.");
-    } catch {
-      showToast("No pudimos reportar el pago.");
+      showToast("Pago marcado como pagado. El trabajador ya puede confirmar la recepción.");
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "PAYMENT_NOT_PAYABLE") {
+        showToast(
+          "Este pago ya no se puede marcar (puede que ya esté pagado o cancelado). Actualizamos la lista.",
+        );
+        try {
+          const records = await businessApi.payments.list(session.token);
+          setPaymentRecords(records.map(mapPayment));
+        } catch {
+          // La lista quedará desactualizada hasta el próximo refresco manual;
+          // no es peor que el estado previo a este intento.
+        }
+        return;
+      }
+      showToast("No pudimos marcar el pago como pagado.");
+    }
+  }
+  async function startSimulatedCheckout(id: string) {
+    if (!session) return;
+    try {
+      const checkout = await businessApi.payments.checkout(session.token, id);
+      window.location.assign(checkout.redirectUrl);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "PAYMENT_NOT_PAYABLE") {
+        showToast("Este pago ya no está disponible. Actualizamos la lista.");
+        try {
+          const records = await businessApi.payments.list(session.token);
+          setPaymentRecords(records.map(mapPayment));
+        } catch {
+          // El sondeo de Pagos volverá a intentarlo sin bloquear el panel.
+        }
+        return;
+      }
+      if (error instanceof ApiError && error.code === "PROVIDER_MANUAL") {
+        showToast("El entorno de pago simulado no está activo en este momento.");
+        return;
+      }
+      showToast("No pudimos iniciar el pago simulado. Inténtalo nuevamente.");
     }
   }
   async function removeConversation() {
@@ -1516,7 +1686,7 @@ export default function HomePage() {
   if (authChecking)
     return (
       <div className="app-loading">
-        <span className="brand-mark">CN</span>
+        <span className="brand-mark">CH</span>
         <p>Preparando tu panel…</p>
       </div>
     );
@@ -1536,11 +1706,9 @@ export default function HomePage() {
         aria-label="Navegación principal"
       >
         <div className="brand">
-          <div className="brand-mark">CN</div>
+          <div className="brand-mark">CH</div>
           <div>
-            <div className="brand-name">
-              CUMPLE <span>NOW</span>
-            </div>
+            <div className="brand-name">CHAMBEAYA</div>
             <div className="brand-caption">Panel para empresas</div>
           </div>
           <button
@@ -1551,9 +1719,12 @@ export default function HomePage() {
             <X size={19} />
           </button>
         </div>
-        <div className="nav-label">Operaciones</div>
+        <div className="nav-label">{temporaryShiftsEnabled ? "Puestos fijos" : "Operaciones"}</div>
         <nav className="nav">
-          {navigation.map(({ label, icon: Icon }) => {
+          {(temporaryShiftsEnabled
+            ? [...fixedNavigation.slice(0, 5), ...legacyNavigation, fixedNavigation[5]!]
+            : fixedNavigation
+          ).map(({ label, icon: Icon }) => {
             const badge =
               label === "Turnos"
                 ? pendingApplications.count
@@ -1594,9 +1765,17 @@ export default function HomePage() {
           </span>
           <span className="company-copy">
             <strong>{company?.name ?? session.name}</strong>
-            <span>{sidebarPlanLabel(subscription)}</span>
+            {/* Sin turnos temporales la Membresía está oculta: no se muestra un plan sin camino a ella. */}
+            {temporaryShiftsEnabled && <span>{sidebarPlanLabel(subscription)}</span>}
           </span>
           <Pencil size={15} color="#718096" />
+        </button>
+        <button
+          className="logout-button"
+          type="button"
+          onClick={() => setPasswordModalOpen(true)}
+        >
+          <KeyRound size={15} /> Cambiar contraseña
         </button>
         <button
           className="logout-button"
@@ -1626,7 +1805,32 @@ export default function HomePage() {
             </div>
           </div>
           <div className="topbar-actions">
-            <label className="period-control">
+            {wallet.balance !== null && (
+              <button
+                className="fx-balance-chip"
+                type="button"
+                aria-label={`Saldo: ${wallet.balance} ${wallet.currency}. Ver billetera`}
+                onClick={() => navigate("Billetera")}
+              >
+                <WalletCards size={16} aria-hidden="true" />
+                <span>{wallet.balance} {wallet.currency}</span>
+              </button>
+            )}
+            {!temporaryShiftsEnabled && (
+              <button
+                className="primary-button"
+                type="button"
+                aria-label="Nuevo puesto"
+                onClick={() => {
+                  setCreateRequest((n) => n + 1);
+                  navigate("Puestos");
+                }}
+              >
+                <Plus size={18} aria-hidden="true" />
+                <span>Nuevo puesto</span>
+              </button>
+            )}
+            {temporaryShiftsEnabled && <label className="period-control">
               <span>Periodo</span>
               <select
                 value={period}
@@ -1636,40 +1840,79 @@ export default function HomePage() {
                 <option>Este mes</option>
                 <option>Últimos 30 días</option>
               </select>
-            </label>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="Ver notificaciones"
-              onClick={() => setNotificationsOpen(true)}
-            >
-              <Bell size={18} />
-              {pendingApplications.count + unreadMessages > 0 && (
-                <span className="notification-dot" />
-              )}
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => navigate("Trabajadores")}
-            >
-              <Users size={17} /> Equipo
-            </button>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => {
-                setEditingShift(null);
-                setPublishOpen(true);
-              }}
-            >
-              <Plus size={18} />
-              <span>Publicar turno</span>
-            </button>
+            </label>}
+            {/* Sin turnos temporales no hay postulaciones ni mensajes de turnos que avisar: la campana se oculta
+                en vez de quedar como un control muerto (los avisos de puestos fijos viven en Postulantes). */}
+            {temporaryShiftsEnabled && (
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="Ver notificaciones"
+                onClick={() => setNotificationsOpen(true)}
+              >
+                <Bell size={18} />
+                {pendingApplications.count + unreadMessages > 0 && (
+                  <span className="notification-dot" />
+                )}
+              </button>
+            )}
+            {temporaryShiftsEnabled && (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => navigate("Trabajadores")}
+              >
+                <Users size={17} /> Equipo
+              </button>
+            )}
+            {temporaryShiftsEnabled && (
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => {
+                  setEditingShift(null);
+                  setPublishOpen(true);
+                }}
+              >
+                <Plus size={18} />
+                <span>Publicar turno</span>
+              </button>
+            )}
           </div>
         </header>
 
-        {activeNav === "Resumen" && (
+        <JobsProvider
+          token={session.token}
+          onUnauthorized={() => void logout()}
+          toast={showToast}
+          goTo={(view) => navigate(view)}
+          createRequest={createRequest}
+          onBalance={setWallet}
+        >
+          {activeNav === "Resumen" && !temporaryShiftsEnabled && (
+            <FixedOverview
+              companyName={company?.name ?? session.name}
+              requestCreate={() => {
+                setCreateRequest((n) => n + 1);
+                navigate("Puestos");
+              }}
+            />
+          )}
+          {activeNav === "Puestos" && <PostingsView />}
+          {activeNav === "Postulantes" && <ApplicantsView />}
+          {activeNav === "Talento" && <TalentView />}
+          {activeNav === "Billetera" && <WalletView />}
+          {activeNav === "Perfil de empresa" && (
+            <CompanyProfileView
+              company={company}
+              planLabel={temporaryShiftsEnabled ? (hasActivatedPlan(subscription) ? sidebarPlanLabel(subscription) : "Sin plan activado") : null}
+              onEdit={() => openCrud("company")}
+              onChangePassword={() => setPasswordModalOpen(true)}
+            />
+          )}
+        </JobsProvider>
+
+        {activeNav === "Resumen" && temporaryShiftsEnabled && (
           <Overview
             companyName={company?.name ?? session.name}
             shifts={shifts}
@@ -1693,7 +1936,7 @@ export default function HomePage() {
           />
         )}
 
-        {activeNav === "Turnos" && (
+        {activeNav === "Turnos" && temporaryShiftsEnabled && (
           <div className="workspace view-workspace">
             <ViewHeader
               eyebrow="Planificación operativa"
@@ -1709,16 +1952,18 @@ export default function HomePage() {
               >
                 <CalendarCheck2 size={17} /> Calendario
               </button>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => {
-                  setEditingShift(null);
-                  setPublishOpen(true);
-                }}
-              >
-                <Plus size={17} /> Nuevo turno
-              </button>
+              {temporaryShiftsEnabled && (
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => {
+                    setEditingShift(null);
+                    setPublishOpen(true);
+                  }}
+                >
+                  <Plus size={17} /> Nuevo turno
+                </button>
+              )}
             </ViewHeader>
             {selectedShift && (
               <section
@@ -2595,7 +2840,7 @@ export default function HomePage() {
             <ViewHeader
               eyebrow="Seguimiento operativo"
               title="Pagos"
-              description="Registra los pagos directos a tus trabajadores y conserva sus referencias."
+              description="Marca como pagados los pagos que ya hiciste directamente a tus trabajadores."
             >
               <button
                 className="secondary-button"
@@ -2605,13 +2850,6 @@ export default function HomePage() {
                 }
               >
                 <Download size={17} /> Exportar
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                onClick={() => openCrud("payment")}
-              >
-                <Plus size={17} /> Registrar pago
               </button>
             </ViewHeader>
             <section className="finance-overview">
@@ -2627,8 +2865,8 @@ export default function HomePage() {
                     .toLocaleString("es-PE", { minimumFractionDigits: 2 })}
                 </strong>
                 <p>
-                  Registro de tus pagos directos a los trabajadores. Chambeaya
-                  no cobra, guarda ni transfiere dinero.
+                  El pago al trabajador se hace fuera de la app; la comisión
+                  de Chambeaya se factura aparte.
                 </p>
                 <div>
                   <span>
@@ -2722,16 +2960,19 @@ export default function HomePage() {
                     <span>Movimiento</span>
                     <span>Trabajadores</span>
                     <span>Estado</span>
-                    <span>Monto</span>
+                    <span>Trabajador</span>
+                    <span>Comisión</span>
+                    <span>IGV</span>
+                    <span>Total</span>
                     <span />
                   </div>
                   {filteredTransactions.map((transaction) => (
                     <TransactionRow
                       key={transaction.id}
                       transaction={transaction}
-                      onEdit={() => openCrud("payment", transaction.id)}
-                      onDelete={() => void removePayment(transaction.id)}
                       onMarkProcessed={() => void markPaymentProcessed(transaction.id)}
+                      onCheckout={() => void startSimulatedCheckout(transaction.id)}
+                      paymentMode={paymentSettings?.mode}
                     />
                   ))}
                   {filteredTransactions.length === 0 && (
@@ -2821,7 +3062,7 @@ export default function HomePage() {
           </div>
         )}
 
-        {activeNav === "Membresía" && (
+        {activeNav === "Membresía" && temporaryShiftsEnabled && (
           <MembershipView
             subscription={subscription}
             onToast={showToast}
@@ -2832,6 +3073,11 @@ export default function HomePage() {
       {publishOpen && (
         <PublishModal
           shift={editingShift}
+          paymentSettings={paymentSettings}
+          paymentSettingsError={paymentSettingsError}
+          onRetryPaymentSettings={() =>
+            session && void loadPaymentSettings(session.token)
+          }
           saving={saving}
           onClose={() => {
             setPublishOpen(false);
@@ -2859,6 +3105,15 @@ export default function HomePage() {
             setEditingId(null);
           }}
           onSubmit={saveCrud}
+        />
+      )}
+      {passwordModalOpen && session && (
+        <ChangePasswordModal
+          variant="business"
+          onClose={() => setPasswordModalOpen(false)}
+          onSubmit={async ({ currentPassword, newPassword }) => {
+            await authApi.changePassword(session.token, currentPassword, newPassword);
+          }}
         />
       )}
       {notificationsOpen && (
@@ -3692,9 +3947,9 @@ function AssignmentResolutionPanel({
                 <strong>
                   ¿Confirmas que {workerName} sí trabajó este turno?
                 </strong>{" "}
-                Quedará registrado un pago pendiente de {amount} en Pagos.
-                Solo es un registro de lo que debes: tú pagas directamente al
-                trabajador y Chambeaya no cobra, guarda ni transfiere dinero.
+                Quedará registrado un pago pendiente de {amount} en Pagos. El
+                pago al trabajador se hace fuera de la app; la comisión de
+                Chambeaya se factura aparte.
                 {shiftCancelled &&
                   // La API reabre el turno (a completado) solo si lo cerró
                   // ella misma por vencimiento sin asistencia y, tras esta
@@ -4047,15 +4302,22 @@ function WorkerDirectoryCard({
 
 function TransactionRow({
   transaction,
-  onEdit,
-  onDelete,
   onMarkProcessed,
+  onCheckout,
+  paymentMode,
 }: {
   transaction: Transaction;
-  onEdit: () => void;
-  onDelete: () => void;
   onMarkProcessed: () => void;
+  onCheckout: () => void;
+  paymentMode: string | undefined;
 }) {
+  const canResolveInactiveCheckout = paymentMode === "manual" && transaction.provider === "simulated" && (
+    transaction.rawStatus === "PENDING" || transaction.rawStatus === "SCHEDULED"
+  );
+  const canMarkManual = (transaction.rawStatus === "PENDING" && (
+    transaction.provider === "manual" || transaction.provider === "legacy"
+  )) || canResolveInactiveCheckout;
+  const canCheckout = paymentMode === "simulated" && transaction.provider === "simulated" && (transaction.rawStatus === "PENDING" || transaction.rawStatus === "SCHEDULED");
   return (
     <div className="transaction-row">
       <span className="transaction-name">
@@ -4079,48 +4341,72 @@ function TransactionRow({
         <b className={`payment-status ${transaction.status.toLowerCase()}`}>
           {transaction.status}
         </b>
-        {transaction.status === "Pendiente" && (
+        {canMarkManual && (
           <button
             className="payment-quick-action"
             type="button"
             onClick={onMarkProcessed}
           >
-            <Check size={12} /> Marcar pagado
+            <Check size={12} /> Marcar como pagado
+          </button>
+        )}
+        {canCheckout && (
+          <button className="payment-quick-action" type="button" onClick={onCheckout}>
+            <CircleDollarSign size={12} /> {transaction.rawStatus === "SCHEDULED" ? "Continuar pago" : "Pagar en simulador"}
           </button>
         )}
       </span>
       <span className="transaction-amount">
-        S/ {transaction.amount.toLocaleString("es-PE")}
+        S/ {transaction.amount.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
       </span>
-      <span className="inline-actions">
-        <button
-          className="row-action"
-          type="button"
-          aria-label={`Editar ${transaction.reference}`}
-          onClick={onEdit}
-        >
-          <Pencil size={15} />
-        </button>
-        <button
-          className="row-action danger"
-          type="button"
-          aria-label={`Eliminar ${transaction.reference}`}
-          onClick={onDelete}
-        >
-          <Trash2 size={15} />
-        </button>
+      <span className="transaction-amount">
+        S/ {transaction.commission.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
       </span>
+      <span className="transaction-amount">
+        S/ {transaction.tax.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+      </span>
+      <span className="transaction-amount">
+        S/ {transaction.total.toLocaleString("es-PE", { minimumFractionDigits: 2 })}
+      </span>
+      {/* Alcance D: sin editar ni eliminar (CRUD retirado). Se conserva la
+          celda vacía para no romper el `grid-template-columns` de
+          `.transaction-head`/`.transaction-row` (ver `globals.css`). */}
+      <span className="inline-actions" />
     </div>
   );
 }
 
+// Réplica del redondeo de `apps/api/src/modules/payments/payment-amounts.ts`
+// (`buildPaymentAmounts`), "la mitad hacia arriba" con enteros:
+// `floor((numerator*bps + 5000) / 10000)`. `packages/shared` no está cableado
+// todavía a `apps/api` ni a `apps/web` (ningún `package.json` lo referencia),
+// así que compartir la función real habría significado además resolver ese
+// cableado de build en este mismo cierre; se replica aquí con pruebas de
+// Playwright sobre el texto que renderiza, en vez de ampliar el alcance.
+function previewCommission(payCents: number, commissionBps: number, taxBps: number) {
+  const safePay = Number.isFinite(payCents) && payCents > 0 ? Math.round(payCents) : 0;
+  const commissionCents = Math.floor((safePay * commissionBps + 5000) / 10000);
+  const taxCents = Math.floor((commissionCents * taxBps + 5000) / 10000);
+  return { amountCents: safePay, commissionCents, taxCents, totalCents: safePay + commissionCents + taxCents };
+}
+
+function formatSoles(cents: number) {
+  return `S/ ${(cents / 100).toLocaleString("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function PublishModal({
   shift,
+  paymentSettings,
+  paymentSettingsError,
+  onRetryPaymentSettings,
   saving,
   onClose,
   onSubmit,
 }: {
   shift: Shift | null;
+  paymentSettings: PaymentSettingsRecord | null;
+  paymentSettingsError: boolean;
+  onRetryPaymentSettings: () => void;
   saving: boolean;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -4140,6 +4426,18 @@ function PublishModal({
   // formulario ofrezca sin aviso una fecha que el servidor va a rechazar.
   const minEndsAt = localDateTime(new Date().toISOString());
   const formRef = useRef<HTMLFormElement>(null);
+  // Al crear, la vista previa usa el ajuste global vigente
+  // (`payment-settings`); al editar un turno ya publicado, usa los valores
+  // YA CONGELADOS de ese turno (nunca el ajuste global, aunque haya
+  // cambiado desde que se publicó). Si se está creando y ese ajuste no
+  // cargó, no hay ningún valor válido que mostrar: nunca se inventa un
+  // 10%/18% (BAJO-1 de CN-20260926-014), y no se permite publicar.
+  const settingsUnavailable = !shift && !paymentSettings;
+  const commissionBps = shift?.commissionBps ?? paymentSettings?.commissionBps ?? 0;
+  const taxBps = shift?.taxBps ?? paymentSettings?.taxBps ?? 0;
+  const [previewPay, setPreviewPay] = useState(shift?.pay ?? 100);
+  const [previewRequired, setPreviewRequired] = useState(shift?.required ?? 1);
+  const preview = previewCommission(Math.round(previewPay * 100), commissionBps, taxBps);
   const fillExample = () => {
     if (
       shift &&
@@ -4186,6 +4484,17 @@ function PublishModal({
       control.dispatchEvent(new Event("input", { bubbles: true }));
       control.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    // MEDIO-1 de CN-20260926-014: los eventos disparados arriba con
+    // `dispatchEvent` sobre un valor asignado directamente NO siempre
+    // llegan al `onChange` de React (reproducido en producción: el
+    // formulario quedaba con S/120 y 2 cupos, pero la vista previa seguía
+    // en S/100 y 1 cupo — un error de dinero visible para la empresa). La
+    // vista previa nunca debe depender de que ese evento llegue: se
+    // actualiza aquí explícitamente con los mismos valores que se acaban
+    // de escribir en el formulario, la única fuente que importa al
+    // enviarlo.
+    setPreviewPay(Number(values.pay));
+    setPreviewRequired(Number(values.required));
   };
   return (
     <div className="modal-layer" role="presentation" onMouseDown={onClose}>
@@ -4374,6 +4683,9 @@ function PublishModal({
                 max="200"
                 type="number"
                 defaultValue={shift?.required ?? 1}
+                onChange={(event) =>
+                  setPreviewRequired(Number(event.target.value) || 0)
+                }
               />
             </label>
             <label className="field">
@@ -4384,12 +4696,60 @@ function PublishModal({
                   name="pay"
                   required
                   min="1"
+                  max="100000"
                   step="0.01"
                   type="number"
                   defaultValue={shift?.pay ?? 100}
+                  onChange={(event) =>
+                    setPreviewPay(Number(event.target.value) || 0)
+                  }
                 />
               </div>
             </label>
+            <div className="field full commission-preview" aria-live="polite">
+              <span>Vista previa de la comisión de Chambeaya</span>
+              {settingsUnavailable ? (
+                <>
+                  <p className="commission-preview-error">
+                    No pudimos cargar el ajuste de comisión vigente. No se
+                    puede mostrar la vista previa ni publicar el turno hasta
+                    que se cargue.
+                  </p>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={onRetryPaymentSettings}
+                  >
+                    <RefreshCw size={14} /> Reintentar
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p>
+                    Pago al trabajador {formatSoles(preview.amountCents)} + Comisión
+                    Chambeaya {(commissionBps / 100).toLocaleString("es-PE")}%{" "}
+                    {formatSoles(preview.commissionCents)} + IGV{" "}
+                    {(taxBps / 100).toLocaleString("es-PE")}%{" "}
+                    {formatSoles(preview.taxCents)} = {formatSoles(preview.totalCents)}{" "}
+                    por persona.
+                  </p>
+                  <p>
+                    Total por {previewRequired || 0}{" "}
+                    {previewRequired === 1 ? "cupo" : "cupos"}:{" "}
+                    <strong>
+                      {formatSoles(preview.totalCents * Math.max(0, previewRequired || 0))}
+                    </strong>
+                  </p>
+                  {shift && (
+                    <small>
+                      Este turno ya está publicado: la comisión y el IGV quedaron
+                      fijados al publicarlo y no cambian aunque el ajuste global
+                      cambie después.
+                    </small>
+                  )}
+                </>
+              )}
+            </div>
             <label className="field full">
               <span>Indicaciones después de seleccionar</span>
               <input
@@ -4418,7 +4778,11 @@ function PublishModal({
             >
               Cancelar
             </button>
-            <button className="primary-button" disabled={saving} type="submit">
+            <button
+              className="primary-button"
+              disabled={saving || settingsUnavailable}
+              type="submit"
+            >
               <Plus size={17} />{" "}
               {saving
                 ? "Guardando…"

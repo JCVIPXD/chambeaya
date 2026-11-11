@@ -10,6 +10,763 @@ Authorization: Bearer <token>
 
 El API obtiene el propietario desde la sesión. No acepta un `companyId` enviado por el cliente, evitando que una empresa acceda a registros de otra.
 
+## Moneda virtual (M1)
+
+La moneda virtual es crédito cerrado. Su nombre se toma de
+`VIRTUAL_CURRENCY_NAME` (por defecto, `Chambitas`) y siempre se devuelve en
+la respuesta como `currency`. No hay rutas para retirar dinero ni transferir
+crédito entre cuentas.
+
+El saldo no está almacenado como una columna editable: se deriva del último
+movimiento del libro mayor. Cada movimiento contiene cantidad con signo,
+saldo resultante, acción, relación, actor y fecha. Las respuestas no exponen
+la clave de idempotencia, pero el servidor la exige al crear ajustes y la
+protege con un índice único global.
+
+### Trabajador
+
+Ambas rutas requieren sesión `WORKER` y operan exclusivamente sobre la cuenta
+del usuario autenticado:
+
+- `GET /api/workers/currency/balance` → `{ currency, balance }`.
+- `GET /api/workers/currency/movements?limit=25&cursor=<id>` →
+  `{ currency, items, nextCursor }`. `limit` es un entero entre 1 y 100 y
+  `nextCursor` es `null` al llegar al final.
+
+### Empresa
+
+Ambas rutas requieren sesión `BUSINESS` y resuelven la empresa por el dueño de
+la sesión, nunca por un identificador enviado por el cliente:
+
+- `GET /api/business/currency/balance`.
+- `GET /api/business/currency/movements?limit=25&cursor=<id>`.
+
+Sus respuestas tienen el mismo formato que las rutas de trabajador. Una
+cuenta sin movimientos devuelve saldo `0` y una lista vacía; una lectura no
+crea una cuenta ni modifica el libro mayor.
+
+### Ajustes del administrador
+
+Solo una sesión `ADMIN` puede registrar movimientos en M1:
+
+- `POST /api/admin/currency/workers/:workerId/adjustments`
+- `POST /api/admin/currency/companies/:companyId/adjustments`
+
+El cuerpo es:
+
+```json
+{
+  "quantity": 25,
+  "reason": "Bono de bienvenida autorizado",
+  "idempotencyKey": "admin-bonus-worker-20261001-001"
+}
+```
+
+`quantity` es un entero no nulo entre `-1000000` y `1000000`; un valor
+negativo nunca puede dejar el saldo bajo cero (`409
+INSUFFICIENT_CURRENCY_BALANCE`). `reason` es obligatorio (3 a 500 caracteres)
+y `idempotencyKey` es obligatorio (8 a 128 caracteres). Repetir exactamente la
+misma solicitud devuelve el movimiento original con `200` e `idempotent:
+true`; reutilizar la clave para otra cuenta o con datos diferentes devuelve
+`409 IDEMPOTENCY_KEY_REUSED`. Un ajuste nuevo devuelve `201`.
+
+El movimiento queda registrado como `ADMIN_ADJUSTMENT`, con el administrador
+en `actor` y el motivo (`relatedEntity` es `null` en un ajuste: el actor ya
+consta en `createdById`); no hay actualización ni borrado de filas del libro
+mayor. Las escrituras usan una transacción `Serializable` con reintento
+(`withSerializableRetry`). Lo que impide el saldo negativo y el gasto doble no
+es el `SELECT ... FOR UPDATE` de la cuenta (bajo `Serializable` la
+instantánea se fija en esa primera sentencia, antes de esperar el bloqueo, así
+que solo reduce conflictos), sino la detección de conflictos de serialización
+(`40001`, que se reintenta), el índice único `(accountId, sequence)` y el
+`CHECK balanceAfter >= 0`. Con mucha contención sobre una misma cuenta los 6
+intentos pueden agotarse y la ruta responde `500`; en ese caso no se aplicó
+nada y repetir la solicitud (misma clave) es seguro.
+
+Otros códigos de estas rutas: `403 WORKER_ACCOUNT_REQUIRED`,
+`BUSINESS_ACCOUNT_REQUIRED` o `ADMIN_ACCOUNT_REQUIRED` si la sesión tiene otro
+rol; `404 WORKER_NOT_FOUND` / `COMPANY_NOT_FOUND` si el titular del ajuste no
+existe (o el id de trabajador no es de rol `WORKER`); `409
+CURRENCY_BALANCE_LIMIT_EXCEEDED` si el saldo resultante superaría
+`2147483647` (columna `Int` de 32 bits); `400 INVALID_CURSOR` si `cursor` no es
+un movimiento de la propia cuenta. `idempotencyKey` solo admite letras, dígitos
+y `._:-`, y debe empezar por letra o dígito.
+
+Garantías en la base (migración `20261001100000_virtual_currency_ledger`): un
+trigger rechaza todo `UPDATE` y `DELETE` sobre `CurrencyMovement`
+(`CURRENCY_MOVEMENT_APPEND_ONLY`); `CHECK` impide `quantity = 0`,
+`balanceAfter < 0` y una cuenta sin titular o con los dos; `(accountId,
+sequence)` es único, de modo que dos escrituras concurrentes nunca encadenan
+sobre el mismo saldo. Las claves foráneas hacia `User`, `Company` y
+`CurrencyAccount` son `RESTRICT` (esquema y migraciones coinciden; la
+migración `20261005100000_currency_ledger_cleanup` quita el índice duplicado
+`CurrencyMovement_accountId_sequence_idx`).
+
+**Borrado de titulares (`CN-20261001-035`).** El libro es inmutable, así que
+una cuenta con movimientos no puede desaparecer sin destruir la auditoría.
+`DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` responden
+`409 CURRENCY_LEDGER_RETAINED` si el titular tiene al menos un movimiento
+(aunque el saldo sea `0`), sin borrar filas ni archivos. Una cuenta sin
+movimientos se elimina junto con el titular. **Excepción (CN-20261007-045):** si
+el único movimiento de la cuenta es el `WELCOME_BONUS` (acción `REWARD`, clave
+`WELCOME_BONUS`; sin gastos, otros premios, devoluciones ni ajustes), el borrado
+responde `204` y el bono desaparece con la cuenta. El libro sigue siendo
+inmutable: la migración `20261007120000_welcome_bonus_deletable` solo permite
+borrar ese movimiento dentro de la transacción de borrado del titular, que
+declara la cuenta con `set_config('chambeaya.welcome_bonus_delete_account', <id>,
+true)` (local a la transacción) y solo si la cuenta no tiene ningún otro
+movimiento (el trigger vuelve a comprobarlo). Cualquier otro `DELETE` o
+`UPDATE`, o un `DELETE` sin ese permiso, sigue fallando con
+`CURRENCY_MOVEMENT_APPEND_ONLY`. La cuenta se bloquea (`FOR UPDATE`) antes de
+contar, así que la carrera con un movimiento nuevo se resuelve igual que antes
+(`409`, nada se borra). La verificación y el borrado van
+en una sola transacción que bloquea primero la cuenta (`SELECT ... FOR UPDATE`)
+y cuenta después: un ajuste que ya tenía la cuenta bloqueada termina antes y su
+movimiento se ve en el conteo. Si un movimiento o una cuenta se confirma de
+todos modos entre el conteo y el borrado (por ejemplo, una cuenta que aún no
+existía al contar), la clave `RESTRICT` aborta la transacción con SQLSTATE
+`23001` (`restrict_violation`), que Prisma entrega como error desconocido y no
+como `P2003`; el `guard` reconoce ese código y la restricción de moneda y
+responde `409 CURRENCY_LEDGER_RETAINED` (corrección de BAJO-4 de
+`CN-20261001-036`, con pruebas de integración de la carrera). No se borra nada
+y los archivos solo se eliminan después de confirmar. Cualquier otra violación
+`RESTRICT` o `P2003` responde `409 RELATED_RECORDS_EXIST`. Anonimizar o desactivar al titular
+queda como alcance futuro; mientras tanto, para retirar a un titular con
+historial hay que dejar su saldo documentado y conservar la cuenta. `ADMIN` que
+registró ajustes tampoco puede borrarse (`createdById` es `RESTRICT`). `WalletMovement` no se modificó: sigue siendo el
+historial legado de pagos en céntimos y no forma parte de la moneda virtual.
+
+### Catálogo de costos y premios (M2)
+
+Tabla configurable por el administrador que define qué acciones cuestan moneda
+(`COST`) o la otorgan (`REWARD`). **M2 solo configura y resuelve: ninguna
+acción real cobra ni premia todavía** (eso es M4/M6) y no escribe en el libro.
+Principio de producto: lo básico es siempre gratis; el catálogo nunca bloquea
+una acción esencial.
+
+Cada entrada es única por (`actionKey`, `actor`). `actor` usa los valores del
+libro: `WORKER` (trabajador) o `COMPANY` (empresa); `WELCOME_BONUS` existe una
+vez por actor. Claves estables (`CURRENCY_ACTION_KEYS`):
+
+| Actor | `COST` | `REWARD` |
+|---|---|---|
+| `COMPANY` | `JOB_PUBLISH_EXTRA`, `JOB_HIGHLIGHT`, `TALENT_INVITE`, `CANDIDATE_CONTACT_UNLOCK` | `COMPANY_VERIFIED`, `APPLICANTS_RESPONDED_ON_TIME`, `HIRE_CONFIRMED`, `WELCOME_BONUS` |
+| `WORKER` | `APPLICATION_EXTRA`, `APPLICATION_PRIORITY`, `PROFILE_HIGHLIGHT` | `PROFILE_COMPLETE`, `DOCUMENT_VERIFIED`, `INVITATION_RESPONDED`, `REFERRAL`, `WELCOME_BONUS` |
+
+Campos editables: `amount` (entero 1 a 1000000), `active`, `freeMonthlyQuota`
+(entero 0 a 10000: usos gratis por mes calendario de **Lima**, UTC-5, solo en
+`COST`) y `refundWindowHours` (entero 1 a 8760 o `null` = sin devolución; plazo
+de devolución automática que usará M4, solo en `COST`). `actionKey`, `actor` y
+`kind` son fijos. Una entrada inactiva se trata como gratuita y no otorga nada.
+
+**Administrador** (sesión `ADMIN`; otro rol responde `403`):
+
+- `GET /api/admin/currency/catalog` → `{ currency, items }` con todas las
+  entradas (`id`, `actionKey`, `actor`, `kind`, `amount`, `active`,
+  `freeMonthlyQuota`, `refundWindowHours`, `isProvisional`, `updatedAt`,
+  `updatedBy`).
+- `PATCH /api/admin/currency/catalog/:entryId` con cuerpo estricto (campos
+  desconocidos rechazados) `{ amount?, active?, freeMonthlyQuota?,
+  refundWindowHours?, reason }`: `reason` (3 a 500 caracteres) es obligatorio y
+  debe cambiar al menos un campo. Responde `{ changed, entry }`; `changed` lista
+  los campos que de verdad cambiaron (un cambio sin diferencias no escribe
+  historial). `400 INVALID_INPUT` si falla la validación; `400
+  CATALOG_FIELD_NOT_APPLICABLE` si se manda una cuota o devolución a un
+  `REWARD`; `404 CATALOG_ENTRY_NOT_FOUND`. La primera edición pone
+  `isProvisional` en `false`. Las ediciones simultáneas de una entrada se
+  encadenan con `SELECT ... FOR UPDATE`.
+- `GET /api/admin/currency/catalog/changes?limit=25&cursor=<id>&entryId=<id>`
+  → `{ items, nextCursor }`, del más reciente al más antiguo. Una fila por
+  campo modificado (`CurrencyCatalogChange`): `field`, `oldValue`, `newValue`,
+  `reason`, `changedBy`, `createdAt` (igual que `PlatformSettingChange`; si se
+  borra al administrador, `changedBy` queda `null` y la fila se conserva).
+  `oldValue` y `newValue` son texto: números y booleanos en su forma literal
+  (`"10"` o `"true"`). Una devolución sin plazo se guarda como `"null"`.
+
+**Trabajador y empresa** (solo lectura, solo entradas activas de su propio
+actor, sin ids, autor ni `isProvisional`):
+
+- `GET /api/workers/currency/catalog` (sesión `WORKER`) y
+  `GET /api/business/currency/catalog` (sesión `BUSINESS`) →
+  `{ currency, items }`, con `{ actionKey, kind, amount }` y, en `COST`,
+  `freeMonthlyQuota`, `freeRemaining` (cuota restante este mes de Lima) y
+  `refundWindowHours`.
+
+**Servicio de resolución** (`CurrencyCatalogService.resolve(actionKey, actor,
+userId)` y la función pura `resolveCatalogAction`): devuelve el costo o premio
+vigente, la cuota gratuita restante del mes de Lima (ventana `[inicio, fin)` en
+UTC) y `charge` (si la acción debe cobrarse ahora: solo un `COST` activo con la
+cuota agotada). No escribe en el libro. Los usos del mes los entrega un
+`CurrencyUsageCounter`; en M2 ninguna acción real lo alimenta, así que el valor
+por defecto devuelve `0` y `freeRemaining` es igual a la cuota. M4 aporta el
+contador real.
+
+**Migración `20261005120000_currency_catalog`** (solo agrega): tipo
+`CurrencyCatalogKind`, tablas `CurrencyCatalogEntry` y `CurrencyCatalogChange`,
+`CHECK` (monto > 0, cuota >= 0, devolución > 0 o nula, y sin cuota ni
+devolución en `REWARD`) y la siembra de los valores **provisionales** (ver
+[moneda-virtual.md](../product/moneda-virtual.md#valores-provisionales-del-catálogo-m2)).
+`TRUNCATE "User" CASCADE` (pruebas) también vacía el catálogo por su FK a
+`User`; las pruebas de integración lo restablecen desde
+`DEFAULT_CURRENCY_CATALOG`.
+
+## Puestos fijos y embudo de selección (M3)
+
+Flujo principal del producto nuevo; no usa ni modifica los turnos temporales
+(siguen detrás de `TEMPORARY_SHIFTS_ENABLED`). Solo API: sin interfaz web ni
+Flutter (M5) y sin cobrar ni devolver monedas (M4). Código en
+`apps/api/src/modules/jobs/` (máquina de estados en `job-state.ts`).
+
+Los valores de los enums van en inglés, como el resto del esquema:
+
+| Término de producto | Valor |
+| --- | --- |
+| Borrador, publicado, pausado, cerrado, cubierto | `DRAFT`, `PUBLISHED`, `PAUSED`, `CLOSED`, `FILLED` |
+| Postulado, preseleccionado, entrevista, oferta, aceptada, contratado | `APPLIED`, `SHORTLISTED`, `INTERVIEW`, `OFFER`, `ACCEPTED`, `HIRED` |
+| Rechazado, retirado | `REJECTED`, `WITHDRAWN` |
+| Presencial, remoto, híbrido | `ONSITE`, `REMOTE`, `HYBRID` |
+| Tiempo completo, parcial | `FULL_TIME`, `PART_TIME` |
+| Plazo indefinido, plazo fijo, prácticas, otro | `INDEFINITE`, `FIXED_TERM`, `INTERNSHIP`, `OTHER` |
+
+### Reglas comunes
+
+- Sesión Bearer. `403 BUSINESS_ACCOUNT_REQUIRED` / `WORKER_ACCOUNT_REQUIRED` si el
+  rol no corresponde; `401 INVALID_SESSION` sin sesión. La empresa se resuelve por
+  el dueño de la sesión: ningún cuerpo ni ruta acepta `companyId` ni `workerId`.
+- Aislamiento: un recurso de otra empresa o de otro trabajador responde `404`
+  (`JOB_POSTING_NOT_FOUND`, `JOB_APPLICATION_NOT_FOUND`, `JOB_OFFER_NOT_FOUND`),
+  igual que uno inexistente. Un borrador no existe para los trabajadores.
+- Validación estricta (`400 INVALID_INPUT` con `issues`): cuerpos `.strict()`
+  (cualquier campo extra, como `status`, `companyId` o `filledVacancies`, se
+  rechaza), textos con longitud máxima, enteros acotados. Dinero siempre en
+  céntimos de la moneda del puesto (`PEN`).
+- Paginación: `limit` 1 a 100 (25 por defecto) y `cursor` opaco devuelto en
+  `nextCursor` (`null` al final). Cursor inválido: `400 INVALID_CURSOR`.
+- Todas las escrituras corren en `Serializable` con reintento (como el resto del
+  código) sobre filas bloqueadas con `FOR UPDATE`. Orden de bloqueo: postulación
+  y después puesto. Repetir una petición que ya tuvo efecto responde `200` con
+  `idempotent: true` y no escribe de nuevo; un conflicto real responde `409`.
+- Errores `409` frecuentes: `INVALID_STATE_TRANSITION` (con `status` actual y
+  `requested`), `POSTING_NOT_PUBLISHED`, `POSTING_NOT_OPEN`, `POSTING_FILLED`,
+  `POSTING_NOT_EDITABLE`, `POSTING_HAS_APPLICATIONS`, `ALREADY_APPLIED`,
+  `OFFER_NOT_PENDING`, `TOO_MANY_PENDING_UPLOADS`.
+
+### Estados del puesto
+
+`DRAFT → PUBLISHED ⇄ PAUSED → CLOSED`; `PUBLISHED`/`PAUSED → FILLED` solo por la
+última contratación confirmada (no hay ruta pública). `CLOSED` y `FILLED` son
+terminales. Un puesto solo se edita en `DRAFT` o `PAUSED` (`409
+POSTING_NOT_EDITABLE`); las preguntas de filtro no cambian si ya hay
+postulaciones (`409 POSTING_HAS_APPLICATIONS`); `vacancies` no baja de lo ya
+cubierto ni lo igualan (`400 VACANCIES_BELOW_FILLED`): mientras el puesto siga
+abierto el total debe superar lo cubierto; para cerrar un puesto cubierto se usa
+la transición a `FILLED`/`CLOSED`. Publicar o postular exige al menos una
+vacante libre (`409 POSTING_FILLED`). Solo un puesto `PUBLISHED` recibe
+postulaciones y aparece en la búsqueda. `filledVacancies` es derivado: lo
+incrementa únicamente la confirmación de una contratación, en la misma
+transacción, con `UPDATE ... WHERE filledVacancies < vacancies` y
+`CHECK (filledVacancies <= vacancies)`.
+
+Al pasar a `CLOSED` (cierre manual) o `FILLED` (última contratación), en la
+misma transacción cada postulación en `OFFER` con oferta `PENDING` retira esa
+oferta (`WITHDRAWN`) y pasa a `REJECTED`. La línea de tiempo registra un
+evento `REJECTED` con detalle `POSTING_CLOSED` o `POSTING_FILLED` (el
+trabajador no ve el detalle de un `REJECTED`, pero sí el estado del puesto) y
+se emite el aviso SSE al trabajador. Las demás postulaciones abiertas
+(`APPLIED`, `SHORTLISTED`, `INTERVIEW`, `ACCEPTED`) no se tocan: una
+postulación `ACCEPTED` sin contratar queda así, sin aviso, sobre un puesto
+`CLOSED`/`FILLED` (no se puede contratar, `409`; la empresa puede rechazarla).
+Si el cierre o la última contratación compiten con una aceptación o una oferta
+simultáneas, `Serializable` decide un solo orden: o la aceptación gana y queda
+`ACCEPTED`, o pierde con `409` y la postulación queda `REJECTED` con la oferta
+`WITHDRAWN`; nunca queda una oferta `PENDING` en un puesto cerrado o cubierto.
+
+Pendiente de decisión de producto (sin cambio en código): el DNI visible para la
+empresa en la constancia de aceptación y el borrado en cascada de la constancia
+al eliminar una cuenta.
+
+### Embudo de la postulación
+
+`APPLIED → SHORTLISTED → INTERVIEW → OFFER → ACCEPTED → HIRED`, con salidas
+`REJECTED` (decide la empresa) y `WITHDRAWN` (decide el trabajador). La empresa
+puede saltarse etapas hacia `INTERVIEW` u `OFFER` y nunca retrocede; el
+trabajador solo se retira o acepta la oferta vigente; `ACCEPTED → HIRED` solo
+lo confirma la empresa. `HIRED`, `REJECTED` y `WITHDRAWN` son terminales. La
+tabla de transiciones por actor está en `job-state.ts`.
+
+### Empresa (`/api/business`)
+
+| Ruta | Efecto |
+| --- | --- |
+| `POST /job-postings` | Crea un borrador (`201`). Campos: `title` (5-120), `description` (20-5000), `responsibilities`/`requirements`/`benefits` (opcionales, hasta 3000), `modality`, `workload`, `salaryMinCents`/`salaryMaxCents` (1 a 10 000 000, mínimo <= máximo, `400 INVALID_SALARY_RANGE`), `location`, `contractType`, `expectedStartDate` (`YYYY-MM-DD`, no pasada en Lima), `vacancies` (1-500), `screeningQuestions` (hasta 5, 10-240 caracteres, sin repetidas). |
+| `GET /job-postings?status=&limit=&cursor=` | Mis puestos, con `applicationsCount`. |
+| `GET /job-postings/:id` | Detalle con `applicantCounts` por etapa. |
+| `PATCH /job-postings/:id` | Edita un borrador o puesto en pausa; al menos un campo. |
+| `POST /job-postings/:id/publish` / `pause` / `close` | Cambia el estado (idempotente). Publicar guarda `publishedAt` la primera vez y solo esa primera publicación cuenta para `JOB_PUBLISH_EXTRA` (ver M4). |
+| `POST /job-postings/:id/highlight` | Destaca el puesto (`JOB_HIGHLIGHT`) por `JOB_HIGHLIGHT_DURATION_HOURS`; mientras siga vigente repetirlo no cobra. |
+| `GET /job-postings/:id/applications?status=APPLIED,SHORTLISTED&limit=&cursor=` | Postulantes (con prioridad primero, `isPriority`; filtro por una o varias etapas): nombre, titular y distrito del perfil, `hasCv`, entrevista y estado de la última oferta. Nunca correo ni teléfono; el número de DNI solo aparece, tras la aceptación, dentro de `acceptanceSnapshot` (ver Constancia de aceptación). |
+| `GET /job-applications/:id` | Detalle: respuestas de filtro, ofertas (todas las versiones), línea de tiempo y motivo de decisión. |
+| `POST /job-applications/:id/stage` `{status}` | `SHORTLISTED` o `INTERVIEW` (sin fecha). La oferta, la contratación y el rechazo tienen su propia ruta. |
+| `POST /job-applications/:id/interview` `{scheduledAt, mode?, note?}` | Programa o reprograma la entrevista (`mode`: `ONSITE`/`VIDEO`/`PHONE`); la fecha debe ser futura y de hasta un año (`400 INVALID_INTERVIEW_DATE`). Pasa a `INTERVIEW`. |
+| `PUT /job-applications/:id/offer-documents` | Sube el PDF de la oferta (cuerpo binario `application/pdf`, hasta 5 MB, cabecera `X-File-Name` con extensión `.pdf`, firma `%PDF-` verificada; `400 INVALID_OFFER_DOCUMENT`, `413 OFFER_DOCUMENT_TOO_LARGE`). Devuelve `{id, name, mediaType, sizeBytes, sha256}`. Se guarda en el almacenamiento privado; hasta 5 sin usar por postulación. |
+| `POST /job-applications/:id/offers` `{salaryCents, contractType, startDate, note?, documentId?}` | Emite una oferta (`201`) y pasa a `OFFER`. Una oferta nueva crea la versión siguiente y deja la pendiente en `SUPERSEDED`. Reenviar una oferta idéntica a la pendiente responde `200` sin versión nueva. `documentId` consume el PDF subido (`400 OFFER_DOCUMENT_NOT_AVAILABLE` si no existe, es de otra postulación o ya se usó). Fecha de ingreso no pasada (Lima). |
+| `POST /job-applications/:id/hire` | Confirma la contratación de una postulación `ACCEPTED`: la pasa a `HIRED`, suma una vacante cubierta y, al llenarse, deja el puesto en `FILLED`. Dos confirmaciones simultáneas por la última vacante: una responde `200` y la otra `409 POSTING_FILLED`. |
+| `POST /job-applications/:id/reject` `{reason?}` | Rechaza (`REJECTED`) desde cualquier etapa abierta, incluida `ACCEPTED`; una oferta pendiente queda `WITHDRAWN`. El motivo (hasta 500) es interno: el trabajador no lo ve. |
+| `GET /job-applications/:id/cv` | CV del postulante (PDF, `no-store`) solo mientras siga en proceso (no `REJECTED`/`WITHDRAWN`) y su perfil sea visible; si no, `404 JOB_DOCUMENT_NOT_FOUND`. |
+| `GET /job-applications/:id/offers/:offerId/document` | PDF de la oferta; `404 JOB_DOCUMENT_NOT_FOUND` si esa versión no tiene documento. |
+
+Con el puesto `CLOSED` o `FILLED` la empresa ya no avanza, programa ni ofrece
+(`409 POSTING_NOT_OPEN`) ni contrata, pero sí puede rechazar.
+
+### Trabajador (`/api/workers`)
+
+| Ruta | Efecto |
+| --- | --- |
+| `GET /job-postings?query=&modality=&workload=&contractType=&minSalaryCents=&location=&limit=&cursor=` | Busca puestos `PUBLISHED`: primero los destacados vigentes (`isHighlighted`), luego del más reciente al más antiguo (cursor estable entre ambos tramos). `minSalaryCents` exige que el máximo del rango lo alcance; `query`/`location` no distinguen mayúsculas. Cada puesto trae `vacanciesRemaining`, `company.name` y `myApplication`. No expone `vacancies`, `filledVacancies` ni datos de otros candidatos. |
+| `GET /job-postings/:id` | Detalle público (`404` si no está publicado). |
+| `POST /job-postings/:id/applications` `{answers:[{question, answer}]}` | Postula (`201`). Debe responder exactamente las preguntas de filtro (`400 INVALID_SCREENING_ANSWERS`). Repetir mientras sigue `APPLIED` responde `200` con la misma postulación. **Re-postulación (M4):** si estaba `WITHDRAWN` (incluido el rechazo de una oferta) se reactiva la MISMA fila (`APPLIED`, historial conservado, evento `APPLICATION_REOPENED`, responde `200` con `reopened: true`) y no vuelve a cobrar monedas (la clave de cobro es por puesto y trabajador); quien fue `REJECTED` por la empresa, o está en otra etapa, recibe `409 ALREADY_APPLIED` con su `status`; si la postulación `WITHDRAWN` conserva una oferta aceptada, `409 APPLICATION_HAS_ACCEPTED_OFFER` (no se reabre). Cuerpo opcional `priority: true` para postular con prioridad. Seis envíos simultáneos crean una sola. Puesto no publicado: `409 POSTING_NOT_PUBLISHED`; cubierto: `409 POSTING_FILLED`. |
+| `GET /job-applications?status=&history=&limit=&cursor=` | Mis postulaciones. Por defecto **no** incluye las resueltas automáticamente por el cierre o la cobertura del puesto (`autoClosedReason`); `history=true` las incluye. |
+| `POST /job-applications/:id/priority` | Compra la prioridad de una postulación propia que la empresa aún no movió (`APPLICATION_PRIORITY`). Idempotente; `409 PRIORITY_NOT_AVAILABLE` si ya no aplica. |
+| `GET /job-applications/:id` | Detalle propio: puesto, entrevista, `currentOfferId`, ofertas con su constancia y línea de tiempo (sin el motivo de rechazo). |
+| `POST /job-applications/:id/withdraw` | Se retira (`WITHDRAWN`) desde cualquier etapa abierta, también tras aceptar la oferta si aún no la contrataron. |
+| `POST /job-applications/:id/offers/:offerId/accept` | Acepta la oferta vigente (`PENDING`): oferta `ACCEPTED`, postulación `ACCEPTED` y constancia. Una versión reemplazada responde `409 OFFER_NOT_PENDING`. |
+| `POST /job-applications/:id/offers/:offerId/decline` | Rechaza la oferta: oferta `DECLINED` y postulación `WITHDRAWN` (rechazar una oferta es una retirada del trabajador; `REJECTED` es siempre decisión de la empresa), con el evento `OFFER_DECLINED`. |
+| `GET /job-applications/:id/offers/:offerId/document` | PDF de la oferta propia. |
+
+### Constancia de aceptación
+
+Al aceptar se guarda `acceptanceSnapshot` en la oferta: fecha de aceptación,
+versión, empresa (nombre, razón social, RUC), trabajador (nombre y número de DNI,
+visibles para la empresa desde ese momento),
+puesto (título, modalidad, jornada, lugar, rango), condiciones ofrecidas
+(salario, moneda, tipo de contrato, fecha de ingreso, nota) y metadatos y
+`sha256` del documento adjunto. Un trigger de PostgreSQL
+(`JobOffer_accepted_is_immutable`) rechaza cualquier `UPDATE` posterior de una
+oferta `ACCEPTED`; emitir una oferta nueva sobre una postulación aceptada da
+`409`. **Constancia conservada (M4):** la oferta aceptada, su postulación, el
+puesto y la empresa ya no se borran por cascada. Las FK `JobPosting.companyId`,
+`JobApplication.postingId` y `JobApplication.workerId` son `RESTRICT`, y el borrado
+administrativo de una empresa o de un trabajador responde
+`409 CONTRACT_RECORDS_RETAINED` (sin borrar nada) si el titular tiene ofertas
+aceptadas; también se mapea el `23001` de las FK `RESTRICT` ante una aceptación
+que llegue entre la comprobación y el borrado (misma política que el libro de
+monedas). Sin ofertas aceptadas, el borrado retira antes los puestos,
+postulaciones y PDF de la cuenta. La constancia se conserva como evidencia del
+acuerdo, soporte y disputas, retención legal y antifraude; el DNI visible para la
+empresa tras la aceptación es decisión confirmada del dueño del producto. La
+**anonimización** posterior es alcance futuro. La firma digital y la integración
+con planilla siguen fuera de alcance.
+
+### Línea de tiempo y avisos en tiempo real
+
+Cada cambio escribe un `JobApplicationEvent` (quién, qué, estado anterior y
+nuevo, cuándo; el autor pasa a nulo si se borra la cuenta). Tipos: `APPLIED`,
+`SHORTLISTED`, `INTERVIEW_SCHEDULED`, `OFFER_ISSUED`, `OFFER_ACCEPTED`,
+`OFFER_DECLINED`, `HIRED`, `REJECTED`, `WITHDRAWN`, `APPLICATION_REOPENED` (M4).
+
+`GET /api/job-events` (cualquier sesión válida) es un flujo SSE con el mismo
+patrón del feed de turnos. Tras confirmar cada cambio, el servicio avisa solo a
+la contraparte con `event: job` y `{type, applicationId, postingId, status, at}`.
+El bus es en proceso: con varias instancias de la API el aviso solo llega a los
+clientes conectados a la instancia que atendió el cambio (igual que el feed de turnos).
+
+### Puntos de extensión para M4
+
+`JobService` acepta `JobHooks` (`beforePublish`, `beforeApply`, `chargePriority`,
+`chargeHighlight`, `afterHire`) que se ejecutan dentro de la transacción de la
+operación con el cliente transaccional. Desde M4 `createJobCurrencyHooks`
+(`currency.hooks.ts`) los conecta con el cobro; sus errores se traducen a `409`
+(ver «Acciones conectadas a la moneda virtual»). Como la operación se reintenta
+ante conflictos de `Serializable`, un gancho puede ejecutarse más de una vez:
+solo escribe con `tx` y es idempotente por clave de instancia.
+
+**Postulaciones aceptadas sobre un puesto que se cierra o se cubre (M4):** al
+cerrar o cubrir un puesto, además de retirar las ofertas `PENDING`, las
+postulaciones `ACCEPTED` no contratadas pasan a `REJECTED` en la misma
+transacción, con `autoClosedReason` (`POSTING_CLOSED` o `POSTING_FILLED`), evento
+con ese detalle y aviso SSE al trabajador. La constancia de la oferta aceptada se
+conserva. Las listas del trabajador las ocultan salvo `history=true`.
+
+### Diferido
+
+- Chat de la postulación: `Conversation` exige un `CompanyWorkerContact`
+  (directorio de la empresa) y está atada a turnos; reutilizarla obliga a
+  crear contactos y a ampliar el modelo, así que se difiere a M5.
+- Interfaces web y Flutter (M5) y firma digital.
+- Los PDF de ofertas se retiran del almacenamiento privado al borrar una cuenta
+  sin ofertas aceptadas; los de una cuenta con constancia se conservan (el
+  borrado se bloquea, ver «Constancia de aceptación»).
+
+**Migración `20261006100000_job_postings`** (solo agrega): enums, tablas
+`JobPosting`, `JobApplication`, `JobOffer`, `JobOfferUpload` y
+`JobApplicationEvent`; `CHECK` de rango salarial, vacantes y salario ofertado;
+índice único parcial (una oferta abierta o aceptada por postulación) y el
+trigger de inmutabilidad.
+
+## Acciones conectadas a la moneda virtual (M4)
+
+Solo API y datos (las interfaces son M5). Usa el catálogo de M2 y el libro de M1.
+
+**Principio:** lo básico es gratis y nunca se bloquea por saldo (aceptar o
+rechazar una oferta, retirarse, responder una invitación, ver el proceso, leer el
+saldo). Solo cobran las acciones del catálogo listadas abajo.
+
+**Cobro atómico.** El débito ocurre dentro de la misma transacción `Serializable`
+de la acción (`CurrencyActionService.charge`, sin transacción propia): si la
+acción falla no queda cobro, y si el cobro falla no queda la acción. Cada
+instancia tiene una clave de idempotencia (`job-publish:{postingId}`,
+`job-apply:{postingId}:{workerId}`, `job-priority:{applicationId}`,
+`job-highlight:{postingId}:{n}`, `talent-invite:{id}`,
+`contact-unlock:{companyId}:{workerUserId}`) guardada en `CurrencyActionUse`
+(único): reintentos y clics repetidos nunca cobran dos veces. La cuenta se
+bloquea con `SELECT ... FOR UPDATE` y el saldo nunca queda negativo.
+
+**Cuota gratuita.** Contador real por usuario, acción y **mes calendario de
+Lima** (`JOB_PUBLISH_EXTRA`: 3/mes empresa; `APPLICATION_EXTRA`: 10/mes
+trabajador). Dentro de la cuota se registra el uso con cobro 0; fuera, se cobra
+el monto del catálogo.
+
+**Errores (409):** `INSUFFICIENT_CURRENCY` `{cost, balance}` (sin efectos
+secundarios), `DAILY_SPEND_CAP_REACHED` `{cost, dailyCap, spentToday}`,
+`IDEMPOTENCY_KEY_REUSED`.
+
+**Tope de gasto diario.** `DAILY_SPEND_CAP_WORKER` y `DAILY_SPEND_CAP_COMPANY`
+(provisional 200 monedas por día de Lima y por actor). Suma lo cobrado en el
+día; nunca aplica a devoluciones, premios ni acciones gratuitas.
+
+| Acción (clave) | Ruta | Notas |
+| --- | --- | --- |
+| `JOB_PUBLISH_EXTRA` | `POST /api/business/job-postings/:id/publish` | Solo la primera publicación cuenta; reanudar un puesto pausado es gratis. |
+| `JOB_HIGHLIGHT` | `POST /api/business/job-postings/:id/highlight` | Fija `highlightedUntil` (duración editable); los destacados salen primero en la búsqueda de puestos. Con uno vigente no cobra. |
+| `APPLICATION_EXTRA` | `POST /api/workers/job-postings/:id/applications` | Una vez por (puesto, trabajador): re-postular no cobra de nuevo. |
+| `APPLICATION_PRIORITY` | `priority: true` al postular, o `POST /api/workers/job-applications/:id/priority` | Marca `isPriority`; la empresa la ve primero. Solo mientras la empresa no la haya movido. Atómico con la postulación. |
+| `TALENT_INVITE` | `POST /api/business/talent-invitations` | Cobra al crear la invitación; con devolución. |
+| `CANDIDATE_CONTACT_UNLOCK` | `POST /api/business/talent/:profileId/unlock-contact` | Idempotente por (empresa, candidato): `201` la primera vez, `200` después, sin cobrar. Habilita `GET /api/business/talent/:profileId/contact` y `.../cv`; `GET /api/business/talent-unlocks` lista los desbloqueos. Sin desbloqueo, `CONTACT_NOT_UNLOCKED`. |
+
+**Cotización sin efectos.** `GET /api/workers/currency/quote` y
+`GET /api/business/currency/quote` con `?actionKey=&targetId=` (opcional: puesto,
+postulación o perfil) devuelven `{currency, actionKey, cost, reason
+(CHARGE|FREE_QUOTA|ALREADY_REGISTERED|FREE_ACTION), freeQuota, balance,
+sufficientBalance, dailyCap, withinDailyCap, canExecute, refundWindowHours}`. No
+escribe nada ni crea cuentas. Acción no cotizable: `404 ACTION_NOT_QUOTABLE`.
+
+**Bono de bienvenida (`WELCOME_BONUS`).** Se otorga al registrar un trabajador y
+al crear la cuenta de una empresa (admin), con clave `welcome-bonus:{actor}:{id}`:
+un solo bono por cuenta; si falla no deshace el alta. Para cuentas anteriores:
+`POST /api/admin/currency/welcome-bonus/backfill` (idempotente; informa cuántas
+cuentas lo recibieron y cuántas ya lo tenían). Una cuenta con el movimiento del
+bono cuenta como «ya lo tenía» aunque el monto de `WELCOME_BONUS` se haya
+editado después (no hay `409 IDEMPOTENCY_KEY_REUSED` y la pasada continúa;
+CN-20261007-045). No hay migración masiva automática.
+
+**Devolución automática.** Tarea programada en proceso (`server.ts`,
+`CURRENCY_REFUND_INTERVAL_MS`, 5 min por defecto; `0`/`off` la desactiva y no
+corre bajo pruebas). Para `TALENT_INVITE`, `APPLICATION_EXTRA` y
+`APPLICATION_PRIORITY` cobradas, al cumplirse `refundWindowHours` del catálogo
+(72 h provisional, congelado al cobrar) devuelve el costo si la otra parte no
+respondió (invitación sin respuesta; postulación todavía `APPLIED` sin
+movimiento de la empresa ni retirada). Un movimiento `ACTION_REFUND` enlazado al
+cobro (`refundOfId`, único) y la clave `refund:{movimiento}` garantizan una sola
+devolución por cobro; cada cobro se reclama con `FOR UPDATE SKIP LOCKED`, seguro
+con varias instancias de la API. `POST /api/admin/currency/refunds/run` ejecuta
+una pasada.
+
+**Ajustes del administrador** (con historial, como el catálogo):
+`GET /api/admin/currency/settings`, `GET /api/admin/currency/settings/changes` y
+`PATCH /api/admin/currency/settings/:key {value, reason}` para
+`DAILY_SPEND_CAP_WORKER`, `DAILY_SPEND_CAP_COMPANY` y
+`JOB_HIGHLIGHT_DURATION_HOURS` (los de premios de M6 se listan en su sección).
+
+**Diferido en M4, resuelto en M6:** `PROFILE_HIGHLIGHT` (destacar el perfil del
+trabajador) y los premios por perfil completo, documentos, referidos, empresa
+verificada, respuesta a tiempo y contratación confirmada se implementaron en M6
+(ver «Ganar monedas: premios automáticos (M6)»).
+
+**Migración `20261007100000_currency_actions`:** agrega `CurrencyActionUse`,
+`CurrencySetting`, `CurrencySettingChange` y `CandidateContactUnlock`; las
+columnas `CurrencyMovement.actionKey/refundOfId`, `JobPosting.highlightedUntil` y
+`JobApplication.isPriority/prioritizedAt/autoClosedReason`; valores de enum
+nuevos; y cambia tres FK a `RESTRICT`. La única sentencia de datos rellena
+`autoClosedReason` en las postulaciones que M3 ya había rechazado al cerrar o
+cubrir un puesto (evento `REJECTED` con ese detalle y sin `decisionReason`); no
+borra filas. Las postulaciones `ACCEPTED` que ya estuvieran sobre un puesto
+cerrado o cubierto antes de M4 no se resuelven solas.
+
+**Bono de bienvenida y borrado (decisión del dueño, CN-20261007-045):** el bono
+por sí solo no retiene el borrado. `DELETE /api/admin/workers/:id` y
+`DELETE /api/admin/companies/:id` responden `204` para una cuenta cuyo único
+movimiento es el `WELCOME_BONUS`; con cualquier otro movimiento siguen
+respondiendo `409 CURRENCY_LEDGER_RETAINED` (ver «Borrado de titulares»).
+Límite conocido de `CN-20261007-046` (BAJO-A), **cerrado en M6
+(`CN-20261012-047`)**: borrados simultáneos del mismo titular o un borrado
+simultáneo con una acción del propio titular ya no responden `500` (ver «Borrado de
+titulares bajo concurrencia» en la sección de M6).
+
+**Postulación con oferta aceptada (CN-20261007-045):** una oferta `ACCEPTED` es
+una constancia inmutable. Si el trabajador se retira después de aceptarla,
+`POST /api/workers/job-postings/:id/applications` no reabre la postulación y
+responde `409 APPLICATION_HAS_ACCEPTED_OFFER` (la postulación queda `WITHDRAWN`
+y la oferta, intacta). Emitir una oferta sobre una postulación que ya tiene una
+aceptada responde el mismo `409`, nunca `500`.
+
+**Devolución y concurrencia (CN-20261007-045):** cada devolución se procesa en una
+transacción `Serializable` con reintento; un cobro simultáneo sobre la misma
+cuenta ya no produce `500` por `(accountId, sequence)`.
+
+## Ganar monedas: premios automáticos (M6)
+
+Solo API y datos (las interfaces son M5). Los montos salen siempre del catálogo
+de M2 (entradas `REWARD`, valores provisionales); el código nunca los fija.
+
+**Reglas comunes de todo premio** (`CurrencyRewardService`, `currency.rewards.ts`):
+
+- **Un premio nace de un hecho** con clave estable `{actionKey}:{hecho}` guardada
+  en `CurrencyRewardGrant.factKey` (**único**) y como clave de idempotencia del
+  movimiento (`reward:{factKey}`). El mismo hecho nunca paga dos veces, aunque
+  lo procesen dos transacciones a la vez (la cuenta se bloquea, el único lo
+  garantiza y `Serializable` reintenta al perdedor).
+- **Atómico con el hecho.** El premio se escribe en la misma transacción
+  `Serializable` que el hecho que lo dispara (guardar el perfil, verificar,
+  responder, contratar): si el hecho se revierte no queda premio. Una regla de
+  negocio que impide pagar (entrada inactiva, tope) **no** revierte el hecho; un
+  fallo técnico del premio tampoco: corre dentro de un `SAVEPOINT`, se revierte
+  solo el premio, se registra `REWARD_FAILED` en el log y el hecho se conserva.
+  Los conflictos de serialización y los interbloqueos sí se propagan para que
+  se reintente la transacción completa (hecho y premio juntos).
+- **Catálogo:** una entrada ausente, inactiva o que no sea `REWARD` significa
+  «sin premio» (el hecho ocurre igual). El libro registra `action = REWARD`,
+  `actionKey` y la entidad relacionada del hecho.
+- **Tope de premios** (defensa contra granjas, editable con historial):
+  `REWARD_CAP_DAILY_WORKER`/`REWARD_CAP_DAILY_COMPANY` (provisional 100
+  monedas por día de Lima y titular) y `REWARD_CAP_MONTHLY_WORKER`/
+  `REWARD_CAP_MONTHLY_COMPANY` (600 por mes de Lima). Suma lo ganado por premios
+  (`CurrencyRewardGrant`); excluye el bono de bienvenida. Un premio que no cabe
+  entero **no se otorga** (`CAP_REACHED_DAILY|MONTHLY`). Los premios **no cuentan
+  para el tope de gasto** (`CurrencyActionUse`) ni al revés.
+- **Sin gasto ni saldo negativo:** un premio solo suma (el CHECK del libro y el
+  tope de saldo máximo siguen vigentes).
+- **Reintento natural:** si el hecho puede volver a evaluarse (perfil, documento,
+  empresa verificada, referido), un premio que antes no cupo o no existía en el
+  catálogo se otorga la próxima vez que se repita la evaluación; cada hecho sigue
+  pagando una sola vez.
+
+| Premio (`actionKey`) | Actor | Hecho y clave | Cuándo | Anti-fraude |
+| --- | --- | --- | --- | --- |
+| `PROFILE_COMPLETE` | Trabajador | `PROFILE_COMPLETE:{userId}` | Al guardar el perfil o subir CV/foto y cumplirse **todas** las secciones obligatorias (abajo) | Una sola vez por trabajador aunque borre y vuelva a completar |
+| `DOCUMENT_VERIFIED` | Trabajador | `DOCUMENT_VERIFIED:{userId}:{tipo}` | El admin marca verificado el CV o la foto | **Un premio por tipo** (máximo 2); reemplazar el archivo quita la verificación pero no vuelve a pagar |
+| `INVITATION_RESPONDED` | Trabajador | `INVITATION_RESPONDED:{invitationId}` | Al aceptar **o** rechazar una invitación `PENDING` y no vencida | Una vez por invitación; una anulada, vencida o ya respondida no paga |
+| `REFERRAL` | Trabajador (referidor) | `REFERRAL:{referralId}` | Cuando el referido completa su perfil | Ver «Referidos» |
+| `COMPANY_VERIFIED` | Empresa | `COMPANY_VERIFIED:{companyId}` | El admin marca verificada la empresa | Una vez por empresa; quitar y volver a poner la verificación no repite |
+| `APPLICANTS_RESPONDED_ON_TIME` | Empresa | `APPLICANTS_RESPONDED_ON_TIME:{applicationId}` | La empresa mueve una postulación fuera de `APPLIED` (preseleccionar, entrevista, oferta o rechazo) dentro de `APPLICANT_RESPONSE_WINDOW_HOURS` desde que llegó o se reabrió | Una vez por postulación (mover y devolver, o retirarse y re-postular, no repite) y tope mensual por empresa |
+| `HIRE_CONFIRMED` | Empresa | `HIRE_CONFIRMED:{applicationId}` | Al confirmar `HIRED`, dentro de la transacción de la contratación (gancho `afterHire`) | Una por contratación; si la contratación falla no hay premio |
+
+### Perfil completo (criterio objetivo)
+
+Fuente: `apps/api/src/modules/talent/profile-completeness.ts`. El perfil está
+completo cuando cumple **todas** estas secciones obligatorias (lista fija, no
+un porcentaje): `headline` (≥ 10 caracteres), `bio` (≥ 40), `district`,
+`availability` (al menos un día **y** un periodo), `specialties` (≥ 1),
+`experience` (≥ 1), `cv` y `photo`. Son opcionales (no se exigen) las
+certificaciones, los idiomas, la zona de trabajo y el texto libre de
+disponibilidad; el porcentaje `completion` del perfil no cambia. El criterio
+mide que los datos existan; la calidad de los documentos la valida el
+administrador (`DOCUMENT_VERIFIED`). Se evalúa **dentro de la misma transacción**
+de `PATCH /api/workers/me/profile`, `PUT /api/workers/me/cv` y
+`PUT /api/workers/me/photo`. Dos guardados simultáneos pagan una sola vez.
+
+### Verificaciones del administrador
+
+Solo `ADMIN` (`403` otro rol, `401` sin sesión). Marcar verificado guarda **autor y
+fecha** (`verifiedById`, `verifiedAt`); repetirlo es idempotente (conserva el autor
+y la fecha originales) y reintenta el premio si antes no cupo.
+
+**Revisión del documento (CN-20261012-049, BAJO-3).** La verificación queda ligada al
+archivo concreto que el admin revisó:
+
+- `GET /api/admin/workers/:workerId/documents` → `{documents: [{kind, id, version,
+  originalName, mediaType, sizeBytes, uploadedAt, verified, verifiedAt, verifiedById,
+  history: [{action, reason, changedById, documentVersion, createdAt}], historyNextCursor}]}`
+  (por tipo de documento). `history` es la **primera página** (hasta 20 cambios, del más
+  reciente al más antiguo) **de ese documento**: el historial de un tipo ya no recorta el del
+  otro (`CN-20261013-051`). `historyNextCursor` es `null` si no hay más; para seguir se usa
+  `GET .../documents/:kind/history`. `version` es un identificador opaco
+  (hash de la clave de almacenamiento): cambia con cada archivo nuevo y **nunca se
+  expone la clave de almacenamiento**. `uploadedAt` es la fecha de subida del archivo
+  vigente (en filas anteriores a la migración `20261012200000`, la de creación).
+  `404 WORKER_NOT_FOUND` si la cuenta no es un trabajador.
+- `GET /api/admin/workers/:workerId/documents/:kind/history?limit=25&cursor=<id>` (solo `ADMIN`;
+  `limit` 1 a 100) → `{items: [{action, reason, changedById, documentVersion, createdAt}],
+  nextCursor}`, del más reciente al más antiguo y sin saltos ni repeticiones. `400 INVALID_CURSOR` si
+  el cursor no es un cambio de ese documento; `400` si `kind` no es `CV` o `PROFILE_PHOTO`; `404
+  WORKER_NOT_FOUND`.
+- `GET /api/admin/workers/:workerId/documents/:kind/file`: descarga el archivo
+  (`Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`, `inline`)
+  y devuelve su `version` en `X-Document-Version`. Control estricto de rol `ADMIN`:
+  ni el propio trabajador ni una empresa pueden usarla (`403`); `404 DOCUMENT_NOT_FOUND`
+  / `404 DOCUMENT_FILE_NOT_FOUND`; `409 DOCUMENT_CHANGED` si lo reemplazaron mientras se
+  leía.
+- `POST /api/admin/workers/:workerId/documents/:kind/verification` con `kind` =
+  `CV` o `PROFILE_PHOTO` y cuerpo `{documentVersion}` (obligatorio, la `version` del
+  archivo revisado) → `{verified, alreadyVerified, verifiedAt, verifiedById,
+  documentVersion, reward: {granted, amount, reason?}}`. **`409 DOCUMENT_CHANGED`** si
+  el archivo vigente ya no es el revisado (el trabajador lo reemplazó): no verifica
+  nada, no paga y no escribe historial. `400` si falta la versión, hay campos de más
+  o el tipo no existe; `404 DOCUMENT_NOT_FOUND` si el trabajador no tiene ese
+  documento. La comprobación ocurre bajo el bloqueo de la fila del documento, así que
+  un reemplazo simultáneo nunca deja verificado un archivo distinto del revisado.
+- `DELETE /api/admin/workers/:workerId/documents/:kind/verification` con cuerpo
+  `{reason}` (3 a 500 caracteres, obligatorio) → `{verified: false, alreadyUnverified}`.
+  Guarda autor, fecha y motivo en el historial (`WorkerDocumentVerificationChange`);
+  si no estaba verificado no escribe nada (idempotente). No descuenta nada: el libro es
+  solo de suma, y volver a verificar no vuelve a pagar (un premio por tipo y trabajador,
+  así que verificar y retirar en bucle no permite farmear premios: máximo 2 por trabajador).
+- `POST /api/admin/companies/:companyId/verification` (idempotente) y
+  `DELETE /api/admin/companies/:companyId/verification` con cuerpo `{reason}` →
+  `{verified: false, alreadyUnverified}` (`404 COMPANY_NOT_FOUND`). Mismo historial
+  (`CompanyVerificationChange`, con autor, fecha y motivo al retirar).
+- `GET /api/admin/companies/:companyId/verification/history?limit=25&cursor=<id>` (solo `ADMIN`) →
+  `{items: [{action, reason, changedById, createdAt}], nextCursor}`, del más reciente al más antiguo
+  (`CN-20261013-051`). `400 INVALID_CURSOR` si el cursor no es de esa empresa; `404 COMPANY_NOT_FOUND`.
+
+El historial no es de solo lectura por trigger: el autor pasa a `null` si la cuenta del
+admin se borra (`ON DELETE SET NULL`); la fila se conserva. Subir un archivo nuevo (CV o
+foto) borra su verificación y, **si estaba verificada**, deja en el historial una fila `UNVERIFIED` con
+`changedById` nulo (lo hizo el sistema, no un admin), el motivo «verificación retirada por reemplazo», la fecha y
+la `documentVersion` del archivo que sí se había verificado (`CN-20261013-051`); reemplazar un archivo no
+verificado no escribe nada. El premio ya pagado por ese tipo no se vuelve a pagar al verificarlo de nuevo.
+
+### Referidos
+
+- `GET /api/workers/me/referral` (sesión `WORKER`) → `{code, referred, rewarded,
+  monthly: {limit, used, remaining}}`. Crea el código propio la primera vez
+  (8 caracteres aleatorios sin ambiguos, `User.referralCode` único); solo datos
+  propios, nunca revela referidos de otros.
+- `POST /api/auth/register` acepta `referralCode` (opcional, no distingue
+  mayúsculas). Un código inexistente o mal formado responde
+  `400 INVALID_REFERRAL_CODE` y **no crea la cuenta**. Con un código válido la
+  cuenta y su `WorkerReferral` se crean en una sola transacción. El registro con
+  Google no admite código en esta entrega.
+- **El premio no se paga al registrarse**: se paga al referidor cuando el referido
+  cumple el criterio de perfil completo (mismo evento que `PROFILE_COMPLETE`),
+  una sola vez por referido.
+
+**Reglas anti-fraude de referidos:** (1) el referido es único (`referredId`
+único): una cuenta cuenta una sola vez y no puede reasignarse a otro referidor;
+(2) sin auto-referido: el código solo existe para una cuenta ya creada, el
+referido es siempre una cuenta nueva y la base lo refuerza con
+`CHECK (referrerId <> referredId)`; (3) pagar exige perfil completo (CV, foto,
+experiencia, etc.), así crear cuentas vacías no rinde nada; (4) límite mensual
+por referidor `REFERRAL_MONTHLY_LIMIT` (provisional 5 por mes de Lima, editable
+con historial): un referido que no cabe queda **pendiente** y se premia la
+próxima vez que guarde su perfil con cupo; (5) los topes diario y mensual de
+premios del referidor; (6) dos registros simultáneos con el mismo código crean dos
+referidos distintos y, con límite 1, solo uno paga. Límite conocido: nada impide
+que una misma persona cree cuentas con DNI y correo distintos; el costo de cada
+cuenta (perfil completo) y los topes acotan el beneficio.
+
+### Lista de premios del actor
+
+- `GET /api/workers/currency/rewards` (sesión `WORKER`) y
+  `GET /api/business/currency/rewards` (sesión `BUSINESS`) →
+  `{currency, items, caps}`. Cada item: `{actionKey, amount, repeatable,
+  earnedCount, earnedAmount, status: EARNED|AVAILABLE, ...}` con datos extra por
+  premio: `PROFILE_COMPLETE` → `requiredSections` y `missingSections`;
+  `DOCUMENT_VERIFIED` → `maxRewards` y `documents[{kind, uploaded, verified,
+  rewarded}]`; `REFERRAL` y `APPLICANTS_RESPONDED_ON_TIME` → `monthly {limit,
+  used, remaining}` (el segundo, además `windowHours`); `COMPANY_VERIFIED` →
+  `verified`. `caps` trae lo ganado y lo que queda hoy y este mes. Solo aparecen los
+  premios activos del catálogo del actor, nunca claves internas de hechos ni
+  movimientos, y cada rol solo ve los suyos.
+
+### Destacar el perfil (`PROFILE_HIGHLIGHT`)
+
+- `POST /api/workers/me/profile/highlight` (sesión `WORKER`) cobra `PROFILE_HIGHLIGHT`
+  (10 monedas provisional, con su cuota gratuita y el tope de gasto diario) y fija
+  `highlightedAt/highlightedUntil` en la misma transacción; duración
+  `PROFILE_HIGHLIGHT_DURATION_HOURS` (168 h provisional, editable). Mientras el
+  destacado esté vigente repetirlo no cobra ni extiende (`idempotent: true`). Un
+  perfil oculto (`isVisible: false`) responde `409 PROFILE_NOT_VISIBLE` sin cobrar;
+  sin saldo, `409 INSUFFICIENT_CURRENCY`. Cotizable con
+  `GET /api/workers/currency/quote?actionKey=PROFILE_HIGHLIGHT&targetId=<perfil propio>`.
+- `GET /api/business/talent` ordena primero los perfiles destacados vigentes
+  (`isHighlighted: true` en la tarjeta) y luego el resto, por `id` ascendente en
+  cada tramo. **El `nextCursor` es opaco** y recuerda tramo, último `id` y el
+  instante de la primera página: la partición destacados/resto se calcula siempre
+  con ese instante (`highlightedAt <= instante < highlightedUntil`), así que un
+  destacado que vence o se compra a mitad de la paginación no repite ni salta filas.
+  Un cursor antiguo (un `id` simple) se acepta y continúa en el tramo resto. El perfil
+  propio devuelve `highlightedUntil`.
+
+### Ajustes nuevos (administrador, con historial, provisionales)
+
+Mismas rutas que M4 (`GET/PATCH /api/admin/currency/settings`): `REWARD_CAP_DAILY_WORKER` 100,
+`REWARD_CAP_MONTHLY_WORKER` 600, `REWARD_CAP_DAILY_COMPANY` 100,
+`REWARD_CAP_MONTHLY_COMPANY` 600, `REFERRAL_MONTHLY_LIMIT` 5,
+`APPLICANT_RESPONSE_WINDOW_HOURS` 72, `APPLICANT_RESPONSE_MONTHLY_LIMIT` 20 (premios de
+respuesta por empresa y mes de Lima) y `PROFILE_HIGHLIGHT_DURATION_HOURS` 168.
+
+### Datos y migración
+
+Migración `20261012100000_currency_rewards` (solo agrega): `CurrencyRewardGrant`
+(único `factKey`), `WorkerReferral`, `User.referralCode`, `WorkerDocument.verifiedAt/
+verifiedById`, `Company.verifiedAt/verifiedById`, `WorkerTalentProfile.highlightedAt/
+highlightedUntil` y las 8 filas de ajustes. No modifica ni borra filas existentes.
+Los ganchos de `JobHooks` nuevos: `afterCompanyResponse` y el contexto de `afterHire` con
+`userId`.
+
+Migración `20261012200000_verification_history` (`CN-20261012-049`, solo agrega): el tipo
+`VerificationChangeAction` (`VERIFIED`/`UNVERIFIED`), `WorkerDocument.uploadedAt` (nula en filas
+anteriores) y las tablas `WorkerDocumentVerificationChange` y `CompanyVerificationChange`
+(autor `ON DELETE SET NULL`, cascada con el trabajador o la empresa). No modifica ni borra filas
+existentes.
+
+### Borrado de titulares bajo concurrencia (BAJO-A de `CN-20261007-046`, cerrado)
+
+`DELETE /api/admin/workers/:id` y `DELETE /api/admin/companies/:id` bloquean **primero**
+la fila de `User` (`FOR UPDATE`) y luego la cuenta de moneda, las postulaciones y el
+borrado, dentro de una transacción `Serializable` con reintento. Resultado: borrados
+simultáneos del mismo titular dan un `204` y el resto `404` (`WORKER_NOT_FOUND` /
+`COMPANY_NOT_FOUND`; el `P2025` ya no llega como `500`); un borrado simultáneo con una
+acción del propio titular termina sin interbloqueo (`40P01` se reintenta) y sin `500`: si
+el borrado gana, la acción responde `404 RESOURCE_NO_LONGER_EXISTS` (la FK `P2003` de un
+puesto o titular ya borrado se traduce en `JobService`); si la acción gana, el borrado
+sigue (`204`) o se bloquea con `409` si dejó un movimiento. No queda borrado parcial ni
+libro corrupto. Límite: la traducción de `P2003` cubre las acciones de puestos fijos. En las
+rutas de talento (perfil, CV, foto, destacar), una acción que llega con la cuenta ya borrada
+(`P2003`/`P2025`) responde `404 RESOURCE_NO_LONGER_EXISTS` (antes `400 INVALID_TALENT_REQUEST`,
+`CN-20261012-048`, BAJO-2; corregido en `CN-20261012-049`). Un guardado de perfil cuyos
+reintentos `Serializable` se agotan responde `503 SERIALIZATION_RETRY_EXHAUSTED`
+(ver «Reintentos de serialización agotados»); en ambos casos no queda ningún efecto aplicado.
+
+### Reintentos de serialización agotados (`503 SERIALIZATION_RETRY_EXHAUSTED`)
+
+Las rutas de moneda (`/api/workers/currency/*`, `/api/business/currency/*`, `/api/admin/currency/*`
+y las verificaciones), de puestos fijos (`/api/business/job-*`, `/api/workers/job-*`), de talento y
+de administración comparten un único mapeo (`apps/api/src/modules/operations/transaction-errors.ts`,
+`CN-20261012-049`, BAJO-1 y BAJO-2): cuando `withSerializableRetry` agota sus 6 intentos (`P2034`, o
+`40001`/`40P01` sin recuperar) la respuesta es **`503 SERIALIZATION_RETRY_EXHAUSTED`** con
+`Retry-After: 1` y cuerpo `{error, message, retryable: true}` en lugar de un `500`. La API expone `Retry-After` a los navegadores entre orígenes (`Access-Control-Expose-Headers`, `CN-20261013-051`) para que el panel web ofrezca el reintento con cuenta regresiva. La transacción se
+revirtió entera: no queda ningún efecto aplicado y repetir la misma petición es seguro (las acciones
+con cobro son idempotentes por su clave). En talento, `400` queda reservado a la validación de
+entrada, `404 RESOURCE_NO_LONGER_EXISTS` a la cuenta o registro ya borrado y `500 INTERNAL_ERROR` a un
+fallo inesperado. Las rutas del trabajador del módulo de turnos conservan su contrato histórico
+`409 CONCURRENT_UPDATE`. La prueba de estrés `currency-actions … (BAJO-1)` acepta ahora `201` o este
+`503` (y comprueba que un `503` no dejó postulación y que el libro queda consistente). Las pruebas de borrado simultáneo
+(`account-deletion-race`) también aceptan ese `503` (con `retryable: true`) como resultado válido de contención y comprueban que no
+queda nada a medias (el titular, su cuenta de moneda y sus datos siguen enteros, o se borraron del todo).
+
+### Límites conocidos de M6 (sin cambio, solo documentados)
+
+- **Oráculo de referidos:** al registrar un correo ya existente, un `referralCode` válido responde
+  `409 DUPLICATE_ACCOUNT` y uno inválido `400 INVALID_REFERRAL_CODE`; permite probar códigos. El
+  espacio es de 32^8 códigos, el registro tiene límite de intentos y el código no expone datos
+  personales.
+- **`referralCode` no textual** (p. ej. un número) se ignora sin error y la cuenta se crea sin
+  referido.
+- **`HIRE_CONFIRMED` sin límite propio:** con cuentas cómplices una empresa puede acumular premios
+  de contratación hasta el tope global `REWARD_CAP_MONTHLY_COMPANY`. Entra en el riesgo declarado de
+  cuentas múltiples por persona.
+
 ## Superadmin: cuentas empresariales
 
 Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar el alta de empresas que ya entregaron sus datos a Chambeaya:
@@ -18,9 +775,9 @@ Las rutas bajo `/api/admin` requieren una sesión `ADMIN` y permiten gestionar e
 - `GET /api/admin/companies`: listado con propietario y suscripción.
 - `POST /api/admin/companies`: crea en una transacción la cuenta `BUSINESS` y su empresa.
 - `PATCH /api/admin/companies/:id`: actualiza datos operativos (RUC, correo y contraseña no se modifican aquí).
-- `DELETE /api/admin/companies/:id`: elimina la empresa y su cuenta propietaria; no permite eliminar la cuenta del administrador actual.
+- `DELETE /api/admin/companies/:id`: elimina la empresa y su cuenta propietaria; no permite eliminar la cuenta del administrador actual; `409 CURRENCY_LEDGER_RETAINED` si la empresa tiene movimientos de moneda virtual distintos del bono de bienvenida (el bono por sí solo no retiene: `204`); `409 CONTRACT_RECORDS_RETAINED` si alguna postulación a sus puestos tiene una oferta aceptada. Sin ellas, borra antes sus puestos, postulaciones y los PDF de ofertas.
 - `GET /api/admin/workers`: listado global de cuentas `WORKER` con su contacto por empresa.
-- `DELETE /api/admin/workers/:id`: elimina una cuenta `WORKER` (`404 WORKER_NOT_FOUND` si el id no existe o no corresponde a un trabajador). Antes de borrar la cuenta, elimina del almacenamiento privado el CV y la foto de perfil del trabajador, si existían; el resto de filas asociadas (aplicaciones, asignaciones, sesiones, identidades externas) se elimina en cascada a nivel de base de datos.
+- `DELETE /api/admin/workers/:id`: elimina una cuenta `WORKER` (`404 WORKER_NOT_FOUND` si el id no existe o no corresponde a un trabajador). Borra primero en la base (transacción) y solo después elimina del almacenamiento privado el CV y la foto de perfil del trabajador, si existían (un fallo del almacenamiento tras confirmar el borrado se registra en el log y no deshace la baja: solo quedan archivos huérfanos); si el trabajador tiene movimientos de moneda virtual distintos del bono de bienvenida (el bono por sí solo no retiene: `204`) responde `409 CURRENCY_LEDGER_RETAINED` sin tocar archivos, y si tiene una oferta de puesto fijo aceptada, `409 CONTRACT_RECORDS_RETAINED`. Sus postulaciones a puestos fijos se borran explícitamente en la misma transacción (FK `RESTRICT`, M4) y sus PDF de oferta se retiran tras confirmar. El resto de filas asociadas (postulaciones a turnos, asignaciones, sesiones, identidades externas) se elimina en cascada a nivel de base de datos.
 
 El alta exige nombre comercial, RUC de 11 dígitos, correo y contraseña inicial (mínimo 8 caracteres, con mayúscula y número). Los datos de contacto y razón social pueden completarse o editarse después desde el panel.
 
@@ -33,6 +790,57 @@ Ninguna ruta HTTP crea una cuenta `ADMIN`: `POST /api/auth/register` responde `4
 
 Su `identifier` (obligatorio y único en `User`, igual que el DNI del trabajador o el RUC de la empresa) tiene el formato `ADMIN-<12 caracteres hexadecimales>` — nunca coincide con un DNI (8 dígitos) ni un RUC (11 dígitos) real, porque ambos son exclusivamente numéricos. La contraseña se genera dentro del comando (nunca se acepta por argumento ni por variable de entorno) y se imprime una sola vez por stdout; no queda registrada en ningún archivo ni log. Ver la sección "Primer acceso" de [la guía de despliegue](../guides/deployment.md#primer-acceso).
 
+### Ajuste global de comisión e IGV (`PlatformSettings`)
+
+Chambeaya cobra una comisión por cada pago al trabajador, además de las suscripciones (que no cambian). La paga la empresa, **encima** del monto del trabajador; el trabajador siempre recibe el 100% de lo publicado.
+
+- `GET /api/admin/settings` → `{ commissionBps, taxBps, updatedAt, updatedBy: {id, name} | null }`.
+- `PATCH /api/admin/settings` con `{ "commissionBps": <entero> }`: entero entre 0 y 5000 (0,00% a 50,00%), validado con Zod (`400 INVALID_INPUT` fuera de rango). `taxBps` es de **solo lectura** en este alcance: ningún endpoint lo modifica.
+
+Ambos requieren sesión `ADMIN` (`403 ADMIN_ACCOUNT_REQUIRED` en cualquier otro rol). Cada `PATCH` exitoso escribe una fila de auditoría inmutable en `PlatformSettingChange` (`field`, `oldValue`, `newValue`, `changedById`, `createdAt`), incluso si el valor nuevo es igual al anterior: el admin confirmó la acción explícitamente. La transacción bloquea la fila `global` (`SELECT … FOR UPDATE`) antes de leer `oldValue`, así que varios `PATCH` simultáneos dejan una cadena `oldValue → newValue` coherente. Si se borra el usuario que hizo el cambio, la fila de auditoría se conserva con `changedById` en `null` (`onDelete: SetNull`).
+
+`PlatformSettings` es una fila única (`id: 'global'`), con valores iniciales `commissionBps: 1000` (10,00%) y `taxBps: 1800` (18,00%, el IGV sobre la comisión). **Cambiar este ajuste nunca altera un turno ya publicado**: la comisión y el IGV vigentes se copian a `Shift.commissionBps`/`taxBps` al publicarlo (`POST /api/business/shifts`) y quedan fijos ahí para siempre, incluida cualquier edición posterior del turno (`PATCH /api/business/shifts/:id` nunca los recalcula). Los dos puntos donde nace un `Payment` automático (el check-out del trabajador y el cierre manual de una asignación `NO_SHOW`/`ABANDONED`, ver "Pagos y movimientos" más abajo) copian esos valores del turno, no el ajuste global vigente en ese momento.
+
+### `GET /api/admin/commissions` (Alcance D: cuánto facturar a cada empresa)
+
+Sesión `ADMIN`. Query opcional `from`/`to`, **estrictamente `"AAAA-MM-DD"`** (`400 INVALID_INPUT` para cualquier otro formato, incluida una hora completa: la fecha con hora se prestaba a ambigüedad y se retiró en la corrección de `CN-20260926-020`). Sin ninguno de los dos, cubre todo el historial. `400 INVALID_INPUT` si `from` es posterior a `to`.
+
+**La fecha debe existir en el calendario** (corrección de BAJO-1 de `CN-20260926-022`): el formato `"AAAA-MM-DD"` por sí solo no bastaba — `"2026-02-30"` pasaba el regex y `Date` la corría en silencio al 2 de marzo (200 con el día equivocado), y `"2026-13-01"` llegaba como `Invalid Date` hasta Prisma (`500`, no `400`). `isRealCalendarDate` (`admin.routes.ts`) reconstruye la fecha en UTC a partir de año/mes/día y compara los tres componentes contra lo recibido; cualquier desborde de mes o de día (incluidos los años bisiestos: `"2024-02-29"` se acepta, `"2026-02-29"` no) responde `400 INVALID_INPUT` con `"INVALID_CALENDAR_DATE"` en `issues`.
+
+**`from`/`to` son fechas de calendario de Lima, nunca un instante UTC** (corrección de ALTO-1 de `CN-20260926-020`: la versión anterior interpretaba `"AAAA-MM-DD"` como medianoche UTC —05:00 de Lima— y usaba `to` como límite inclusivo (`lte`) de ese instante, así que un reporte mensual perdía todo lo ocurrido entre las 19:00 del penúltimo día y las 19:00 del último día hora Lima: comisión real que nunca se facturaba). Ahora:
+
+- `from` cubre desde las 00:00 de Lima de ese día (inclusivo).
+- `to` cubre el día completo: internamente se convierte a un límite **exclusivo** en las 00:00 de Lima del día siguiente (nunca `lte`, que redondearía hacia abajo).
+- Perú no observa horario de verano (`-05:00` todo el año), así que la conversión es una función pura y determinista (`limaDayStartUtc`/`limaNextDayStartUtc` en `admin.routes.ts`), nunca "restar 5 horas" repetido en varios sitios.
+
+Responde:
+
+```json
+{
+  "period": { "from": "2026-09-01", "to": null, "fromUtc": "2026-09-01T05:00:00.000Z", "toUtcExclusive": null },
+  "totals": { "toInvoiceCents": 0, "toInvoiceTaxCents": 0, "collectedCents": 0, "pendingCollectionCents": 0, "payments": 0, "pendingResolution": 0 },
+  "companies": [
+    { "companyId": "…", "name": "…", "ruc": "…", "toInvoiceCents": 0, "toInvoiceTaxCents": 0, "collectedCents": 0, "pendingCollectionCents": 0, "payments": 0, "closedWithoutPayment": 0, "pendingResolution": 0 }
+  ]
+}
+```
+
+`period` devuelve tanto las fechas de Lima recibidas (`from`/`to`, o `null` si no se pasaron) como los instantes UTC efectivos de la consulta (`fromUtc`, y `toUtcExclusive`: el límite es **exclusivo**, nombrado así a propósito para que no haya ambigüedad sobre si incluye o no ese instante).
+
+**Filtra por `Payment.createdAt`, nunca por `processedAt`**: en modo manual la comisión "por facturar" existe desde que se completa la asignación, esté o no marcada como pagada; filtrar por `processedAt` (`null` mientras siga `PENDING`) excluiría del período justo los pagos que todavía no se marcaron, que son los que más importa facturar.
+
+Reglas por bucket (los pagos `'legacy'` nunca aportan a ninguno: nacieron con comisión e IGV en 0):
+
+- **`toInvoiceCents`/`toInvoiceTaxCents` ("por facturar"):** suma de `commissionCents`/`taxCents` de todo pago `provider: 'manual'` que no esté `CANCELLED`, pagado o no. Es el modo vigente en producción (sin proveedor contratado): Chambeaya no cobra nada por la app, así que todo lo que corresponde facturar queda aquí.
+- **`collectedCents` ("cobrada"):** suma de `commissionCents + taxCents` de pagos con un proveedor de pasarela (Alcance E; cualquier `provider` que no sea `'manual'` ni `'legacy'`) que ya estén `PROCESSED`. Hoy siempre `0`: no existe ningún proveedor contratado.
+- **`pendingCollectionCents` ("por cobrar"):** lo mismo que arriba, para pagos de pasarela `PENDING`/`SCHEDULED`. Hoy siempre `0`.
+- **`payments`:** cantidad de pagos que aportaron a cualquiera de los tres buckets anteriores.
+- **`closedWithoutPayment`:** asignaciones que esa empresa cerró sin pagar dentro del período — ver "Asignaciones cerradas sin pago" más abajo. Sirve para detectar evasión de la comisión: una empresa que cierra trabajo hecho como "sin pago" en vez de completarlo nunca genera el `Payment` sobre el que se calcula la comisión. Filtra por `ShiftAssignment.closedWithoutPaymentAt`, nunca por ningún texto.
+- **`pendingResolution`:** asignaciones `NO_SHOW`/`ABANDONED` que esa empresa todavía no resolvió (ni `resolveAssignment` ni `cancelShift`), **sin filtrar por período**: es un estado actual, no un evento con fecha. Corrección de MEDIO-1 de `CN-20260926-020`: antes, dejar sin resolver una asignación la sacaba por completo del reporte (ni sumaba a `closedWithoutPayment` ni a ningún otro bucket); ahora queda visible mientras siga pendiente, para que no resolverla no sea una forma de esconderla.
+  - **No depende de que el estado ya esté persistido** (corrección de MEDIO-1 nuevo de `CN-20260926-022`): `NO_SHOW`/`ABANDONED` son perezosos (`resolveAssignmentLifecycle` los calcula la próxima vez que algo toca esa asignación puntual — check-in, check-out, o abrir el turno en el panel —, nunca un job de fondo), así que una asignación cuya ventana de check-in ya venció pero que nadie volvió a tocar sigue `ASSIGNED` en la base. Este reporte nunca escribe (es una ruta de solo lectura); en vez de persistir el ciclo de vida antes de contar, aplica la misma función pura `resolveAssignmentLifecycle` -sin guardar nada- sobre las `ASSIGNED` candidatas, junto con las `NO_SHOW`/`ABANDONED` ya persistidas. Prefiltro de rendimiento: solo trae `ASSIGNED` cuyo turno empezó hace más de `CHECK_IN_LATE_LIMIT_MS` (60 min), porque ninguna puede calificar antes de eso.
+
+`companies` incluye toda empresa con alguna actividad en el período (al menos un pago) **o** con `closedWithoutPayment`/`pendingResolution` mayor que cero (estos dos, sin filtro de período para `pendingResolution`); `totals` es la suma de esos mismos campos sobre todas las filas de `companies`.
+
 ## Empresa
 
 - `GET /api/business/company`: obtiene el perfil. Si la cuenta es anterior a esta implementación, crea el perfil empresarial automáticamente con el nombre y RUC registrados.
@@ -41,8 +849,22 @@ Su `identifier` (obligatorio y único en `User`, igual que el DNI del trabajador
   - `INACTIVE` **no es un valor del enum `SubscriptionStatus` de Prisma** (que solo admite `TRIAL`/`ACTIVE`/`PAUSED`/`EXPIRED`/`CANCELLED`): existe únicamente en la respuesta sintética y nunca puede persistirse. Un cliente que mapee `status` debe tratarlo como un sexto caso; el panel de empresa (`apps/web`) lo muestra como "Sin plan activo" en la insignia de Membresías, "Sin plan activado" en el titular de esa sección y en la barra lateral, y no marca ninguna tarjeta como "Actual"; mientras no haya respuesta de la API la barra lateral dice "Plan sin confirmar" en vez de afirmar un plan. Los botones "Quiero conocerlo" avisan que los planes todavía no se activan desde el panel.
   - Como todos los endpoints de empresa, este `GET` sigue resolviendo la `Company` de la sesión con un `upsert` (`business.service.ts#companyFor`), así que puede crear la fila `Company` si la cuenta es anterior a esa implementación. Lo que dejó de crear es la suscripción.
   - **Filas fantasma previas al cambio (limitación conocida, sin limpieza).** Cualquier base donde corrió la versión anterior conserva las filas `PILOT/TRIAL` que ese `upsert` creó sin activación explícita. No se borran solas, y **tampoco existe un criterio seguro para borrarlas con un script**: el `upsert` antiguo escribía exactamente lo mismo que `demo.seed.ts` (`plan: PILOT`, `status: TRIAL`, `trialEndsAt` = ahora + 30 días, `endsAt` nulo) y que una fila creada a mano con los valores por defecto del esquema; en las tres, `startsAt` y `createdAt` coinciden y `updatedAt` es igual a `createdAt`, y no hay ninguna columna que registre quién ni por qué se creó la fila (verificado en una transacción con rollback sobre `chambeaya_test`, ver `CN-20260918-009`). Como la activación de un plan es manual (`docs/product/memberships.md`), una fila real hecha a mano es indistinguible de una fantasma, y borrarla por suposición quitaría un plan que alguien sí activó. Por eso esas empresas seguirán viendo "Piloto activo" y una fecha de fin de prueba hasta que un operador las revise. Punto de partida para esa revisión manual, de solo lectura (una fila que cumple esto es *candidata*, no fantasma confirmada): `SELECT c."name", s."companyId", s."createdAt", s."trialEndsAt" FROM "CompanySubscription" s JOIN "Company" c ON c."id" = s."companyId" WHERE s."plan" = 'PILOT' AND s."status" = 'TRIAL' AND s."endsAt" IS NULL AND s."updatedAt" = s."createdAt" ORDER BY s."createdAt";`. Decidir empresa por empresa; ninguna migración ni script del repositorio borra estas filas.
+- `GET /api/business/payment-settings` → `{ commissionBps, taxBps, currency: 'PEN', mode }`: el ajuste global vigente que se congelaría en un turno nuevo (`GET /api/admin/settings` sin el detalle de auditoría). El panel lo usa para la vista previa en vivo del formulario de publicación. Desde el Alcance E, `mode` es el nombre del proveedor de pago **activo** (`PAYMENT_PROVIDER`, ver [Despliegue con Docker](../guides/deployment.md)): `'manual'` en producción hoy (sin proveedor contratado), o `'simulated'` en desarrollo/QA.
 
 ## Turnos
+
+**Pausa de turnos temporales (M0, `CN-20261001-032`).** Los turnos temporales
+quedan inactivos por defecto. Mientras la API no reciba
+`TEMPORARY_SHIFTS_ENABLED=true` (valor literal), `POST /api/business/shifts` y
+`POST /api/shifts/:id/applications` responden `503 { "error":
+"TEMPORARY_SHIFTS_DISABLED" }` antes de validar el cuerpo o tocar datos. El
+resto de rutas de turnos (consultar, editar, cancelar, aceptar postulaciones,
+confirmar, check-in/check-out, resolver) sigue operando para cerrar lo ya
+publicado; no se borra código ni datos. El panel web oculta "Publicar turno" y
+"Nuevo turno" salvo `NEXT_PUBLIC_TEMPORARY_SHIFTS_ENABLED=true` (se fija al
+compilar el panel), y Flutter oculta "Postular" salvo
+`--dart-define=TEMPORARY_SHIFTS_ENABLED=true`. Las suites de API y Playwright
+activan la bandera para conservar su cobertura.
 
 - `GET /api/business/shifts`
 - `POST /api/business/shifts`
@@ -60,6 +882,8 @@ Ejemplo de creación:
   "endsAt": "2026-08-25T00:00:00.000Z",
   "payCents": 10000,
   "requiredWorkers": 4,
+  "expectedCommissionBps": 1000,
+  "expectedTaxBps": 1800,
   "screeningQuestions": [
     "¿Tienes disponibilidad durante todo el horario indicado?"
   ],
@@ -67,9 +891,15 @@ Ejemplo de creación:
 }
 ```
 
+`expectedCommissionBps` y `expectedTaxBps` son obligatorios y deben copiarse de `GET /api/business/payment-settings` justo antes de publicar. Los valores del ejemplo son los iniciales (10% y 18%).
+
 Estados: `PUBLISHED`, `ASSIGNED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`. No existe ninguna transición automática por tiempo: un turno cuyo `endsAt` ya pasó conserva su último estado persistido (típicamente `PUBLISHED` o `ASSIGNED`) hasta que la empresa lo cancele; la fecha, no el estado, es lo que determina si sigue operativo.
 
 El estado y `confirmedWorkers` son derivados por el servidor. No se aceptan en los formularios de creación o edición. Un turno con actividad no se puede borrar y, una vez iniciado el check-in, tampoco se puede editar ni cancelar destruyendo su historial.
+
+Cada turno expone `commissionBps`/`taxBps`: la comisión de Chambeaya y el IGV sobre esa comisión, en puntos básicos enteros (1000 = 10,00%), copiados del ajuste global vigente (`PlatformSettings`) al publicarlo. Tampoco se aceptan en el formulario ni cambian con `PATCH`: quedan fijos para siempre, incluso si el admin cambia el ajuste global después o si la empresa edita el turno (incluido su `payCents`). Ambos son obligatorios (`NOT NULL`): la migración `20260926180000_payment_commission` dejó en `0`/`0` (sin comisión) los turnos publicados antes de que existiera la comisión, por decisión del usuario.
+
+`POST /api/business/shifts` exige además `expectedCommissionBps` y `expectedTaxBps` (obligatorios desde `CN-20260926-015`, enteros 0-5000; si falta alguno responde `400 INVALID_INPUT`; `PATCH` no los admite): los bps que el formulario mostró en la vista previa. Si no coinciden con el ajuste vigente, responde `409 { "error": "COMMISSION_CHANGED", "commissionBps": <vigente>, "taxBps": <vigente> }` sin crear el turno. El valor comparado es el mismo que se fija en el turno, así que un turno creado nunca queda con bps distintos de los que se validaron. El panel los toma de `GET /api/business/payment-settings` y, ante el `409`, refresca la vista previa y pide confirmar de nuevo. Si esa lectura falla, el formulario de publicación no muestra ningún porcentaje y deshabilita la publicación hasta que "Reintentar" la recupere; el resto del panel sigue funcionando. `payCents` admite como máximo `10000000` (S/ 100 000); por encima responde `400 INVALID_INPUT`.
 
 `POST` y `PATCH` rechazan con `400` un `endsAt` que ya pasó (además del rechazo existente cuando `endsAt` no es posterior a `startsAt`): un turno no puede publicarse ni guardarse ya vencido. Ambas reglas viajan directo en el campo `error` de la respuesta -no anidadas en `issues[]` como una violación de esquema genérica-, igual que `SHIFT_NOT_EDITABLE`:
 
@@ -302,9 +1132,10 @@ data: [{"id":"...","role":"Mozo de salón",...}]
   - `balanceCents` es la suma de los movimientos en estado `RELEASED`: **monto que la empresa ya confirmó como pagado/procesado**, no saldo que Chambeaya custodie o pueda transferir. Chambeaya no administra ni retiene ese dinero; el pago ocurre directamente entre empresa y trabajador, y este número es un registro de ese reporte.
   - `pendingBalanceCents` es la suma de los movimientos en estado `PENDING`: **monto reportado y aún pendiente de que la empresa lo confirme como procesado**, no dinero en tránsito dentro de Chambeaya.
   - `REVERSED` cubre pagos con incidencia (por ejemplo, un `Payment` cancelado) y no suma a ninguno de los dos totales.
-- `POST /api/workers/payments/:id/confirm`: el trabajador confirma que recibió un pago ya `PROCESSED` por la empresa (`workerConfirmedAt`); sobre un pago en cualquier otro estado responde `409 PAYMENT_NOT_REPORTABLE`. Es una confirmación de recepción entre las partes, no una liberación de fondos retenidos por Chambeaya.
+  - **`canConfirmReceipt` (Alcance D), solo en los movimientos que vienen de un `Payment`:** booleano derivado por la API, `true` solo si `provider === 'manual'`, `status === 'PROCESSED'` y todavía no se confirmó la recepción (`workerConfirmedAt === null`). **Nunca se expone `provider` en crudo** — este booleano es la única forma en que el trabajador sabe que puede confirmar. La prueba de no fuga (`apps/api/tests/marketplace.no-commission-leak.test.ts`) sigue prohibiendo `commissionBps`/`commissionCents`/`taxBps`/`taxCents`/`totalCents`/`provider`/`needsReview` a cualquier profundidad; `canConfirmReceipt` no está en esa lista porque no revela ninguno de esos valores, solo una condición ya evaluada por el servidor.
+- `POST /api/workers/payments/:id/confirm`: el trabajador confirma que recibió un pago ya `PROCESSED` **y `provider: 'manual'`** (Alcance D: la misma condición que deriva `canConfirmReceipt`, para que un pago de pasarela del Alcance E, que se confirma por su propio webhook, nunca sea confirmable por este endpoint); sobre cualquier otro caso responde `409 PAYMENT_NOT_REPORTABLE`. Un pago `legacy` nunca llega aquí de todas formas: no tiene `assignmentId`, así que la búsqueda (filtrada por `assignment: { workerId }`) no lo encuentra. Responde `{ id, description, amountCents, status, reference, dueAt, processedAt, createdAt, workerConfirmedAt, shiftId }`, sin comisión, IGV, total ni `provider`. Es una confirmación de recepción entre las partes, no una liberación de fondos retenidos por Chambeaya.
 - En la práctica todos los movimientos provienen hoy de `Payment` (`PROCESSED → RELEASED`, `CANCELLED → REVERSED`, el resto `PENDING`): `recordWalletMovement` escribe `WalletMovement` directamente pero no está expuesto por ninguna ruta.
-- **No hay consumidor de este endpoint en la app enrutada.** La única pantalla de billetera que tuvo Flutter (`lib/features/marketplace/worker_pages.dart`) no estaba enrutada y se eliminó como código muerto en `CN-20260918-007`; el repositorio de Flutter conserva `walletMovements()`/`confirmPayment()` y el mapeo de estados (`'Liberado'`/`'Pendiente'`/`'Revertido'`) para cuando exista una pantalla de pagos enrutada. Los nombres internos que todavía suenan a custodia -el modelo `WalletMovement`, la ruta `/api/workers/wallet`, los estados `RELEASED`/`REVERSED`- se conservaron a propósito: renombrarlos o fusionar las tablas quedó explícitamente fuera de alcance, y esta sección es la mitigación acordada.
+- **Consumidor Flutter: "Mis pagos" (Alcance D), accesible desde Perfil** (`apps/mobile_flutter/lib/features/marketplace/worker_payments_page.dart`). De solo lectura: muestra el monto del trabajador, la empresa y el turno (la misma cadena `description`, `"${shift.title} · ${company.name}"`), la fecha y el estado -"Pendiente de pago" (`PENDING`), "Pagado" (`PROCESSED` sin confirmar) o "Recepción confirmada" (`receiptConfirmed`)-, derivado siempre de `status`/`receiptConfirmed`, nunca de `provider`. "Confirmar recepción" solo aparece si `canConfirmReceipt`. Antes de este alcance no había ninguna pantalla enrutada que mostrara pagos (la anterior se eliminó como código muerto en `CN-20260918-007`); el repositorio ya traía `walletMovements()`/`confirmPayment()` y el mapeo de estados (`'Liberado'`/`'Pendiente'`/`'Revertido'`) sin ningún consumidor. Los nombres internos que todavía suenan a custodia -el modelo `WalletMovement`, la ruta `/api/workers/wallet`, los estados `RELEASED`/`REVERSED`- se conservaron a propósito: renombrarlos o fusionar las tablas quedó explícitamente fuera de alcance, y esta sección es la mitigación acordada.
 
 ## Trabajadores del directorio
 
@@ -341,8 +1172,9 @@ Estados: `AVAILABLE`, `ON_SHIFT`, `UNAVAILABLE`.
 - `GET /api/workers/me/cv/download`: descarga el PDF del trabajador autenticado (`Content-Disposition: attachment`, `Cache-Control: private, no-store`). Una sesión `BUSINESS` recibe `403`. **Ya no es el único acceso al CV**: la empresa dueña de un turno puede leerlo desde `GET /api/business/shifts/:id/applications/:applicationId/cv` cuando se cumple la regla descrita en "CV de un postulante (lectura de la empresa)".
 - `PUT /api/workers/me/photo`: carga o reemplaza una foto privada de perfil JPG, PNG o WebP de hasta 3 MB. Exige `X-File-Name` y devuelve el perfil actualizado.
 - `GET /api/workers/me/photo`: devuelve la foto solo al trabajador autenticado, con `Cache-Control: private, no-store`.
+- `POST /api/workers/me/profile/highlight`: destaca el perfil propio en la búsqueda de talento (`PROFILE_HIGHLIGHT`, con costo; ver M6).
 - `GET /api/specialties`: catálogo activo de especialidades.
-- `GET /api/business/talent`: perfiles visibles; acepta `specialtyId`, `district`, `query`, `availableOnly`, `cursor` y `limit`. `district` filtra por coincidencia exacta insensible a mayúsculas; `query` (hasta 100 caracteres) busca coincidencia parcial insensible a mayúsculas en `user.name`, `headline` y `district` a la vez, combinable con el resto de filtros. El orden es siempre `id` ascendente y la paginación por cursor se mantiene estable con cualquier combinación de filtros. No existe índice específico para `query`: con el volumen del piloto el costo de un `contains` insensible sin índice es aceptable; si el catálogo de talento crece, evaluar un índice `pg_trgm` (requiere extensión y migración).
+- `GET /api/business/talent`: perfiles visibles; acepta `specialtyId`, `district`, `query`, `availableOnly`, `cursor` y `limit`. `district` filtra por coincidencia exacta insensible a mayúsculas; `query` (hasta 100 caracteres) busca coincidencia parcial insensible a mayúsculas en `user.name`, `headline` y `district` a la vez, combinable con el resto de filtros. El orden es: primero los perfiles destacados vigentes (`isHighlighted`, `PROFILE_HIGHLIGHT` de M6) y luego el resto, por `id` ascendente en cada tramo; el `nextCursor` es opaco (tramo, último `id` e instante de la primera página) y la paginación se mantiene estable, sin repetir ni saltar filas, con cualquier combinación de filtros aunque un destacado venza a mitad de la paginación (ver «Destacar el perfil»). No existe índice específico para `query`: con el volumen del piloto el costo de un `contains` insensible sin índice es aceptable; si el catálogo de talento crece, evaluar un índice `pg_trgm` (requiere extensión y migración).
 - `POST /api/assignments/:id/reviews`: crea una reseña con `rating` de 1 a 5 y `comment` opcional.
 
 La reseña requiere una asignación completada. Solo pueden crearla el trabajador asignado y la empresa propietaria; cada autor puede reseñar una vez esa asignación. La respuesta de búsqueda expone solo agregados `reputation.averageRating` y `reputation.reviewCount`; un perfil sin reseñas devuelve `null` y `0`.
@@ -358,6 +1190,10 @@ Persisten el contacto inicial entre una empresa y un perfil del directorio de ta
 - `POST /api/workers/me/talent-invitations/:id/decline` (sesión `WORKER`): rechaza una invitación propia `PENDING` y no vencida.
 
 Estados: `PENDING`, `ACCEPTED`, `DECLINED`, `EXPIRED`, `CANCELLED`. Esta entrega implementa las transiciones `PENDING → ACCEPTED` y `PENDING → DECLINED` (ambas solo por el trabajador destinatario) y la transición automática `PENDING → EXPIRED`, evaluada siempre en el servidor (nunca a partir de un `expiresAt` calculado en el cliente): al listar o al intentar responder una invitación vencida, el servidor la transiciona primero y luego aplica la regla, de forma que una invitación vencida nunca puede aceptarse. `CANCELLED` queda reservada en el modelo para una cancelación futura iniciada por la empresa; no hay todavía ninguna ruta que la produzca.
+
+**Costo (M4):** crear una invitación cobra `TALENT_INVITE` (`409 INSUFFICIENT_CURRENCY` sin efectos si no alcanza) y se devuelve automáticamente si el trabajador no responde en 72 h.
+
+**Premio (M6):** responder (aceptar o rechazar) una invitación `PENDING` y no vencida otorga al trabajador `INVITATION_RESPONDED`, una vez por invitación, en la misma transacción que la respuesta; una invitación anulada, vencida o ya respondida no paga.
 
 **Duplicados:** no puede existir más de una invitación *activa* (`PENDING` o `ACCEPTED`) para el mismo par empresa/perfil de talento (y turno, si se indicó uno). El intento duplicado responde `409 INVITATION_ALREADY_ACTIVE`, tanto si lo detecta la comprobación previa del servidor como si lo detecta el índice único parcial de la base de datos ante una carrera concurrente; nunca se crea un segundo registro. Tras `DECLINED`, `EXPIRED` o `CANCELLED`, una nueva invitación para el mismo par vuelve a ser posible.
 
@@ -375,11 +1211,28 @@ Errores propios de estas rutas: `403 BUSINESS_ACCOUNT_REQUIRED` / `403 WORKER_AC
 - `POST /api/auth/google`: recibe `{ "idToken": "…" }` y verifica la identidad. Para una cuenta nueva responde `202` con un `profileSetupToken` temporal; el cliente solicita entonces DNI y una contraseña nueva de Chambeaya, y usa `POST /api/auth/google/complete` con `{ "profileSetupToken", "dni", "password" }`. Así el ID token de Google se valida una sola vez. La contraseña de Google nunca se recibe ni se almacena.
 - `POST /api/auth/password`: requiere sesión Bearer y permite que una cuenta Google creada antes de este paso defina una vez su contraseña exclusiva de Chambeaya. Recibe `{ "password": "…" }`. La sesión expone `requiresPasswordSetup: true` hasta que lo haga; Flutter bloquea el acceso al panel hasta completar ese paso.
 
-Las cuentas por correo existentes no se fusionan automáticamente con Google. Sin credenciales configuradas, el proveedor responde como no disponible. El cambio y recuperación de contraseña requerirán una sesión autenticada o un mecanismo de recuperación de correo verificado antes de abrirse al público.
+Las cuentas por correo existentes no se fusionan automáticamente con Google. Sin credenciales configuradas, el proveedor responde como no disponible. La recuperación de contraseña por correo verificado sigue sin implementarse.
+
+## Cambiar contraseña
+
+`POST /api/auth/password/change`: requiere sesión Bearer (cualquier rol: `WORKER`, `BUSINESS` o `ADMIN`) y recibe `{ "currentPassword": "…", "newPassword": "…" }`. A diferencia de `POST /api/auth/password` (que solo fija la **primera** contraseña de una cuenta creada con Google, sin pedir ninguna actual), esta ruta cambia la contraseña de una cuenta que **ya tiene** una configurada, verificando la actual con la misma comparación de tiempo constante que usa el login.
+
+- Éxito (`200`): regenera `salt` y `passwordHash`, y en la misma transacción borra todas las demás `AuthSession` del usuario (`tokenHash != <sesión que hizo la petición>`); la sesión que llamó al endpoint sigue siendo válida y el cliente no necesita volver a autenticarse. La respuesta es la sesión pública vigente (mismo formato que `POST /api/auth/login`).
+- `401 INVALID_SESSION`: no hay sesión Bearer o ya no es válida (igual criterio que el resto de rutas autenticadas).
+- `401 INVALID_CURRENT_PASSWORD`: `currentPassword` no coincide. No se distingue de una cuenta inexistente ni se revela ningún otro dato.
+- `400 WEAK_PASSWORD`: `newPassword` no cumple la regla mínima (`isValidPassword`: al menos 8 caracteres, una mayúscula y un número).
+- `400 PASSWORD_UNCHANGED`: `newPassword` es igual a `currentPassword`.
+- `409 GOOGLE_ONLY_ACCOUNT`: la cuenta todavía no tiene una contraseña local configurada (`localPasswordConfigured: false`); el cliente debe usar `POST /api/auth/password` (primera contraseña) en su lugar (ver nota abajo).
+- `409 PASSWORD_CHANGED_CONCURRENTLY`: otra petición cambió la contraseña de esta cuenta entre la verificación de `currentPassword` y la escritura. La actualización está condicionada al `passwordHash` leído (`updateMany` dentro de la misma transacción que borra las sesiones), así que solo gana una y la otra no toca ni la contraseña ni las sesiones. Hay que volver a intentarlo con la contraseña vigente.
+- `500 INTERNAL_ERROR`: cualquier otro error (por ejemplo, la base de datos caída). El cuerpo es solo `{ "error": "INTERNAL_ERROR" }` y el detalle queda en el registro del servidor.
+
+Nota: las cuentas Google **nuevas** nunca quedan con `localPasswordConfigured: false`, porque `completeGoogleProfile` exige DNI y contraseña antes de crear la fila `User`. Sí pueden existir cuentas en ese estado: la migración `20260914190000_google_local_password` marcó con `false` las cuentas Google creadas antes de ese paso, y esas cuentas inician sesión con Google (`startGoogleLogin` devuelve la sesión directamente) con `requiresPasswordSetup: true` hasta fijar su primera contraseña. Flutter no muestra el panel (ni la tarjeta "Seguridad") mientras dure ese estado; si alguien llama a esta ruta directamente con esa sesión, la API responde `409 GOOGLE_ONLY_ACCOUNT`.
+
+Riesgo residual conocido: `login()` verifica el hash y crea su `AuthSession` fuera de la transacción del cambio. Un login con la contraseña **anterior** que lea la fila antes del commit del cambio, y que inserte su sesión después del `deleteMany`, conserva esa sesión. Para aprovecharlo, alguien que ya conoce la contraseña anterior tendría que acertar con su login a una ventana de milisegundos que no puede observar, y el limitador por IP frena los intentos. La solución acotada, si hace falta cerrarlo, es crear la sesión del login dentro de una transacción con `SELECT … FOR UPDATE` sobre la fila del usuario que confirme que el `passwordHash` sigue siendo el verificado (ver `CN-20260926-010` en `docs/PROGRESO.md`). El modo `--reset` del CLI de superadmin tiene la misma ventana.
 
 ### Límite de intentos
 
-`POST /api/auth/login`, `/register`, `/google`, `/google/complete` y `/password` comparten un limitador en memoria por IP (`AUTH_RATE_LIMIT_WINDOW_MS`, por defecto 900000 ms; `AUTH_RATE_LIMIT_MAX`, por defecto 20 intentos). Al superar el máximo dentro de la ventana, la API responde `429 AUTH_RATE_LIMITED` con únicamente `{ "error": "AUTH_RATE_LIMITED" }`: nunca indica si el correo existe, cuál fue el error de validación ni ningún otro dato de la cuenta. Otras rutas (`GET /api/auth/session`, `DELETE /api/auth/session`, `GET /api/auth/providers`, y el resto de la API) no están sujetas a este límite.
+`POST /api/auth/login`, `/register`, `/google`, `/google/complete`, `/password` y `/password/change` comparten un limitador en memoria por IP (`AUTH_RATE_LIMIT_WINDOW_MS`, por defecto 900000 ms; `AUTH_RATE_LIMIT_MAX`, por defecto 20 intentos). Al superar el máximo dentro de la ventana, la API responde `429 AUTH_RATE_LIMITED` con únicamente `{ "error": "AUTH_RATE_LIMITED" }`: nunca indica si el correo existe, cuál fue el error de validación ni ningún otro dato de la cuenta. Otras rutas (`GET /api/auth/session`, `DELETE /api/auth/session`, `GET /api/auth/providers`, y el resto de la API) no están sujetas a este límite.
 
 El almacén del limitador es en memoria y por instancia: no se comparte entre réplicas ni sobrevive a un reinicio del proceso. Con varias instancias de la API detrás de un balanceador, el límite efectivo por IP se multiplica por el número de instancias.
 
@@ -401,26 +1254,132 @@ Una conversación pertenece a un trabajador del directorio y puede asociarse a u
 ## Pagos y movimientos
 
 - `GET /api/business/payments`
-- `POST /api/business/payments`
 - `GET /api/business/payments/:id`
-- `PATCH /api/business/payments/:id`
-- `DELETE /api/business/payments/:id`
+- `POST /api/business/payments/:id/mark-paid`
 
-Los montos se reciben en céntimos mediante `amountCents` para evitar errores de punto flotante.
+**Alcance D (registro confiable y modo manual): el CRUD manual (`POST`/`PATCH`/`DELETE /api/business/payments[/:id]`) se retiró por completo.** Permitía a la empresa inventar pagos, alterar montos y saltarse la comisión de Chambeaya; las tres rutas ya no están registradas (404 genérico de Express, no un `sendError` de esta app). Un `Payment` solo nace automáticamente al completarse una asignación (ver más abajo); el único escritor que le queda a la empresa es `mark-paid`.
 
-Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`.
+Estados: `PENDING`, `SCHEDULED`, `PROCESSED`, `CANCELLED`. `SCHEDULED` es el checkout de pasarela en curso (Alcance E); con `PAYMENT_PROVIDER=manual` (producción hoy, sin proveedor contratado) ningún pago llega a ese estado, porque `checkout` responde `409 PROVIDER_MANUAL` para ese modo.
+
+### `POST /api/business/payments/:id/mark-paid`
+
+Único cambio de estado que le queda a la empresa. Transiciona `PENDING` → `PROCESSED` (con `processedAt`) sobre un pago **de esa empresa** cuyo `provider` sea `'manual'` (nacido de `checkOut`/`resolveAssignment`) o `'legacy'` (creado con el CRUD retirado, o backfill de un pago sin `assignmentId` anterior al Alcance C). También permite resolver un pago `PENDING` o `SCHEDULED` cuyo proveedor ya no sea el activo, por ejemplo un `simulated` al volver a modo `manual`; si tenía un checkout `CREATED`, lo deja `EXPIRED` con `failureReason: 'PROVIDER_DEACTIVATED'` dentro de la misma transacción. Es su salida controlada después de un cambio de configuración. Un pago del proveedor de pasarela que sigue activo solo se confirma mediante su webhook. Nunca toca `amountCents`, `commissionCents`, `taxCents` ni `totalCents`.
+
+- Si el pago tiene `shiftId`, registra un `ShiftEvent` `PAYMENT_REPORTED` (mismo evento que dejaba el CRUD retirado al marcar `PROCESSED`).
+- Devuelve el `Payment` actualizado (mismos campos que `GET /api/business/payments/:id`).
+- **404 `PAYMENT_NOT_FOUND`**: el pago no existe o es de otra empresa.
+- **409 `PAYMENT_NOT_PAYABLE`**: el pago existe pero ya no es marcable — ya está `PROCESSED`/`CANCELLED`, perdió una carrera contra otra llamada concurrente o su `provider` es el proveedor de pasarela **activo** (se confirma solo por su propio webhook, nunca por este endpoint).
+- Atómico: un `updateMany` condicionado al estado y al proveedor, dentro de una transacción. Dos llamadas concurrentes sobre el mismo pago dejan un solo `PROCESSED` y un solo `ShiftEvent`; la que pierde la carrera responde `409`. Al resolver un `SCHEDULED` de proveedor inactivo, el mismo bloqueo impide que un webhook tardío procese el intento que acabó de expirar.
+
+### Comisión, IGV y total (Alcance C del plan de pagos)
+
+`amountCents` sigue siendo exactamente el monto que recibe el trabajador (el 100% de lo publicado; nunca se le descuenta nada). Cada `Payment` expone además:
+
+- `commissionBps` / `commissionCents`: la comisión de Chambeaya, en puntos básicos y en céntimos.
+- `taxBps` / `taxCents`: el IGV **sobre la comisión** (no sobre `amountCents`), en puntos básicos y en céntimos.
+- `totalCents`: `amountCents + commissionCents + taxCents` — lo que paga la empresa. La comisión y el IGV van **encima** del pago al trabajador, nunca descontados de él.
+- `provider`: el proveedor de pago **activo** (`PAYMENT_PROVIDER`) en el instante exacto en que el pago nació (`checkOut`/`resolveAssignment`; ver Alcance E abajo), o `'legacy'` para uno creado con el CRUD retirado o para un pago sin `assignmentId` anterior a la migración de comisión (siempre con comisión e IGV en 0). Fijo desde ese momento: cambiar `PAYMENT_PROVIDER` después nunca migra los pagos ya creados.
+- `needsReview`: Alcance E. `true` cuando un webhook llega con un monto o moneda que no coincide con el intento, o cuando se recibe una aprobación sobre un pago que ya estaba `PROCESSED` (doble cobro). Un humano debe revisarlo; ningún endpoint lo limpia todavía (fuera de alcance).
+
+Redondeo: enteros, "la mitad hacia arriba" — `commissionCents = floor((amountCents * commissionBps + 5000) / 10000)`, y el mismo cálculo para `taxCents` sobre `commissionCents`. Ejemplo con la comisión inicial (10% + 18% de IGV): un turno de **S/100** por persona da `amountCents: 10000`, `commissionCents: 1000` (S/10), `taxCents: 180` (S/1.80) y `totalCents: 11180` (**S/111.80** que paga la empresa por persona). La implementación de referencia es `apps/api/src/modules/payments/payment-amounts.ts#buildPaymentAmounts`.
+
+Los dos únicos puntos donde nace un `Payment` automático — el check-out del trabajador (`POST /api/shifts/:id/check-out`) y el cierre manual de una asignación `NO_SHOW`/`ABANDONED` (`POST /api/business/shifts/:id/assignments/:assignmentId/resolve` con `outcome: 'COMPLETED'`) — usan `Shift.commissionBps`/`taxBps` (fijados al publicar el turno, ver "Turnos"). Nunca leen el ajuste global: un turno anterior a la migración tiene `0`/`0` y genera pagos sin comisión. Ninguna respuesta de las rutas del trabajador (`/api/workers/*`, `/api/shifts*`, incluido el SSE `/api/shifts/events`) expone `commissionBps`, `commissionCents`, `taxBps`, `taxCents`, `totalCents`, `provider` ni `needsReview`: el trabajador solo ve su propio `amountCents`. La prueba de integración `payment-commission.integration.test.ts` recorre esas respuestas buscando esas claves.
+
+### Asignaciones cerradas sin pago
+
+**Definición (corrección de MEDIO-1 de `CN-20260926-020`):** una asignación "cerrada sin pago" es una que llegó a `NO_SHOW` o `ABANDONED` -el trabajador se presentó (hizo check-in) o no se presentó- y que una decisión de la empresa cerró sin generar `Payment`. Nunca se detecta por texto libre: la versión anterior buscaba un prefijo fijo en `ShiftEvent.detail`, que se podía falsear (un motivo de `cancelShift` que empezara con ese mismo texto sumaba al conteo sin haber cerrado nada) y se podía ocultar (una `NO_SHOW`/`ABANDONED` nunca resuelta, o arrastrada por `cancelShift`, no contaba). Ahora es una señal estructurada en `ShiftAssignment`:
+
+- `closedWithoutPayment Boolean`, `closedWithoutPaymentAt DateTime?`, `closedWithoutPaymentById String?` (migración `20260927005242_assignment_closed_without_payment_signal`).
+- Se escriben en los dos únicos caminos que producen este cierre:
+  - `POST /api/business/shifts/:id/assignments/:assignmentId/resolve` con `outcome: 'CANCELLED'` sobre una asignación `NO_SHOW`/`ABANDONED`.
+  - `POST /api/business/shifts/:id/cancel` (`cancelShift`), cuando arrastra una asignación `NO_SHOW` sin resolver a `CANCELLED` junto con el resto del turno.
+- **Nunca** se escriben sobre una asignación `ASSIGNED` simple (nunca llegó a "presentarse o no": cancelar un turno futuro no es evasión de la comisión) ni sobre una ya `COMPLETED`/`CANCELLED`. `cancelShift` nunca puede arrastrar una asignación con `checkedInAt` no nulo -lo bloquea antes, con `409 SHIFT_NOT_CANCELLABLE`-, así que ese camino no existe hoy; si algún día se permitiera, debería marcar la señal igual.
+- Nunca se vuelve a `false`: una vez cerrada sin pago, queda así para siempre.
+- **`cancelShift` resuelve el ciclo de vida antes de decidir** (corrección de MEDIO-1 nuevo de `CN-20260926-022`): antes, una asignación que ya venció su ventana de check-in pero que nadie había vuelto a tocar seguía `ASSIGNED` en la base (`NO_SHOW`/`ABANDONED` son perezosos), así que `cancelShift` la cancelaba por la vía de `ASSIGNED` -sin la señal-. Ahora llama a la misma resolución de ciclo de vida que ya usan `resolveAssignment` y la lectura de postulaciones (`resolveShiftAssignmentsLifecycle`, en su propia transacción, antes de la transacción de `cancelShift`) para que una `NO_SHOW` vencida se trate como `NO_SHOW` y quede marcada.
+- **Revisado, no aplica:** la cancelación del trabajador (`marketplace.service.ts#cancelAssignment`) nunca marca la señal, a propósito (es una decisión del trabajador, no de la empresa, y nunca genera ni evita un `Payment`); la edición del turno (`updateShift`) y el estado "Rescate" (`rescueActive`) no tocan ninguna `ShiftAssignment`; `mark-paid` solo toca `Payment`. Ninguno de los tres puede esconder dinero por esta vía.
+- **Sin backfill histórico:** las filas creadas antes de la migración quedan con `closedWithoutPayment: false` y los otros dos campos en `NULL` — no hay forma de derivarlo de manera confiable sin depender del mismo texto libre que se está reemplazando.
+
+`GET /api/admin/commissions` filtra `closedWithoutPayment` por período usando `closedWithoutPaymentAt` (nunca `ShiftEvent.createdAt` ni ningún `detail`), y expone además `pendingResolution` (`NO_SHOW`/`ABANDONED` todavía sin resolver, sin filtro de período) para que dejar una asignación sin resolver no la esconda del reporte.
+
+### Capa de adaptadores, proveedor simulado y webhook (Alcance E del plan de pagos)
+
+Sin proveedor real contratado todavía (Mercado Pago, Culqi, Niubiz o Izipay, sin decidir). Este alcance construye la capa de adaptadores (`apps/api/src/modules/payments/provider.ts`) y un **proveedor simulado** que recorre el flujo completo checkout → proveedor → webhook firmado → pagado, **sin mover dinero real**. El adaptador activo se elige con `PAYMENT_PROVIDER` (`manual` por defecto; ver [Despliegue con Docker](../guides/deployment.md)), siguiendo el mismo patrón de selección por variable de entorno que `google_identity.ts` y `private_document_storage.ts`.
+
+**Supuesto de diseño para un proveedor real (decisión del usuario, todavía sin implementar):** pago dividido (split). El proveedor cobra a la empresa, paga al trabajador y entrega la comisión de Chambeaya en la misma operación; Chambeaya nunca custodia la paga del trabajador. El destino de pago del trabajador y la consulta activa de estado al proveedor quedan fuera de este alcance, exigidos explícitamente al elegir proveedor.
+
+Nuevas tablas: `PaymentAttempt` (`id`, `paymentId`, `provider`, `checkoutId` único, `status` `CREATED`/`APPROVED`/`REJECTED`/`EXPIRED`, `totalCents`, `currency`, `redirectUrl`, `expiresAt`, `failureReason`) y `PaymentProviderEvent` (`id`, `provider`, `eventId`, `attemptId?`, `payload`, `receivedAt`, `@@unique([provider, eventId])`: la defensa contra duplicados).
+
+#### `POST /api/business/payments/:id/checkout` (sesión de empresa)
+
+Solo aplica a un pago **propio**, `PENDING`, cuyo `provider` es el proveedor activo.
+
+- Con el proveedor activo `manual`, o si `payment.provider` no coincide con el proveedor activo: `409 { "error": "PROVIDER_MANUAL" }`.
+- Con el pago en cualquier otro estado que no sea `PENDING`/`SCHEDULED` (con un intento vigente): `409 { "error": "PAYMENT_NOT_PAYABLE" }`.
+- Éxito: `200 { attemptId, redirectUrl, expiresAt }`.
+- **Atómico:** en una transacción, `updateMany` `PENDING`→`SCHEDULED` y creación del `PaymentAttempt` (`expiresAt = ahora + PAYMENT_CHECKOUT_TTL_MINUTES`, 30 por defecto). La llamada a `provider.createCheckout` va **fuera** de esa transacción, con `idempotencyKey = attempt.id`. Si el proveedor falla, el intento queda `REJECTED` (`failureReason: 'PROVIDER_UNAVAILABLE'`), el pago vuelve a `PENDING` y responde `502 { "error": "PROVIDER_UNAVAILABLE" }`.
+- **Idempotente:** un doble clic (o varias llamadas concurrentes) sobre el mismo pago `PENDING` deja un único `PaymentAttempt` vigente; todas las llamadas devuelven el mismo `{attemptId, redirectUrl, expiresAt}`. Las llamadas que pierden la carrera del `updateMany` esperan (sondeo acotado, sin cron ni lock) a que la ganadora termine de escribir `redirectUrl`, en vez de responder `409` por haber llegado unos milisegundos antes.
+- **Expiración perezosa:** si `expiresAt` de un intento vigente ya pasó, el pago vuelve a `PENDING` (y el intento a `EXPIRED`) al leer (`GET /business/payments[/:id]`) o al reintentar el checkout. No hay ningún cron.
+
+#### `POST /api/payments/webhooks/:provider`
+
+Sin autenticación (el proveedor no tiene ningún token de Chambeaya); montado en `app.ts` **antes** de `express.json()` global, con `express.raw` **solo** sobre esta ruta, para conservar el `rawBody` exacto que la firma necesita. Con rate limit propio (`PAYMENT_WEBHOOK_RATE_LIMIT_WINDOW_MS`/`MAX`, 60 s / 60 solicitudes por defecto).
+
+- `404` si `:provider` no es el proveedor activo.
+- **Firma:** `HMAC-SHA256` sobre `${timestamp}.${rawBody}` con `PAYMENT_WEBHOOK_SECRET`, en la cabecera `x-payment-signature: t=<epoch_ms>,v1=<hex>`. Comparación con `timingSafeEqual`, tolerancia de 5 minutos. Firma ausente, mal formada, vencida o que no coincide con el `rawBody` (alterado en tránsito): `401 { "error": "INVALID_SIGNATURE" }`. Es el esquema propio de los adaptadores que Chambeaya controla (`simulated`); un proveedor real tendrá el suyo, documentado por ese proveedor.
+- **Procesamiento, en una sola transacción** (`payments.service.ts#processProviderEvent`, la MISMA función que usa el checkout simulado):
+  1. Inserta `PaymentProviderEvent`. Un duplicado (mismo `provider` + `eventId`, `P2002`) responde `200` sin ningún efecto adicional.
+  2. Busca el `PaymentAttempt` por `checkoutId`. Si no existe, el evento igual queda registrado (auditoría) y responde `404 { "error": "ATTEMPT_NOT_FOUND" }`.
+  3. Si `amountCents`/`currency` no coinciden con `attempt.totalCents`/`attempt.currency`: `422 { "error": "AMOUNT_MISMATCH" }`, marca `Payment.needsReview = true` y **no** transiciona nada más (el pago nunca pasa a `PROCESSED` por esta vía).
+  4. `APPROVED` usa una transición condicional atómica `PENDING`/`SCHEDULED` → `PROCESSED` (incluida una aprobación **tardía** de un intento ya `EXPIRED`, mientras el pago siga sin resolver): solo la llamada que cambia la fila deja el intento `APPROVED`, escribe `processedAt` y crea un `ShiftEvent` `PAYMENT_REPORTED` con actor `SYSTEM` si el pago tiene `shiftId`. Las otras aprobaciones concurrentes no duplican ese evento.
+  5. `APPROVED` que no logra esa transición porque el pago ya está `PROCESSED` (**doble cobro**) o `CANCELLED`: marca `needsReview = true`, sin ningún otro efecto. El reembolso queda fuera de alcance (trabajo futuro).
+  6. `REJECTED` mueve el pago a `PENDING` solo si sigue `PENDING`/`SCHEDULED` y no existe otro intento `CREATED` más reciente; en ese caso deja el intento `REJECTED` con `failureReason`. Si una aprobación ganó antes o durante la carrera, o si ya hay otro checkout vigente, no toca el intento terminal ni revierte el pago.
+- Respuestas: `200` (procesado o duplicado), `401`, `404`, `422`.
+
+#### `GET /api/payments/simulated/:checkoutId`
+
+Solo con proveedor activo `simulated` y sesión BUSINESS. Devuelve únicamente
+el resumen del checkout de la empresa dueña: `checkoutId`, estado y vencimiento
+del intento, más `payment { id, reference, description, totalCents, currency,
+status }`. Una empresa distinta, un identificador inexistente o un proveedor
+que no sea `simulated` reciben `404`; la respuesta no revela la existencia de
+un checkout ajeno. Un fallo interno se informa como `500`, para que el panel no
+lo confunda con un checkout inexistente. La página `/pago-simulado/:checkoutId`
+usa esta lectura antes de ofrecer una decisión.
+
+#### `POST /api/payments/simulated/:checkoutId/approve` y `.../reject`
+
+Solo con proveedor activo `simulated` (`404` en cualquier otro modo, incluido `manual`). Exige la sesión BUSINESS **dueña** del pago (`404` para cualquier otra empresa, sin distinguir de "no existe"). Construye y firma un evento con el **mismo formato** que recibiría el webhook (`simulated.provider.ts#buildSimulatedEvent`), lo pasa por `provider.verifyWebhook` (la misma verificación de firma, nunca se salta) y lo procesa con la **misma** `processProviderEvent` que el webhook — sin ningún atajo. `redirectUrl` del checkout simulado apunta a `${PANEL_PUBLIC_URL}/pago-simulado/<checkoutId>` (la página del Alcance F).
+
+La página muestra el total congelado, permite aprobar o rechazar el intento y
+vuelve a leer el resumen persistido después de la decisión. No contiene un
+atajo de cliente: cada botón llama a uno de estos endpoints y, por tanto,
+ejercita la firma y la misma transición que el webhook. Para el simulador, el
+`eventId` es determinista por checkout y resultado: repetir el mismo botón en
+otra pestaña o tras un reintento es un duplicado inocuo. Un webhook externo con
+otro identificador sigue aplicando las defensas de doble cobro descritas arriba.
+
+#### Guardas de arranque (`server.ts`, antes de escuchar en el puerto)
+
+La API se niega a arrancar si:
+
+- `PAYMENT_PROVIDER` tiene un valor desconocido (hoy: distinto de `manual`/`simulated`).
+- El proveedor activo no es `manual` y `PAYMENT_WEBHOOK_SECRET` tiene menos de 32 caracteres.
+- `NODE_ENV=production`, el proveedor activo es `simulated` y no está `PAYMENT_SIMULATION_ALLOWED=true` explícito.
 
 ## Respuestas de error
 
 - `400 INVALID_INPUT`: payload o regla de negocio inválida.
 - `401 INVALID_SESSION`: token ausente, inválido o vencido.
 - `409 CONCURRENT_UPDATE`: (rutas del trabajador) un conflicto de concurrencia agotó los reintentos y la operación no se aplicó; repetirla es seguro.
+- `503 SERIALIZATION_RETRY_EXHAUSTED`: (moneda, puestos, talento y administración) los reintentos de serialización se agotaron; no se aplicó nada, repetir es seguro y se envía `Retry-After`.
+- `409 DOCUMENT_CHANGED`: el documento del trabajador cambió desde que el admin lo revisó (verificación de documentos).
 - `500 INTERNAL_ERROR`: error inesperado del servidor (también en las rutas del trabajador desde `CN-20260923-012`; antes respondían `401`).
 - `403 BUSINESS_ACCOUNT_REQUIRED`: la sesión no corresponde a una empresa.
 - `403 ADMIN_ACCOUNT_REQUIRED`: la sesión no corresponde a un administrador (rutas `/api/admin`).
 - `403 MESSAGE_NOT_OWNED`: intento de modificar un mensaje del trabajador.
 - `404 *_NOT_FOUND`: el recurso no existe o pertenece a otra empresa.
 - `409 DUPLICATE_RECORD`: correo, referencia u otro campo único duplicado.
+- M6: `400 INVALID_REFERRAL_CODE` (registro con un código de referido inexistente o mal formado; no crea la cuenta), `404 DOCUMENT_NOT_FOUND` (verificar un documento que el trabajador no tiene), `409 PROFILE_NOT_VISIBLE` (destacar un perfil oculto), `404 RESOURCE_NO_LONGER_EXISTS` (una acción de puestos fijos llegó cuando la cuenta o el puesto ya se había borrado).
 - `429 AUTH_RATE_LIMITED`: se superó el límite de intentos en una ruta de autenticación (ver "Límite de intentos" arriba).
 
 ## CORS

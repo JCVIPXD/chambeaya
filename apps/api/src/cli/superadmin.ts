@@ -135,11 +135,23 @@ function isUniqueConstraintOn(error: unknown, field: string): boolean {
   return Array.isArray(target) ? target.includes(field) : typeof target === 'string' && target.includes(field);
 }
 
+/** Acepta tanto el cliente normal como el cliente de una transacción interactiva (`prisma.$transaction(async (tx) => ...)`). */
+type Db = PrismaClient | Prisma.TransactionClient;
+
 /** ¿Existe al menos un usuario con rol `ADMIN`? Usado por `create --if-none` y por el subcomando `status`. */
-export async function anyAdminExists(prisma: PrismaClient): Promise<boolean> {
+export async function anyAdminExists(prisma: Db): Promise<boolean> {
   const admin = await prisma.user.findFirst({ where: { role: 'ADMIN' }, select: { id: true } });
   return admin !== null;
 }
+
+/**
+ * Clave arbitraria y estable para `pg_advisory_xact_lock`: identifica el
+ * bloqueo de "creación de superadmin" y no colisiona con ningún otro
+ * bloqueo advisory de la aplicación (no se usa `pg_advisory_xact_lock` en
+ * ningún otro módulo). `hashtext` devuelve un `int4`; Postgres lo convierte
+ * implícitamente a `bigint` para resolver el overload de un solo argumento.
+ */
+const SUPERADMIN_CREATE_LOCK_KEY = 'chambeaya:superadmin:create';
 
 export interface CreateSuperadminOptions {
   /** Solo crea si todavía no existe ningún `ADMIN`; si ya existe, no toca nada (usado por el instalador). */
@@ -168,23 +180,9 @@ function tryNormalizeEmail(rawEmail: string): { email: string } | { errorResult:
   }
 }
 
-export async function createSuperadmin(
-  prisma: PrismaClient,
-  rawEmail: string,
-  options: CreateSuperadminOptions = {},
-): Promise<SuperadminResult> {
-  const normalized = tryNormalizeEmail(rawEmail);
-  if ('errorResult' in normalized) return normalized.errorResult;
-  const { email } = normalized;
-
-  if (options.ifNone && (await anyAdminExists(prisma))) {
-    return {
-      code: SUPERADMIN_EXIT_CODES.ALREADY_EXISTS,
-      message: 'Ya existe al menos un superadmin (rol ADMIN); no se creó ninguno nuevo (--if-none).',
-    };
-  }
-
-  const existing = await prisma.user.findUnique({ where: { email }, select: { role: true } });
+/** Cuerpo real de la creación (validación de email ya resuelta): busca el correo, genera contraseña e inserta con reintento de identificador. */
+async function insertSuperadmin(db: Db, email: string): Promise<SuperadminResult> {
+  const existing = await db.user.findUnique({ where: { email }, select: { role: true } });
   if (existing) {
     return {
       code: SUPERADMIN_EXIT_CODES.VALIDATION_ERROR,
@@ -200,7 +198,7 @@ export async function createSuperadmin(
   for (let attempt = 0; attempt < MAX_IDENTIFIER_ATTEMPTS; attempt += 1) {
     const identifier = generateAdminIdentifier();
     try {
-      const user = await prisma.user.create({
+      const user = await db.user.create({
         data: {
           email,
           name: 'Superadmin Chambeaya',
@@ -233,6 +231,43 @@ export async function createSuperadmin(
     }
   }
   throw new Error(`No se pudo generar un identificador único tras ${MAX_IDENTIFIER_ATTEMPTS} intentos: ${String(lastError)}`);
+}
+
+export async function createSuperadmin(
+  prisma: PrismaClient,
+  rawEmail: string,
+  options: CreateSuperadminOptions = {},
+): Promise<SuperadminResult> {
+  const normalized = tryNormalizeEmail(rawEmail);
+  if ('errorResult' in normalized) return normalized.errorResult;
+  const { email } = normalized;
+
+  if (options.ifNone) {
+    // BAJO-1 de CN-20260925-009: sin bloqueo, varias ejecuciones concurrentes
+    // de `create --if-none` (el instalador puede reintentarse, o un operador
+    // puede correr `crear-superadmin.sh` dos veces a la vez) leen todas
+    // `anyAdminExists() === false` antes de que la primera confirme su
+    // `INSERT`, y cada una crea su propio ADMIN (visto en producción: 4
+    // ejecuciones simultáneas crearon 4 ADMIN). `pg_advisory_xact_lock` se
+    // libera automáticamente al terminar la transacción (COMMIT o ROLLBACK,
+    // incluido un error), así que cualquier otra ejecución concurrente queda
+    // esperando en esa misma línea hasta que la primera termine, y entonces
+    // sí ve el ADMIN ya creado. El chequeo y la creación quedan así en la
+    // MISMA transacción que sostiene el bloqueo: no hay ventana entre leer y
+    // escribir.
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${SUPERADMIN_CREATE_LOCK_KEY}))`;
+      if (await anyAdminExists(tx)) {
+        return {
+          code: SUPERADMIN_EXIT_CODES.ALREADY_EXISTS,
+          message: 'Ya existe al menos un superadmin (rol ADMIN); no se creó ninguno nuevo (--if-none).',
+        };
+      }
+      return insertSuperadmin(tx, email);
+    });
+  }
+
+  return insertSuperadmin(prisma, email);
 }
 
 export async function resetSuperadminPassword(prisma: PrismaClient, rawEmail: string): Promise<SuperadminResult> {
@@ -337,7 +372,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function printResult(result: SuperadminResult) {
-  console.log(result.message);
+  // BAJO-3 de CN-20260925-009: un resultado de validación inválida se
+  // imprimía aquí por stdout y de nuevo por stderr en `runSuperadminCli`.
+  // Se decide el flujo una sola vez, según el código: éxito y
+  // "ya existe" (no son errores) van por stdout; cualquier otro código va
+  // por stderr, y `runSuperadminCli` ya no vuelve a imprimirlo.
+  const isError =
+    result.code !== SUPERADMIN_EXIT_CODES.OK && result.code !== SUPERADMIN_EXIT_CODES.ALREADY_EXISTS;
+  (isError ? console.error : console.log)(result.message);
   if (result.code === SUPERADMIN_EXIT_CODES.OK && result.password) {
     console.log('');
     console.log(`  Correo:      ${result.email}`);
@@ -372,12 +414,6 @@ export async function runSuperadminCli(argv: string[], prisma: PrismaClient): Pr
       : await resetSuperadminPassword(prisma, parsed.email!);
 
     printResult(result);
-    // `ALREADY_EXISTS` no es un error (es el resultado esperado de
-    // `--if-none` cuando ya hay un superadmin): solo se duplica a stderr el
-    // mensaje de los casos que sí lo son.
-    if (result.code === SUPERADMIN_EXIT_CODES.VALIDATION_ERROR) {
-      console.error(result.message);
-    }
     return result.code;
   } catch (error) {
     console.error('Error de base de datos al ejecutar el comando de superadmin:');

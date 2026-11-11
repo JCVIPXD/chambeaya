@@ -183,6 +183,7 @@ class TalentProfile {
     required this.experiences,
     required this.certifications,
     required this.languages,
+    this.highlightedUntil,
   });
 
   final String id;
@@ -208,6 +209,13 @@ class TalentProfile {
   final List<WorkExperience> experiences;
   final List<Certification> certifications;
   final List<Language> languages;
+
+  /// Hasta cuándo el perfil aparece destacado en la búsqueda de talento
+  /// (`PROFILE_HIGHLIGHT`); `null` o una fecha pasada = sin destacar.
+  final DateTime? highlightedUntil;
+
+  bool get isHighlighted =>
+      highlightedUntil != null && highlightedUntil!.isAfter(DateTime.now());
 
   factory TalentProfile.fromJson(Map<String, dynamic> json) => TalentProfile(
     id: json['id'] as String,
@@ -253,6 +261,9 @@ class TalentProfile {
     languages: (json['languages'] as List<dynamic>? ?? const [])
         .map((value) => Language.fromJson(value as Map<String, dynamic>))
         .toList(growable: false),
+    highlightedUntil: json['highlightedUntil'] is String
+        ? DateTime.tryParse(json['highlightedUntil'] as String)
+        : null,
   );
 
   TalentProfile copyWith({CvDocument? cv, ProfilePhoto? photo}) =>
@@ -280,6 +291,7 @@ class TalentProfile {
         experiences: experiences,
         certifications: certifications,
         languages: languages,
+        highlightedUntil: highlightedUntil,
       );
 }
 

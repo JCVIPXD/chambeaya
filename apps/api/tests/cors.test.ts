@@ -38,6 +38,18 @@ describe('CORS por entorno (resolveCorsOptions vía createApp)', () => {
     expect(response.headers['access-control-allow-origin']).toBe('*');
   });
 
+  it('expone Retry-After al navegador (el panel lo lee en el 503 de reintentos agotados)', async () => {
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    process.env.NODE_ENV = 'test';
+    const open = await request(createApp({ authService: new LocalAuthService() })).get('/api/health').set('Origin', 'https://cualquier-origen.example');
+    expect(open.headers['access-control-expose-headers']).toBe('Retry-After');
+
+    process.env.CORS_ALLOWED_ORIGINS = 'https://panel.example';
+    const restricted = await request(createApp({ authService: new LocalAuthService() })).get('/api/health').set('Origin', 'https://panel.example');
+    expect(restricted.headers['access-control-allow-origin']).toBe('https://panel.example');
+    expect(restricted.headers['access-control-expose-headers']).toBe('Retry-After');
+  });
+
   it('bloquea todos los orígenes en producción cuando CORS_ALLOWED_ORIGINS no está definida', async () => {
     delete process.env.CORS_ALLOWED_ORIGINS;
     process.env.NODE_ENV = 'production';
